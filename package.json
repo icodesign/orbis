@@ -1,0 +1,22 @@
+{
+  "name": "orbis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "pnpm run check:core",
+    "check:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run check && pnpm --filter @orbis/remote-dsh run check:core",
+    "build:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run build && pnpm --filter @orbis/remote-dsh run build:core",
+    "typecheck:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run typecheck && pnpm --filter @orbis/remote-dsh run typecheck:core",
+    "test:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run test && pnpm --filter @orbis/remote-dsh run test:core",
+    "check:dsh": "pnpm --filter @orbis/remote-dsh run check",
+    "serve:dsh": "node --import tsx packages/orbis-remote-dsh/scripts/serve-dsh-web.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.21.0"
+}

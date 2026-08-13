@@ -1,0 +1,25 @@
+{
+  "name": "@orbis/remote-agent-node-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run typecheck && pnpm run test",
+    "test": "vitest run src",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+  },
+  "dependencies": {
+    "@orbis/orbis-agent-backend": "workspace:*",
+    "@orbis/remote-agent-protocol": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "rc",
+    "vitest": "^4.1.10"
+  }
+}

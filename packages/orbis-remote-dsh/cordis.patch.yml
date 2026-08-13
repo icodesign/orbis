@@ -1,0 +1,8 @@
+- id: directory-picker
+  disabled: true
+- insert:
+    - id: directory-picker-browse
+      name: "@deepseek-ai/dsh-host-directory-picker-browse"
+- insert:
+    - id: orbis-remote
+      name: "@orbis/remote-dsh"

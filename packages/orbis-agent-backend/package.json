@@ -1,0 +1,21 @@
+{
+  "name": "@orbis/orbis-agent-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testkit": "./src/testkit.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run typecheck && pnpm run test",
+    "test": "vitest run src",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "rc",
+    "vitest": "^4.1.10"
+  }
+}

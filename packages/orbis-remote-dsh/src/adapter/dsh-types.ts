@@ -1,0 +1,202 @@
+/**
+ * Structural ports for the fixed DSH host runtime. Keeping these interfaces
+ * here means the generic backend does not import Cordis or DSH implementation
+ * packages; the DSH bundle is the sole runtime composition point.
+ */
+
+export type DshWorkspaceId = string & { readonly __dshWorkspaceId: unique symbol };
+
+export interface DshSessionHeader {
+  readonly createdAt: number;
+  readonly cwd?: string;
+  readonly id: unknown;
+}
+
+/**
+ * A lightweight durable-catalog row. It intentionally carries no transcript
+ * events: listing a server must remain independent of whether every historical
+ * log can be projected by the current adapter.
+ */
+export interface DshSessionCatalogEntry {
+  readonly createdAt: number;
+  readonly id: unknown;
+  /** Optional log-folded title supplied by the DSH session-query service. */
+  readonly title?: string;
+  readonly updatedAt: number;
+}
+
+export interface DshSessionEvent {
+  readonly data: unknown;
+  readonly seq: number;
+  readonly time: number;
+  readonly type: string;
+}
+
+export interface DshSession {
+  readonly events: readonly DshSessionEvent[];
+  readonly header: DshSessionHeader;
+  readonly id: unknown;
+}
+
+export interface DshSessionInspection {
+  readonly events: readonly DshSessionEvent[];
+  readonly meta: DshSessionHeader;
+}
+
+/** DSH's durable session catalog and append-only history seam. */
+export interface DshSessionPersistence {
+  inspect(id: unknown, signal?: AbortSignal): Promise<DshSessionInspection>;
+  list(signal?: AbortSignal): Promise<readonly DshSessionHeader[]>;
+  locate?(header: DshSessionHeader): { readonly path: string } | undefined;
+}
+
+export interface DshUserMessage {
+  readonly content?: readonly unknown[];
+  readonly id: unknown;
+}
+
+export interface DshInbox {
+  readonly nextStep: readonly DshUserMessage[];
+  readonly nextTurn: readonly DshUserMessage[];
+}
+
+export interface DshAgentOptions {
+  readonly maxTokens?: number;
+  readonly model?: string;
+  readonly provider?: string;
+}
+
+export interface DshModelCatalogModel {
+  readonly description?: string;
+  readonly id: string;
+  readonly name: string;
+  readonly reasoning?: DshModelReasoning;
+}
+
+export interface DshModelReasoningEffort {
+  readonly description?: string;
+  readonly id: string;
+  readonly name: string;
+}
+
+export interface DshModelReasoning {
+  readonly defaultEffort?: string;
+  readonly efforts: readonly DshModelReasoningEffort[];
+}
+
+export interface DshModelProviderGroup {
+  readonly id: string;
+  readonly models: readonly DshModelCatalogModel[];
+  readonly name: string;
+}
+
+export interface DshModelTarget {
+  readonly model: string;
+  readonly provider: string;
+  readonly reasoningEffort?: string;
+}
+
+export interface DshApiError {
+  readonly code: string;
+  readonly message: string;
+}
+
+export interface DshApiResponse<T> {
+  readonly result:
+    | { readonly ok: true; readonly value: T }
+    | { readonly ok: false; readonly error: DshApiError };
+  readonly rpcId: string;
+}
+
+/** Public DSH gateway seam shared by Web and other interactive front doors. */
+export interface DshApiProxy {
+  readonly llm: {
+    models(request: { readonly payload: {}; readonly rpcId: string }): Promise<
+      DshApiResponse<{
+        readonly failures: readonly DshApiError[];
+        readonly groups: readonly DshModelProviderGroup[];
+      }>
+    >;
+  };
+  readonly sessions: {
+    models(request: {
+      readonly payload: { readonly sessionId: unknown };
+      readonly rpcId: string;
+    }): Promise<DshApiResponse<{ readonly current: DshModelTarget }>>;
+    selectModel(request: {
+      readonly payload: {
+        readonly model: string;
+        readonly provider: string;
+        readonly reasoningEffort?: string;
+        readonly sessionId: unknown;
+      };
+      readonly rpcId: string;
+    }): Promise<DshApiResponse<{ readonly selected: DshModelTarget }>>;
+  };
+}
+
+export interface DshAgent {
+  readonly inbox: DshInbox;
+  readonly id: unknown;
+  readonly options: DshAgentOptions;
+  readonly session: DshSession;
+  readonly status: "idle" | "running";
+  cancel(cause: { readonly kind: "user" }, options?: { readonly keepInbox?: boolean }): void;
+  followup(message: DshUserMessage): void;
+  steer(message: DshUserMessage): void;
+}
+
+export interface DshAgentHandle {
+  readonly agent: DshAgent;
+  dispose(): Promise<void>;
+}
+
+export interface DshAgentRegistry {
+  create(options: {
+    readonly agentOptions?: DshAgentOptions;
+    readonly meta: { readonly cwd: string };
+    readonly sessionId: unknown;
+    readonly signal?: AbortSignal;
+  }): Promise<DshAgentHandle>;
+  get(id: unknown): DshAgent | undefined;
+  resume(options: {
+    readonly agentOptions?: DshAgentOptions;
+    readonly resumeSessionId: unknown;
+    readonly signal?: AbortSignal;
+  }): Promise<DshAgentHandle>;
+}
+
+export interface DshWorkspace {
+  readonly id: DshWorkspaceId;
+  readonly path: string;
+  readonly sessionIds?: readonly unknown[];
+  readonly title: string;
+  attachSession(sessionId: unknown): Promise<void>;
+}
+
+export interface DshWorkspaceRegistry {
+  get(id: DshWorkspaceId): DshWorkspace | undefined;
+  list(): readonly DshWorkspace[];
+}
+
+export interface DshAgentInboxEvent {
+  readonly agent: DshAgent;
+  readonly message: DshUserMessage;
+  readonly turn?: number;
+}
+
+export interface DshContext {
+  /** Present when DSH's shared Web/API gateway owns session model targets. */
+  readonly apiProxy?: DshApiProxy;
+  readonly agents: DshAgentRegistry;
+  readonly sessionPersistence: DshSessionPersistence;
+  readonly workspace: DshWorkspaceRegistry;
+  on(
+    event: "session/event",
+    listener: (session: DshSession, event: DshSessionEvent) => void,
+  ): () => void;
+  on(
+    event: "agent/inbox/inserted" | "agent/inbox/claimed" | "agent/inbox/discarded",
+    listener: (event: DshAgentInboxEvent) => void,
+  ): () => void;
+}

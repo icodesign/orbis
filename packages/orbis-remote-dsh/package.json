@@ -1,0 +1,158 @@
+{
+  "name": "@orbis/remote-dsh",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orbis E2EE remote host bundle for DeepSeek Harness",
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "setup:dsh": "tsx scripts/setup-dsh-peers.ts",
+    "build": "pnpm run setup:dsh && tsx scripts/build.ts",
+    "build:core": "tsc -p tsconfig.core.json --noEmit",
+    "e2e:real": "tsx scripts/real-profile-e2e.ts",
+    "serve:dsh": "node --import tsx scripts/serve-dsh-web.ts",
+    "check": "pnpm run build && pnpm run typecheck && pnpm run test",
+    "check:core": "pnpm run typecheck:core && pnpm run test:core",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "typecheck:core": "tsc -p tsconfig.core.json --noEmit && tsc -p tsconfig.core.test.json --noEmit",
+    "test": "vitest run src scripts/real-profile-e2e-utils.test.ts",
+    "test:core": "vitest run src/adapter src/host"
+  },
+  "dependencies": {
+    "@orbis/orbis-agent-backend": "workspace:*",
+    "@orbis/remote-agent-node-store": "workspace:*",
+    "@orbis/remote-agent-protocol": "workspace:*",
+    "@orbis/transport": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.0",
+    "esbuild": "^0.28.2",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.6",
+    "tsx": "^4.23.12",
+    "typescript": "rc",
+    "vitest": "^4.1.10",
+    "ws": "^8.21.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1-rc.1",
+    "@deepseek-ai/dsh-agent": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-client-runtime": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-home-paths": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-host-apiproxy": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-host-directory-picker": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-host-directory-picker-browse": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-session": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-session-projection-cache": "^0.0.1-rc.2",
+    "@deepseek-ai/dsh-workspace": "^0.0.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1-rc.1",
+    "react": "^18.2.0 || ^19.0.0",
+    "react-dom": "^18.2.0 || ^19.0.0",
+    "ws": "^8.21.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-credentials": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-apiproxy": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-directory-picker": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-directory-picker-browse": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session-persistence": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session-projection-cache": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-workspace": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "ws": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  }
+}
