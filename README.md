@@ -38,3 +38,44 @@ pnpm run serve:dsh --port 3090
 pnpm run serve:dsh --workspace-root /path/to/workspace
 pnpm run serve:dsh --help
 ```
+
+## Testing
+
+```sh
+pnpm run check:core   # typecheck + tests for everything that builds from this repository alone
+pnpm run check:dsh    # also typechecks the plugin and client entry points, needs a DSH checkout
+```
+
+CI runs `check:core` on every push and every pull request, and again before a release.
+`check:dsh` is a local command: it typechecks against `@deepseek-ai/*` sources, which are only
+available from a DSH checkout pointed at by `ORBIS_DSH_HARNESS_DIR`.
+
+## Releasing
+
+Releases are driven by [Changesets](https://github.com/changesets/changesets). Ship every
+user-visible change with a changeset and commit it alongside the change:
+
+```sh
+pnpm changeset
+```
+
+The five workspace packages form one fixed version group, because `@orbis/remote-dsh` inlines the
+other four at build time. A changeset for any of them versions and releases all five together.
+Only `@orbis/remote-dsh` is published to npm; the rest are private and are versioned only.
+
+Every push to `main` runs the tests and then opens or updates a **Version packages** pull request
+that applies the pending changesets and writes the changelogs. Merging that pull request builds the
+bundle and publishes `@orbis/remote-dsh` to npm. This needs an `NPM_TOKEN` repository secret with
+publish rights on the `@orbis` scope.
+
+To release by hand from a clean checkout of `main`:
+
+```sh
+pnpm install
+pnpm run version:packages   # apply changesets, then commit the result
+pnpm run release            # build the bundle and publish to npm
+```
+
+## License
+
+[Apache-2.0](./LICENSE)

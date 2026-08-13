@@ -1,8 +1,24 @@
 {
   "name": "@orbis/remote-dsh",
   "version": "0.1.0",
-  "private": true,
+  "license": "Apache-2.0",
   "description": "Orbis remote plugin for DeepSeek Harness",
+  "keywords": [
+    "orbis",
+    "dsh",
+    "deepseek-harness",
+    "remote"
+  ],
+  "homepage": "https://github.com/dsh-external/orbis#readme",
+  "bugs": "https://github.com/dsh-external/orbis/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-external/orbis.git",
+    "directory": "packages/orbis-remote-dsh"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "cordis.patch.yml",
@@ -17,8 +33,10 @@
   },
   "scripts": {
     "setup:dsh": "tsx scripts/setup-dsh-peers.ts",
-    "build": "pnpm run setup:dsh && tsx scripts/build.ts",
+    "bundle": "tsx scripts/build.ts",
+    "build": "pnpm run setup:dsh && pnpm run bundle",
     "build:core": "tsc -p tsconfig.core.json --noEmit",
+    "prepack": "pnpm run bundle",
     "e2e:real": "tsx scripts/real-profile-e2e.ts",
     "serve:dsh": "node --import tsx scripts/serve-dsh-web.ts",
     "check": "pnpm run build && pnpm run typecheck && pnpm run test",
@@ -28,13 +46,11 @@
     "test": "vitest run src scripts/real-profile-e2e-utils.test.ts",
     "test:core": "vitest run src/adapter src/host"
   },
-  "dependencies": {
+  "devDependencies": {
     "@orbis/orbis-agent-backend": "workspace:*",
     "@orbis/remote-agent-node-store": "workspace:*",
     "@orbis/remote-agent-protocol": "workspace:*",
-    "@orbis/transport": "workspace:*"
-  },
-  "devDependencies": {
+    "@orbis/transport": "workspace:*",
     "@types/node": "24.x",
     "@types/react": "^19.2.14",
     "@types/ws": "^8.18.0",

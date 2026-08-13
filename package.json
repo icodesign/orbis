@@ -1,6 +1,7 @@
 {
   "name": "orbis",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,9 +11,14 @@
     "typecheck:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run typecheck && pnpm --filter @orbis/remote-dsh run typecheck:core",
     "test:core": "pnpm --filter @orbis/orbis-agent-backend --filter @orbis/transport --filter @orbis/remote-agent-protocol --filter @orbis/remote-agent-node-store run test && pnpm --filter @orbis/remote-dsh run test:core",
     "check:dsh": "pnpm --filter @orbis/remote-dsh run check",
-    "serve:dsh": "node --import tsx packages/orbis-remote-dsh/scripts/serve-dsh-web.ts"
+    "serve:dsh": "node --import tsx packages/orbis-remote-dsh/scripts/serve-dsh-web.ts",
+    "bundle": "pnpm --filter @orbis/remote-dsh run bundle",
+    "changeset": "changeset",
+    "version:packages": "changeset version",
+    "release": "changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.0",
     "tsx": "^4.23.12"
   },
   "engines": {

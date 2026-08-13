@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
+  "changelog": "@changesets/cli/changelog",
+  "commit": false,
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "privatePackages": { "version": true, "tag": false },
+  "fixed": [
+    [
+      "@orbis/orbis-agent-backend",
+      "@orbis/remote-agent-node-store",
+      "@orbis/remote-agent-protocol",
+      "@orbis/transport",
+      "@orbis/remote-dsh"
+    ]
+  ],
+  "linked": [],
+  "ignore": []
+}
