@@ -1,6 +1,6 @@
 # Orbis DSH Remote
 
-`@orbis/remote-dsh` is the DeepSeek Harness Web bundle for the Orbis remote
+`@orbisapp/remote-dsh` is the DeepSeek Harness Web bundle for the Orbis remote
 DSH host. It lives entirely in this repository, does not modify the DeepSeek
 Harness source tree, and contains the DSH adapter, remote host composition,
 plugin lifecycle, and Web settings client as internal modules of one package.
@@ -43,7 +43,7 @@ traversal.
 ```sh
 cd public
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbis/remote-dsh run build
+ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbisapp/remote-dsh run build
 dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
 DSH_TELEMETRY_DISABLED=1 dsh web
 ```
@@ -59,16 +59,16 @@ repository.
 Adapter and host tests do not require the DSH SDK:
 
 ```sh
-pnpm --filter @orbis/remote-dsh run check:core
+pnpm --filter @orbisapp/remote-dsh run check:core
 ```
 
 For a local smoke check before installing the profile link:
 
 ```sh
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbis/remote-dsh run check
+ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbisapp/remote-dsh run check
 dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
-dsh plugin --profile web why @orbis/remote-dsh
+dsh plugin --profile web why @orbisapp/remote-dsh
 ```
 
 The package also provides a one-command local Web launcher. It installs and builds
@@ -93,9 +93,9 @@ pnpm run serve:dsh --workspace-root /path/to/workspace
 
 Before refreshing the local plugin link, the launcher runs the active pnpm in
 the existing Web profile. This safely realigns a profile created by an older
-pnpm store version. It also removes the former development package name
-`@orbis/dsh-orbis-remote`, so the old and current Orbis bundles cannot load
-together. The launcher probes available Node executables and selects one that
+pnpm store version. It also removes the former development package names
+`@orbis/dsh-orbis-remote` and `@orbis/remote-dsh`, so obsolete and current Orbis
+bundles cannot load together. The launcher probes available Node executables and selects one that
 can safely refresh DSH's generated profile links; override it explicitly with
 `--node-bin` or `ORBIS_DSH_NODE_BIN` when needed.
 
@@ -103,7 +103,7 @@ Open `http://127.0.0.1:3080`, then choose **Settings → Plugins → Orbis**. St
 launcher with Ctrl-C. DSH Web must remain on `127.0.0.1`; the Orbis data-plane
 listener binds all network interfaces separately.
 
-`dsh plugin --profile web why @orbis/remote-dsh` prints the active local
+`dsh plugin --profile web why @orbisapp/remote-dsh` prints the active local
 package. Re-running `add` refreshes the profile link to the current build while
 keeping the Harness-owned peer packages visible; a package version bump is not
 required during local development.

@@ -58,7 +58,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # Opens (or updates) a "Version packages" pull request while changesets are
-      # pending, and publishes @orbis/remote-dsh to npm once that PR is merged.
+      # pending, and publishes @orbisapp/remote-dsh to npm once that PR is merged.
       # `prepack` rebuilds dist/ from the released commit before it is packed.
       - uses: changesets/action@v1
         with:

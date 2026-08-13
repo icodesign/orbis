@@ -1,4 +1,4 @@
-import { jsonValueSchema } from "@orbis/transport";
+import { jsonValueSchema } from "@orbisapp/transport";
 import { z } from "zod";
 
 const nonEmptyString = z.string().min(1);

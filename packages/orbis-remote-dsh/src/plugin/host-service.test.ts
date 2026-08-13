@@ -10,7 +10,7 @@ import {
   OrbisRemoteConnection,
   parsePairingInvitation,
   type RemoteHostRequestHandler,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 import { describe, expect, test } from "vitest";
 
 import {

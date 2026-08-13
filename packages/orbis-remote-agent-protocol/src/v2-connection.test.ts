@@ -4,12 +4,12 @@ import {
   agentTimestamp,
   createAgentSessionRef,
   type AgentJsonValue,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import {
   OrbisTransportError,
   type JsonValue,
   type TransportEvent,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import { OrbisRemoteAgentV2Connection } from "./v2-connection";
 import {

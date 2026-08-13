@@ -4,7 +4,7 @@ import type {
   WebSocketEventType,
   WebSocketFactory,
   WebSocketLike,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 import { WebSocket as NodeWsSocket } from "ws";
 
 type Listener = (...args: unknown[]) => void;

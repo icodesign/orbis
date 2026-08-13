@@ -19,14 +19,14 @@ import {
   type AgentWorkspaceDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import {
   isOrbisTransportError,
   jsonValueSchema,
   type JsonValue,
   type OrbisRemoteConnection,
   type TransportEvent,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import { ORBIS_REMOTE_AGENT_V2_EVENT_TYPE, ORBIS_REMOTE_AGENT_V2_METHODS } from "./v2-constants";
 import {

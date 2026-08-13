@@ -11,7 +11,7 @@ import {
   type SecureRandom,
   type SerializedDeviceIdentity,
   type TransportCapabilities,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 import type { WebSocket as NodeWsSocket, WebSocketServer as NodeWsServer } from "ws";
 
 import { adaptNodeWebSocket } from "./node-websocket";

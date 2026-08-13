@@ -8,11 +8,11 @@
   "privatePackages": { "version": true, "tag": false },
   "fixed": [
     [
-      "@orbis/orbis-agent-backend",
-      "@orbis/remote-agent-node-store",
-      "@orbis/remote-agent-protocol",
-      "@orbis/transport",
-      "@orbis/remote-dsh"
+      "@orbisapp/orbis-agent-backend",
+      "@orbisapp/remote-agent-node-store",
+      "@orbisapp/remote-agent-protocol",
+      "@orbisapp/transport",
+      "@orbisapp/remote-dsh"
     ]
   ],
   "linked": [],

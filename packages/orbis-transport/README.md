@@ -1,4 +1,4 @@
-# `@orbis/transport`
+# `@orbisapp/transport`
 
 Harness-neutral pairing, endpoint discovery, and end-to-end encrypted WebSocket transport for Orbis
 clients and remote hosts.
@@ -107,6 +107,6 @@ await router.open({
 ## Validation
 
 ```sh
-pnpm --filter @orbis/transport run typecheck
-pnpm --filter @orbis/transport run test
+pnpm --filter @orbisapp/transport run typecheck
+pnpm --filter @orbisapp/transport run test
 ```

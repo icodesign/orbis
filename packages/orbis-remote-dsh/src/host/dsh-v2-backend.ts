@@ -16,7 +16,7 @@ import {
   type AgentSessionStatePatch,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import { DshLocalBackend, type DshLocalSessionRuntime } from "../adapter";
 import type {
   RemoteAgentV2Backend,
@@ -32,7 +32,7 @@ import type {
   RemoteAgentV2SessionState,
   RemoteAgentV2SessionStatePatch,
   RemoteAgentV2SessionSummary,
-} from "@orbis/remote-agent-protocol";
+} from "@orbisapp/remote-agent-protocol";
 
 const DSH_HOST_BACKEND_ID = agentBackendId("dsh-host");
 

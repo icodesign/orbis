@@ -22,7 +22,7 @@ import {
   type AgentTimestamp,
   type AgentToolEntry,
   type AgentUsage,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 
 import type { DshSessionEvent, DshSessionInspection } from "./dsh-types";
 

@@ -8,7 +8,7 @@ import type {
   AgentWorkspaceDescriptor,
   AgentWorkspaceFolderListing,
   AgentWorkspaceRegisterResult,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import type {
   AgentBackendId,
   AgentDeliveryCursor,
@@ -16,7 +16,7 @@ import type {
   AgentEventId,
   AgentRunId,
   AgentTimestamp,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 
 import type { RemoteAgentHostPeer, RemoteAgentHostRequestContext } from "./host";
 
@@ -386,7 +386,7 @@ export interface RemoteAgentV2Delivery {
     | { readonly kind: "host" }
     | { readonly kind: "session"; readonly ref: AgentSessionRef };
   readonly event: RemoteAgentV2Event;
-  readonly transportEvent: import("@orbis/transport").TransportEvent;
+  readonly transportEvent: import("@orbisapp/transport").TransportEvent;
 }
 
 export interface RemoteAgentV2HostRequestContext extends RemoteAgentHostRequestContext {

@@ -14,7 +14,7 @@ Orbis 插件包含设备配对、端到端加密传输、多端实时更新等�
 2. 安装 Orbis 插件到 DSH。
 
 ```sh
-dsh plugin --profile web add @orbis/remote-dsh  // 公测后发布才可用
+dsh plugin --profile web add @orbisapp/remote-dsh  // 公测后发布才可用
 ```
 
 3. 在 DSH web 插件页面配置相关信息以及配对。
@@ -57,13 +57,13 @@ CI 在每次 push、每个 PR 以及发布前都会运行 `check:core`。`check:
 pnpm changeset
 ```
 
-仓库中的五个包组成一个固定版本组（fixed group），因为 `@orbis/remote-dsh` 在构建时会把另外四个
+仓库中的五个包组成一个固定版本组（fixed group），因为 `@orbisapp/remote-dsh` 在构建时会把另外四个
 包打进产物。因此任意一个包的 changeset 都会让五个包一起升版本、一起发布。其中只有
-`@orbis/remote-dsh` 会发布到 npm，其余四个是私有包，只升版本不发布。
+`@orbisapp/remote-dsh` 会发布到 npm，其余四个是私有包，只升版本不发布。
 
 每次推送到 `main` 都会先跑测试，然后创建或更新一个 **Version packages** PR，其中应用了待发布的
-changeset 并生成 changelog。合并该 PR 即会构建产物并把 `@orbis/remote-dsh` 发布到 npm。这需要在
-仓库 secrets 中配置有 `@orbis` scope 发布权限的 `NPM_TOKEN`。
+changeset 并生成 changelog。合并该 PR 即会构建产物并把 `@orbisapp/remote-dsh` 发布到 npm。这需要在
+仓库 secrets 中配置有 `@orbisapp` scope 发布权限的 `NPM_TOKEN`。
 
 如果需要手动发布，在干净的 `main` 检出上执行：
 

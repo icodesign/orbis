@@ -1,4 +1,4 @@
-# `@orbis/remote-agent-node-store`
+# `@orbisapp/remote-agent-node-store`
 
 This package contains the host-side file stores for the remote agent protocol.
 The DSH host and the mobile v2 path use `NodeFileRemoteAgentV2HostStore`:
@@ -11,7 +11,7 @@ It never stores transcript payloads, per-device ACK watermarks, or a replay
 event log. DSH's native `sessionPersistence` remains the transcript authority.
 
 ```ts
-import { NodeFileRemoteAgentV2HostStore } from "@orbis/remote-agent-node-store";
+import { NodeFileRemoteAgentV2HostStore } from "@orbisapp/remote-agent-node-store";
 
 const store = new NodeFileRemoteAgentV2HostStore({
   hostId: "host-a",

@@ -1,11 +1,11 @@
-import { AgentBackendError, isAgentBackendError } from "@orbis/orbis-agent-backend";
+import { AgentBackendError, isAgentBackendError } from "@orbisapp/orbis-agent-backend";
 import {
   OrbisTransportError,
   type JsonValue,
   type OrbisRemoteHostConnection,
   type RemoteHostPeer,
   type RemoteHostRequestHandler,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import {
   createRemoteAgentHostPeer,

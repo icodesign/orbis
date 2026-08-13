@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { agentDriverId } from "@orbis/orbis-agent-backend";
+import { agentDriverId } from "@orbisapp/orbis-agent-backend";
 import type {
   DshAgent,
   DshAgentInboxEvent,
@@ -16,13 +16,13 @@ import {
   ORBIS_REMOTE_AGENT_V2_METHODS,
   OrbisRemoteAgentV2Connection,
   type RemoteAgentV2Delivery,
-} from "@orbis/remote-agent-protocol";
+} from "@orbisapp/remote-agent-protocol";
 import type {
   JsonValue,
   RemoteHostPeer,
   TransportEvent,
   WebSocketEvent,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import { OrbisRemoteDshHost } from "./orbis-remote-dsh-host";
 

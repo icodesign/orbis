@@ -1,5 +1,5 @@
 {
-  "name": "@orbis/remote-dsh",
+  "name": "@orbisapp/remote-dsh",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "Orbis remote plugin for DeepSeek Harness",
@@ -47,10 +47,10 @@
     "test:core": "vitest run src/adapter src/host"
   },
   "devDependencies": {
-    "@orbis/orbis-agent-backend": "workspace:*",
-    "@orbis/remote-agent-node-store": "workspace:*",
-    "@orbis/remote-agent-protocol": "workspace:*",
-    "@orbis/transport": "workspace:*",
+    "@orbisapp/orbis-agent-backend": "workspace:*",
+    "@orbisapp/remote-agent-node-store": "workspace:*",
+    "@orbisapp/remote-agent-protocol": "workspace:*",
+    "@orbisapp/transport": "workspace:*",
     "@types/node": "24.x",
     "@types/react": "^19.2.14",
     "@types/ws": "^8.18.0",

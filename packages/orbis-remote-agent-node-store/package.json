@@ -1,5 +1,5 @@
 {
-  "name": "@orbis/remote-agent-node-store",
+  "name": "@orbisapp/remote-agent-node-store",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -14,8 +14,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
-    "@orbis/orbis-agent-backend": "workspace:*",
-    "@orbis/remote-agent-protocol": "workspace:*",
+    "@orbisapp/orbis-agent-backend": "workspace:*",
+    "@orbisapp/remote-agent-protocol": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -2,7 +2,7 @@ import type {
   OrbisRemoteHostConnection,
   RemoteHostPeer,
   TransportEvent,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 export interface RemoteAgentHostPeer {
   /** Stable paired-device identity used for v2 subscriptions and idempotency. */

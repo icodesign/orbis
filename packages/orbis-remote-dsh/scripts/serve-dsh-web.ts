@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_DSH_HOME = join(homedir(), ".dsh");
 const DSH_PROFILE = "web";
-const LEGACY_PACKAGE_NAME = "@orbis/dsh-orbis-remote";
-const PACKAGE_NAME = "@orbis/remote-dsh";
+const OBSOLETE_PACKAGE_NAMES = ["@orbis/dsh-orbis-remote", "@orbis/remote-dsh"] as const;
+const PACKAGE_NAME = "@orbisapp/remote-dsh";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3080;
 
@@ -344,7 +344,7 @@ async function main(): Promise<void> {
         environment,
       );
     }
-    for (const packageName of [LEGACY_PACKAGE_NAME, PACKAGE_NAME]) {
+    for (const packageName of [...OBSOLETE_PACKAGE_NAMES, PACKAGE_NAME]) {
       if (!existingDependencies?.has(packageName)) continue;
       await runCommand(
         options.dsh,

@@ -6,7 +6,7 @@ import {
   createAgentSessionRef,
   type AgentSessionEvent,
   type AgentTimestamp,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 
 import { DshLocalBackend } from "./dsh-local-backend";
 import type {

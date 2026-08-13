@@ -10,14 +10,14 @@ import {
   createAgentSessionRef,
   isSameAgentSessionRef,
   type AgentSessionRef,
-} from "@orbis/orbis-agent-backend";
-import type { AgentJsonValue } from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
+import type { AgentJsonValue } from "@orbisapp/orbis-agent-backend";
 import {
   type RemoteAgentV2HostStore,
   type RemoteAgentV2IdempotencyClaim,
   type RemoteAgentV2StoredEntryIndex,
   type RemoteAgentV2StoredSessionIndex,
-} from "@orbis/remote-agent-protocol";
+} from "@orbisapp/remote-agent-protocol";
 import { z } from "zod";
 
 const STORE_VERSION = 2 as const;

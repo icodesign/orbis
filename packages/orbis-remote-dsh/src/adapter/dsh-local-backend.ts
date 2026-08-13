@@ -43,7 +43,7 @@ import {
   type AgentSessionUpdateInput,
   type AgentSessionUpdateResult,
   type AgentTimestamp,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 
 import {
   DshSessionEntryProjector,

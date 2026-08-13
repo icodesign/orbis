@@ -1,4 +1,4 @@
-import { ORBIS_REMOTE_SCOPES } from "@orbis/transport";
+import { ORBIS_REMOTE_SCOPES } from "@orbisapp/transport";
 
 export const ORBIS_REMOTE_AGENT_V2_PROTOCOL_VERSION = 2 as const;
 export const ORBIS_REMOTE_AGENT_V2_EVENT_TYPE = "orbis.event" as const;

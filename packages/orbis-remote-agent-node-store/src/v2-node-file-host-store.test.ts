@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { agentDeliveryCursor, createAgentSessionRef } from "@orbis/orbis-agent-backend";
+import { agentDeliveryCursor, createAgentSessionRef } from "@orbisapp/orbis-agent-backend";
 
 import { NodeFileRemoteAgentV2HostStore } from "./v2-node-file-host-store";
 

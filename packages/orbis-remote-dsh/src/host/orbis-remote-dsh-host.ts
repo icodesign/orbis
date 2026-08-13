@@ -1,17 +1,17 @@
 import {
   AgentBackendError,
   type AgentBackendError as AgentBackendErrorValue,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import {
   NodeFileRemoteAgentV2HostStore,
   type NodeFileRemoteAgentV2HostStoreOptions,
-} from "@orbis/remote-agent-node-store";
+} from "@orbisapp/remote-agent-node-store";
 import {
   OrbisRemoteAgentV2Host,
   OrbisRemoteAgentV2HostTransport,
   createRemoteAgentV2HostRequestHandler,
-} from "@orbis/remote-agent-protocol";
-import type { OrbisRemoteHostConnection, RemoteHostRequestHandler } from "@orbis/transport";
+} from "@orbisapp/remote-agent-protocol";
+import type { OrbisRemoteHostConnection, RemoteHostRequestHandler } from "@orbisapp/transport";
 
 import { DshLocalBackend, type DshLocalBackendOptions } from "../adapter";
 import { DshRemoteV2Backend, type DshRemoteWorkspaceProvider } from "./dsh-v2-backend";

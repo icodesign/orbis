@@ -14,12 +14,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createOrbisRemoteAgentV2Connection } from "@orbis/remote-agent-protocol";
+import { createOrbisRemoteAgentV2Connection } from "@orbisapp/remote-agent-protocol";
 import {
   generateDeviceIdentity,
   OrbisRemoteConnection,
   parsePairingInvitation,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import { createNodeWebSocketFactory } from "../src/node-websocket.ts";
 import { delay, waitFor } from "./real-profile-e2e-utils.ts";

@@ -1,5 +1,5 @@
 ---
-"@orbis/remote-dsh": major
+"@orbisapp/remote-dsh": major
 ---
 
 Initial beta release

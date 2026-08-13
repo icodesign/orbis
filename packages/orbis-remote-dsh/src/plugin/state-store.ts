@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { remoteScopeModeSchema, type RemoteScopeMode } from "@orbis/transport";
+import { remoteScopeModeSchema, type RemoteScopeMode } from "@orbisapp/transport";
 
 export interface OrbisDshPeer {
   readonly keyId: string;

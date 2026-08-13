@@ -10,7 +10,7 @@ import {
   type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import type { DshRemoteWorkspaceProvider } from "../host";
 
 const TOKEN_PREFIX = "folder.v1";

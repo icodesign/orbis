@@ -29,10 +29,10 @@ importers:
 
   packages/orbis-remote-agent-node-store:
     dependencies:
-      '@orbis/orbis-agent-backend':
+      '@orbisapp/orbis-agent-backend':
         specifier: workspace:*
         version: link:../orbis-agent-backend
-      '@orbis/remote-agent-protocol':
+      '@orbisapp/remote-agent-protocol':
         specifier: workspace:*
         version: link:../orbis-remote-agent-protocol
       zod:
@@ -51,10 +51,10 @@ importers:
 
   packages/orbis-remote-agent-protocol:
     dependencies:
-      '@orbis/orbis-agent-backend':
+      '@orbisapp/orbis-agent-backend':
         specifier: workspace:*
         version: link:../orbis-agent-backend
-      '@orbis/transport':
+      '@orbisapp/transport':
         specifier: workspace:*
         version: link:../orbis-transport
       zod:
@@ -73,16 +73,16 @@ importers:
 
   packages/orbis-remote-dsh:
     devDependencies:
-      '@orbis/orbis-agent-backend':
+      '@orbisapp/orbis-agent-backend':
         specifier: workspace:*
         version: link:../orbis-agent-backend
-      '@orbis/remote-agent-node-store':
+      '@orbisapp/remote-agent-node-store':
         specifier: workspace:*
         version: link:../orbis-remote-agent-node-store
-      '@orbis/remote-agent-protocol':
+      '@orbisapp/remote-agent-protocol':
         specifier: workspace:*
         version: link:../orbis-remote-agent-protocol
-      '@orbis/transport':
+      '@orbisapp/transport':
         specifier: workspace:*
         version: link:../orbis-transport
       '@types/node':

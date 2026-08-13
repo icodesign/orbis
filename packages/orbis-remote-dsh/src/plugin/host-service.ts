@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { hostname, networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 
-import { ORBIS_REMOTE_AGENT_V2_METHOD_LIST } from "@orbis/remote-agent-protocol";
+import { ORBIS_REMOTE_AGENT_V2_METHOD_LIST } from "@orbisapp/remote-agent-protocol";
 import {
   createPairingSecret,
   generateDeviceIdentity,
@@ -25,7 +25,7 @@ import {
   type SecureHelloEnvelope,
   type SecureRandom,
   type SerializedDeviceIdentity,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import { ORBIS_DSH_DRIVER_VERSION, ORBIS_DSH_HARNESS_ID } from "./constants";
 import { OrbisDirectHostListener } from "./direct-listener";

@@ -14,13 +14,13 @@ import {
   type AgentDeliveryCursor,
   type AgentJsonValue,
   type AgentSessionRef,
-} from "@orbis/orbis-agent-backend";
+} from "@orbisapp/orbis-agent-backend";
 import {
   jsonValueSchema,
   OrbisTransportError,
   type JsonValue,
   type TransportEvent,
-} from "@orbis/transport";
+} from "@orbisapp/transport";
 
 import type {
   RemoteAgentHostDeliveryTransport,

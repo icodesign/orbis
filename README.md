@@ -15,7 +15,7 @@ updates across multiple devices.
 2. Install the Orbis plugin into DSH.
 
 ```sh
-dsh plugin --profile web add @orbis/remote-dsh  // available once published after the public beta
+dsh plugin --profile web add @orbisapp/remote-dsh  // available once published after the public beta
 ```
 
 3. Configure the plugin and pair your device from the DSH web plugin page.
@@ -59,14 +59,14 @@ user-visible change with a changeset and commit it alongside the change:
 pnpm changeset
 ```
 
-The five workspace packages form one fixed version group, because `@orbis/remote-dsh` inlines the
+The five workspace packages form one fixed version group, because `@orbisapp/remote-dsh` inlines the
 other four at build time. A changeset for any of them versions and releases all five together.
-Only `@orbis/remote-dsh` is published to npm; the rest are private and are versioned only.
+Only `@orbisapp/remote-dsh` is published to npm; the rest are private and are versioned only.
 
 Every push to `main` runs the tests and then opens or updates a **Version packages** pull request
 that applies the pending changesets and writes the changelogs. Merging that pull request builds the
-bundle and publishes `@orbis/remote-dsh` to npm. This needs an `NPM_TOKEN` repository secret with
-publish rights on the `@orbis` scope.
+bundle and publishes `@orbisapp/remote-dsh` to npm. This needs an `NPM_TOKEN` repository secret with
+publish rights on the `@orbisapp` scope.
 
 To release by hand from a clean checkout of `main`:
 

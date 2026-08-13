@@ -57,7 +57,7 @@ try {
     }),
     build({
       banner: {
-        js: 'window.__ModuleLoader__.load({ id: "@orbis/remote-dsh", factory: (require) => { var module = { exports: {} }; var exports = module.exports;',
+        js: 'window.__ModuleLoader__.load({ id: "@orbisapp/remote-dsh", factory: (require) => { var module = { exports: {} }; var exports = module.exports;',
       },
       bundle: true,
       define: {
