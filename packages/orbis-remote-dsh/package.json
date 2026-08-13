@@ -9,11 +9,11 @@
     "deepseek-harness",
     "remote"
   ],
-  "homepage": "https://github.com/dsh-external/orbis#readme",
-  "bugs": "https://github.com/dsh-external/orbis/issues",
+  "homepage": "https://github.com/icodesign/orbis#readme",
+  "bugs": "https://github.com/icodesign/orbis/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-external/orbis.git",
+    "url": "git+https://github.com/icodesign/orbis.git",
     "directory": "packages/orbis-remote-dsh"
   },
   "publishConfig": {

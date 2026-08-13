@@ -62,8 +62,7 @@ pnpm changeset
 `@orbisapp/remote-dsh` 会发布到 npm，其余四个是私有包，只升版本不发布。
 
 每次推送到 `main` 都会先跑测试，然后创建或更新一个 **Version packages** PR，其中应用了待发布的
-changeset 并生成 changelog。合并该 PR 即会构建产物并把 `@orbisapp/remote-dsh` 发布到 npm。这需要在
-仓库 secrets 中配置有 `@orbisapp` scope 发布权限的 `NPM_TOKEN`。
+changeset 并生成 changelog。合并该 PR 即会构建产物，并把 `@orbisapp/remote-dsh` 发布到 npm。
 
 如果需要手动发布，在干净的 `main` 检出上执行：
 

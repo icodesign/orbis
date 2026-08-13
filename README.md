@@ -65,8 +65,7 @@ Only `@orbisapp/remote-dsh` is published to npm; the rest are private and are ve
 
 Every push to `main` runs the tests and then opens or updates a **Version packages** pull request
 that applies the pending changesets and writes the changelogs. Merging that pull request builds the
-bundle and publishes `@orbisapp/remote-dsh` to npm. This needs an `NPM_TOKEN` repository secret with
-publish rights on the `@orbisapp` scope.
+bundle and publishes `@orbisapp/remote-dsh` to npm.
 
 To release by hand from a clean checkout of `main`:
 
