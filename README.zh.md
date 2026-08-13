@@ -14,7 +14,7 @@ Orbis 插件包含设备配对、端到端加密传输、多端实时更新等�
 2. 安装 Orbis 插件到 DSH。
 
 ```sh
-dsh plugin --profile web add @orbisapp/remote-dsh  // 公测后发布才可用
+npx @deepseek-ai/dsh plugin --profile web add @orbisapp/remote-dsh
 ```
 
 3. 在 DSH web 插件页面配置相关信息以及配对。
