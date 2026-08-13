@@ -2,7 +2,7 @@
   "name": "@orbis/remote-dsh",
   "version": "0.1.0",
   "private": true,
-  "description": "Orbis E2EE remote host bundle for DeepSeek Harness",
+  "description": "Orbis remote plugin for DeepSeek Harness",
   "files": [
     "dist",
     "cordis.patch.yml",
