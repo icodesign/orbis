@@ -11,7 +11,7 @@ updates across multiple devices.
 
 ## Getting Started
 
-1. Download the Orbis app. It is currently in beta. [Join Test](https://tally.so/r/A7RjzN)
+1. Download the Orbis app. It is currently in beta. [iOS: Join TesFlight](https://testflight.apple.com/join/3Nqcbpns). Android: Working in progress.
 2. Install the Orbis plugin into DSH.
 
 ```sh
