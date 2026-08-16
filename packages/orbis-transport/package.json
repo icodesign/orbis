@@ -1,11 +1,12 @@
 {
   "name": "@orbisapp/transport",
   "version": "0.1.0",
-  "license": "Apache-2.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./protocol-version": "./src/protocol-version.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",

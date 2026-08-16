@@ -1,8 +1,9 @@
 import { z } from "zod";
 
 import { hostEndpointManifestSchema } from "./endpoints";
+import { ORBIS_TRANSPORT_PROTOCOL_VERSION } from "./protocol-version";
 
-export const ORBIS_TRANSPORT_PROTOCOL_VERSION = 2 as const;
+export { ORBIS_TRANSPORT_PROTOCOL_VERSION } from "./protocol-version";
 export const ORBIS_TRANSPORT_SUBPROTOCOL = "orbis.transport.v2" as const;
 /** Outer carrier used only between a host and a blind WebSocket relay. */
 export const ORBIS_RELAY_UPLINK_SUBPROTOCOL = "orbis.relay.uplink.v1" as const;

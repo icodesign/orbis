@@ -13,6 +13,7 @@ import {
   type OrbisStatus,
 } from "./api";
 import type { OrbisLocaleKey } from "./locales";
+import { ORBIS_PLUGIN_VERSION, ORBIS_PROTOCOL_VERSION } from "./metadata";
 
 type Translate = (key: OrbisLocaleKey, params?: Record<string, unknown>) => string;
 
@@ -388,6 +389,20 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
             </Button>
           </div>
         ))}
+      </section>
+
+      <section style={cardStyle}>
+        <h3 style={{ margin: 0 }}>{t("about")}</h3>
+        <dl style={{ display: "grid", gap: 8, margin: 0, fontSize: 13 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+            <dt style={{ opacity: 0.72 }}>{t("pluginVersion")}</dt>
+            <dd style={{ margin: 0 }}>{ORBIS_PLUGIN_VERSION}</dd>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+            <dt style={{ opacity: 0.72 }}>{t("protocolVersion")}</dt>
+            <dd style={{ margin: 0 }}>{ORBIS_PROTOCOL_VERSION}</dd>
+          </div>
+        </dl>
       </section>
     </div>
   );
