@@ -26,7 +26,7 @@ npx @deepseek-ai/dsh plugin --profile web add @orbisapp/remote-dsh
 
 ```sh
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm run serve:dsh
+pnpm run serve:dsh
 ```
 
 默认页面地址为 `http://127.0.0.1:3080`。可以通过参数修改端口或使用指定的测试目录：
@@ -41,12 +41,11 @@ pnpm run serve:dsh --help
 
 ```sh
 pnpm run check:core   # 仅依赖本仓库即可完成的类型检查与测试
-pnpm run check:dsh    # 额外检查插件与客户端入口，需要本地 DSH 检出
+pnpm run check:dsh    # 使用公开 DSH SDK 检查插件与客户端入口
 ```
 
-CI 在每次 push、每个 PR 以及发布前都会运行 `check:core`。`check:dsh` 只能在本地运行：
-它需要对 `@deepseek-ai/*` 源码做类型检查，而这些源码只存在于 `ORBIS_DSH_HARNESS_DIR`
-指向的 DSH 检出中。
+CI 在每次 push、每个 PR 以及发布前都会运行 `check:core`。`check:dsh` 直接使用 workspace
+安装的公开 `@deepseek-ai/*` SDK 包。
 
 ## 发布
 

@@ -43,18 +43,23 @@ traversal.
 ```sh
 cd public
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbisapp/remote-dsh run build
-dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
-DSH_TELEMETRY_DISABLED=1 dsh web
+pnpm run serve:dsh
 ```
 
-The public workspace uses pnpm for every package. The `@deepseek-ai/dsh-*`
-modules are peer dependencies supplied by the selected DSH profile; the DSH
-source tree is deliberately not vendored into this repository. The shared
-Orbis protocol packages are workspace dependencies and are bundled into the
-plugin at build time. `setup:dsh` creates ignored symlinks into the checkout
-supplied by `ORBIS_DSH_HARNESS_DIR`; it never copies Harness source into this
-repository.
+The public workspace uses pnpm for every package. The public DSH SDK is used as
+the build-time development dependency, while the generated plugin keeps DSH
+imports external and receives the matching peer packages from the selected DSH
+profile at runtime. The shared Orbis protocol packages are workspace
+dependencies and are bundled into the plugin at build time. No DSH source
+checkout is needed for a normal build or local Web run.
+
+For the individual steps, run them from `public/`:
+
+```sh
+pnpm --filter @orbisapp/remote-dsh run build
+pnpm --filter @orbisapp/remote-dsh exec dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
+DSH_TELEMETRY_DISABLED=1 pnpm --filter @orbisapp/remote-dsh exec dsh web
+```
 
 Adapter and host tests do not require the DSH SDK:
 
@@ -66,9 +71,9 @@ For a local smoke check before installing the profile link:
 
 ```sh
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm --filter @orbisapp/remote-dsh run check
-dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
-dsh plugin --profile web why @orbisapp/remote-dsh
+pnpm --filter @orbisapp/remote-dsh run check
+pnpm --filter @orbisapp/remote-dsh exec dsh plugin --profile web add link:$PWD/packages/orbis-remote-dsh
+pnpm --filter @orbisapp/remote-dsh exec dsh plugin --profile web why @orbisapp/remote-dsh
 ```
 
 The package also provides a one-command local Web launcher. It installs and builds
@@ -80,12 +85,12 @@ pnpm run serve:dsh
 ```
 
 The launcher reuses `~/.dsh/profiles/web` and creates only the workspace root in a
-disposable temporary directory. Supply the Harness checkout explicitly (the
-launcher has no repository-specific default), and override the DSH home or keep
-the generated workspace for inspection when needed:
+disposable temporary directory. It uses the package-local public DSH CLI. Override
+the DSH executable, DSH home, or keep the generated workspace for inspection when
+needed:
 
 ```sh
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm run serve:dsh
+pnpm run serve:dsh --dsh-bin /path/to/dsh
 pnpm run serve:dsh --port 3090 --keep
 pnpm run serve:dsh --home "$DSH_HOME"
 pnpm run serve:dsh --workspace-root /path/to/workspace
@@ -95,9 +100,8 @@ Before refreshing the local plugin link, the launcher runs the active pnpm in
 the existing Web profile. This safely realigns a profile created by an older
 pnpm store version. It also removes the former development package names
 `@orbis/dsh-orbis-remote` and `@orbis/remote-dsh`, so obsolete and current Orbis
-bundles cannot load together. The launcher probes available Node executables and selects one that
-can safely refresh DSH's generated profile links; override it explicitly with
-`--node-bin` or `ORBIS_DSH_NODE_BIN` when needed.
+bundles cannot load together. The launcher uses the public DSH CLI's normal profile installation
+path, so it does not need a separate Node executable or Harness checkout.
 
 Open `http://127.0.0.1:3080`, then choose **Settings → Plugins → Orbis**. Stop the
 launcher with Ctrl-C. DSH Web must remain on `127.0.0.1`; the Orbis data-plane
@@ -240,7 +244,7 @@ the ambient Orbis identity environment variable. The disposable runner
 discovers the local LAN endpoint. The runner never touches
 the mobile app or its integration tests.
 
-The compatibility gate checks `dsh --version` (expected `0.0.1-rc.2`), the
+The compatibility gate checks `dsh --version` (expected `0.1.0-rc.6`), the
 launcher `--patch` flag, and Web's `--host`/`--port` flags before creating a fixture. Set
 `ORBIS_DSH_EXPECTED_VERSION` only for another explicitly reviewed DSH
 profile; an unreviewed or missing CLI is a clear skip by default and a

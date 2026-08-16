@@ -8,6 +8,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { appendFile, chmod, mkdtemp, mkdir, readFile, stat, writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -27,7 +28,14 @@ import { delay, waitFor } from "./real-profile-e2e-utils.ts";
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const STRICT = process.env.ORBIS_DSH_REAL_E2E_STRICT === "1";
 const OPT_IN = process.env.ORBIS_DSH_REAL_E2E === "1";
-const DSH_COMMAND = process.env.ORBIS_DSH_BIN ?? "dsh";
+const PACKAGE_DSH_BIN = join(
+  PACKAGE_DIRECTORY,
+  "node_modules",
+  ".bin",
+  process.platform === "win32" ? "dsh.cmd" : "dsh",
+);
+const DSH_COMMAND =
+  process.env.ORBIS_DSH_BIN ?? (existsSync(PACKAGE_DSH_BIN) ? PACKAGE_DSH_BIN : "dsh");
 const WEB_READY_TIMEOUT_MS = 90_000;
 
 function log(message) {
@@ -335,7 +343,7 @@ async function persistedIndexEntryCount(path) {
 }
 
 async function assertDshCompatibility() {
-  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.0.1-rc.2";
+  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.0-rc.6";
   const probeRoot = await mkdtemp(join(tmpdir(), "orbis-dsh-compat-"));
   const probeEnv = {
     ...process.env,

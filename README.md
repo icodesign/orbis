@@ -15,7 +15,7 @@ updates across multiple devices.
 2. Install the Orbis plugin into DSH.
 
 ```sh
-dsh plugin --profile web add @orbisapp/remote-dsh  // available once published after the public beta
+npx @deepseek-ai/dsh plugin --profile web add @orbisapp/remote-dsh
 ```
 
 3. Configure the plugin and pair your device from the DSH web plugin page.
@@ -27,7 +27,7 @@ install it into your local DSH Web profile, and start the test page:
 
 ```sh
 pnpm install
-ORBIS_DSH_HARNESS_DIR=/path/to/deepseek-harness pnpm run serve:dsh
+pnpm run serve:dsh
 ```
 
 The page is served at `http://127.0.0.1:3080` by default. Pass flags to change the port or
@@ -43,12 +43,11 @@ pnpm run serve:dsh --help
 
 ```sh
 pnpm run check:core   # typecheck + tests for everything that builds from this repository alone
-pnpm run check:dsh    # also typechecks the plugin and client entry points, needs a DSH checkout
+pnpm run check:dsh    # typechecks and tests the plugin and client entry points against the public DSH SDK
 ```
 
 CI runs `check:core` on every push and every pull request, and again before a release.
-`check:dsh` is a local command: it typechecks against `@deepseek-ai/*` sources, which are only
-available from a DSH checkout pointed at by `ORBIS_DSH_HARNESS_DIR`.
+`check:dsh` uses the public `@deepseek-ai/*` SDK packages installed by the workspace.
 
 ## Releasing
 

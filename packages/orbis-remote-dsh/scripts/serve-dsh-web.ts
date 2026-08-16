@@ -1,8 +1,8 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,33 +20,12 @@ interface CommandSpec {
 }
 
 interface Options {
-  readonly harnessDirectory: string;
   readonly dsh: CommandSpec;
   readonly home: string;
   readonly port: number;
   readonly workspaceRoot?: string;
   readonly keepFixture: boolean;
 }
-
-const NODE_DIRECTORY_SYMLINK_REMOVAL_PROBE = String.raw`
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "orbis-dsh-node-probe-"));
-const target = path.join(root, "target");
-const link = path.join(root, "link");
-let supported = false;
-try {
-  fs.mkdirSync(target);
-  fs.symlinkSync(target, link, "junction");
-  fs.rmSync(link);
-  supported = true;
-} finally {
-  try { fs.unlinkSync(link); } catch {}
-  fs.rmSync(root, { recursive: true, force: true });
-}
-if (!supported) process.exitCode = 1;
-`;
 
 interface Fixture {
   readonly cleanupPaths: readonly string[];
@@ -61,9 +40,7 @@ Build and install ${PACKAGE_NAME} into the persistent DSH web profile,
 then start dsh web on the loopback interface.
 
 Options:
-  --harness <path>         DeepSeek Harness checkout
-  --dsh-bin <command>     dsh executable or built apps/cli/lib/bin.js path
-  --node-bin <command>    Node executable used for a built DSH CLI
+  --dsh-bin <command>     dsh executable; defaults to the package-local DSH CLI
   --home <path>            DSH_HOME; defaults to ~/.dsh and reuses its web profile
   --workspace-root <path>  workspace root; defaults to a disposable temporary path
   --port <number>          DSH Web port (default: ${DEFAULT_PORT})
@@ -71,9 +48,7 @@ Options:
   -h, --help               show this help
 
 Environment overrides:
-  ORBIS_DSH_HARNESS_DIR   same as --harness
   ORBIS_DSH_BIN           same as --dsh-bin
-  ORBIS_DSH_NODE_BIN      same as --node-bin
   DSH_HOME                override the default DSH home
 `);
 }
@@ -96,63 +71,36 @@ function parsePort(value: string): number {
   return port;
 }
 
-function nodeSupportsDshProfileHealing(command: string): boolean {
-  return (
-    spawnSync(command, ["-e", NODE_DIRECTORY_SYMLINK_REMOVAL_PROBE], {
-      stdio: "ignore",
-    }).status === 0
+function resolveDshCommand(requested?: string): CommandSpec {
+  const localDsh = join(
+    PACKAGE_DIRECTORY,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "dsh.cmd" : "dsh",
   );
-}
-
-function resolveCompatibleNode(requested?: string): string {
-  const executable = process.platform === "win32" ? "node.exe" : "node";
-  const candidates = requested
-    ? [requested]
-    : [
-        process.execPath,
-        ...(process.env.PATH ?? "")
-          .split(delimiter)
-          .filter((directory) => directory.length > 0)
-          .map((directory) => join(directory, executable))
-          .filter(existsSync),
-      ];
-  for (const candidate of new Set(candidates)) {
-    if (nodeSupportsDshProfileHealing(candidate)) return candidate;
-  }
-  const detail = requested === undefined ? "available Node installations" : requested;
-  throw new Error(
-    `${detail} cannot safely refresh DSH's profile links; upgrade Node or pass --node-bin`,
-  );
-}
-
-function resolveDshCommand(
-  harnessDirectory: string,
-  requested?: string,
-  requestedNode?: string,
-): CommandSpec {
-  const builtCli = join(harnessDirectory, "apps/cli/lib/bin.js");
-  const candidate = requested ?? builtCli;
-  if (existsSync(candidate)) {
+  const candidate = requested ?? (existsSync(localDsh) ? localDsh : "dsh");
+  if (candidate.includes("/") || candidate.includes("\\") || isAbsolute(candidate)) {
+    if (!existsSync(candidate)) {
+      throw new Error(`dsh CLI not found: ${candidate}`);
+    }
     return {
-      command: resolveCompatibleNode(requestedNode),
-      prefix: [resolve(candidate)],
-      cwd: harnessDirectory,
+      command: resolve(candidate),
+      prefix: [],
+      cwd: PACKAGE_DIRECTORY,
     };
   }
-  if (candidate.includes("/") || isAbsolute(candidate)) {
+  if (candidate.length === 0) {
     throw new Error(`dsh CLI not found: ${candidate}`);
   }
   return {
     command: candidate,
     prefix: [],
-    cwd: harnessDirectory,
+    cwd: PACKAGE_DIRECTORY,
   };
 }
 
 function parseOptions(argv: readonly string[]): Options {
-  let harnessDirectory = process.env.ORBIS_DSH_HARNESS_DIR ?? process.env.DEEPSEEK_HARNESS_DIR;
   let dshBin = process.env.ORBIS_DSH_BIN;
-  let nodeBin = process.env.ORBIS_DSH_NODE_BIN;
   let home = process.env.DSH_HOME ?? DEFAULT_DSH_HOME;
   let port = DEFAULT_PORT;
   let workspaceRoot = process.env.ORBIS_DSH_WORKSPACE_ROOT;
@@ -166,16 +114,8 @@ function parseOptions(argv: readonly string[]): Options {
         usage();
         process.exit(0);
         break;
-      case "--harness":
-        harnessDirectory = requireValue(argv, index, argument);
-        index += 1;
-        break;
       case "--dsh-bin":
         dshBin = requireValue(argv, index, argument);
-        index += 1;
-        break;
-      case "--node-bin":
-        nodeBin = requireValue(argv, index, argument);
         index += 1;
         break;
       case "--home":
@@ -198,13 +138,8 @@ function parseOptions(argv: readonly string[]): Options {
     }
   }
 
-  if (harnessDirectory === undefined) {
-    throw new Error("a DSH checkout is required; pass --harness or set ORBIS_DSH_HARNESS_DIR");
-  }
-  harnessDirectory = resolve(harnessDirectory);
   return {
-    dsh: resolveDshCommand(harnessDirectory, dshBin, nodeBin),
-    harnessDirectory,
+    dsh: resolveDshCommand(dshBin),
     home: resolve(home),
     keepFixture,
     port,
@@ -297,14 +232,12 @@ async function main(): Promise<void> {
   const fixture = await createFixture(options);
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
-    ORBIS_DSH_HARNESS_DIR: options.harnessDirectory,
     DSH_AGENTS_HOME: process.env.DSH_AGENTS_HOME ?? join(fixture.home, "agents"),
     DSH_HOME: fixture.home,
     DSH_PERMISSION_MODE: process.env.DSH_PERMISSION_MODE ?? "workspace-write",
     DSH_TELEMETRY_DISABLED: process.env.DSH_TELEMETRY_DISABLED ?? "1",
   };
 
-  console.log(`DSH repository: ${options.harnessDirectory}`);
   console.log(`DSH command: ${commandLine(options.dsh, [])}`);
   console.log(`DSH profile: ${DSH_PROFILE}`);
   console.log(`DSH home: ${fixture.home}`);
@@ -324,7 +257,7 @@ async function main(): Promise<void> {
   try {
     await runCommand(
       { command: "pnpm", prefix: [], cwd: PACKAGE_DIRECTORY },
-      ["install", "--config.auto-install-peers=false"],
+      ["install"],
       environment,
     );
     await runCommand(
@@ -340,7 +273,7 @@ async function main(): Promise<void> {
           prefix: [],
           cwd: join(fixture.home, "profiles", DSH_PROFILE),
         },
-        ["install", "--config.auto-install-peers=false"],
+        ["install"],
         environment,
       );
     }

@@ -1,5 +1,10 @@
 packages:
   - packages/*
 allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
   esbuild: true
-autoInstallPeers: false
+  koffi: true
+  node-pty: true
+  protobufjs: false
+autoInstallPeers: true

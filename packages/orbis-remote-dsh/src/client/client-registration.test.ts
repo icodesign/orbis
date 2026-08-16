@@ -6,6 +6,10 @@ import { expect, test, vi } from "vitest";
 import { apply } from "./index";
 import { OrbisSettingsSection } from "./OrbisSettingsSection";
 
+vi.mock("@deepseek-ai/dsh-client-ui-primitives", () => ({
+  Button: () => null,
+}));
+
 test("declares the browser bundle through the current dsh.client manifest", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
