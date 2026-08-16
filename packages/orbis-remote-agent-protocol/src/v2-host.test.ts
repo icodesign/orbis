@@ -1,5 +1,3 @@
-import { expect, test } from "vitest";
-
 import {
   agentBackendId,
   agentDeliveryCursor,
@@ -13,11 +11,8 @@ import {
   type AgentJsonValue,
   type AgentSessionRef,
 } from "@orbisapp/orbis-agent-backend";
-import {
-  OrbisTransportError,
-  type JsonValue,
-  type TransportEvent,
-} from "@orbisapp/transport";
+import { OrbisTransportError, type JsonValue, type TransportEvent } from "@orbisapp/transport";
+import { expect, test } from "vitest";
 
 import {
   OrbisRemoteAgentV2Host,
@@ -195,6 +190,12 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       title: null,
       updatedAt: now,
     }),
+    createWorkspaceFolder: async () => ({
+      displayName: "New Folder",
+      hidden: false,
+      ref: "folder-new",
+      selectable: true,
+    }),
     hostId: agentBackendId("native"),
     listDrivers: async () => [
       createAgentDriverDescriptor({
@@ -298,6 +299,23 @@ test("v2 host replays native entries from its cursor index without ACK state", a
         context(),
       ),
     ).toEqual({ breadcrumbs: [], current: null, entries: [], truncated: false });
+    expect(
+      await host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder,
+        params({
+          driverId: "dsh",
+          idempotencyKey: "create-folder-1",
+          name: "New Folder",
+          parentFolderRef: "folder-a",
+        }),
+        context(),
+      ),
+    ).toEqual({
+      displayName: "New Folder",
+      hidden: false,
+      ref: "folder-new",
+      selectable: true,
+    });
     expect(
       await host.handleRequest(
         ORBIS_REMOTE_AGENT_V2_METHODS.workspacesRegister,
@@ -594,6 +612,9 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
       throw new Error("unused");
     },
     createSession: async () => {
+      throw new Error("unused");
+    },
+    createWorkspaceFolder: async () => {
       throw new Error("unused");
     },
     hostId: agentBackendId("native"),

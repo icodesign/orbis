@@ -1,15 +1,10 @@
-import { expect, test } from "vitest";
-
 import {
   agentTimestamp,
   createAgentSessionRef,
   type AgentJsonValue,
 } from "@orbisapp/orbis-agent-backend";
-import {
-  OrbisTransportError,
-  type JsonValue,
-  type TransportEvent,
-} from "@orbisapp/transport";
+import { OrbisTransportError, type JsonValue, type TransportEvent } from "@orbisapp/transport";
+import { expect, test } from "vitest";
 
 import { OrbisRemoteAgentV2Connection } from "./v2-connection";
 import {
@@ -218,6 +213,25 @@ test("v2 connection enforces hello-first and delivers replayable events without 
   expect(await connection.browseWorkspaces({ driverId: ref.driverId })).toMatchObject({
     current: null,
     entries: [{ ref: "folder-a" }],
+  });
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder, {
+    displayName: "New Folder",
+    hidden: false,
+    ref: "folder-new",
+    selectable: true,
+  });
+  expect(
+    await connection.createWorkspaceFolder({
+      driverId: ref.driverId,
+      idempotencyKey: "workspace-create-folder-a",
+      name: "New Folder",
+      parentFolderRef: "folder-a",
+    }),
+  ).toEqual({
+    displayName: "New Folder",
+    hidden: false,
+    ref: "folder-new",
+    selectable: true,
   });
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.workspacesRegister, {
     created: true,

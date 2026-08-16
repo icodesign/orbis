@@ -44,6 +44,7 @@ import {
   v2ModelsListInputSchema,
   v2WorkspacesListInputSchema,
   v2WorkspacesBrowseInputSchema,
+  v2WorkspacesCreateFolderInputSchema,
   v2WorkspacesRegisterInputSchema,
   v2PromptInputSchema,
   v2RefSchema,
@@ -789,6 +790,8 @@ export class OrbisRemoteAgentV2Host {
         }
         case ORBIS_REMOTE_AGENT_V2_METHODS.workspacesBrowse:
           return toJsonResult(await this.browseWorkspaces(params, context));
+        case ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder:
+          return await this.createWorkspaceFolder(params, context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.workspacesRegister:
           return await this.registerWorkspace(params, context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsList:
@@ -895,6 +898,40 @@ export class OrbisRemoteAgentV2Host {
     await this.assertDriverCapability(driverId, "workspace.open");
     this.assertRequestActive(context);
     return await this.backend.browseWorkspaceFolders(driverId, input.folderRef, context.signal);
+  }
+
+  private async createWorkspaceFolder(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const input = parseSchema(
+      v2WorkspacesCreateFolderInputSchema,
+      params,
+      "Workspace folder creation input",
+    );
+    const driverId = agentDriverId(input.driverId);
+    await this.assertDriverCapability(driverId, "workspace.open");
+    const key = this.idempotencyKey(
+      context.peer,
+      ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder,
+      input.idempotencyKey,
+      input.driverId,
+    );
+    const claim = await this.store.claimIdempotency(key);
+    if (claim.kind === "accepted") return toJsonResult(claim.result);
+    if (claim.kind === "pending") {
+      throw new AgentBackendError(
+        "unavailable",
+        "The prior workspace folder creation is still reconciling",
+        { retryable: true },
+      );
+    }
+    this.assertRequestActive(context);
+    const result = toJsonResult(
+      await this.backend.createWorkspaceFolder(driverId, input.parentFolderRef, input.name),
+    );
+    await this.store.completeIdempotency(key, result as AgentJsonValue);
+    return result;
   }
 
   private async registerWorkspace(

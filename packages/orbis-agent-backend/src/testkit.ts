@@ -8,6 +8,8 @@ import type {
   AgentModelMetadata,
   AgentWorkspaceDescriptor,
   AgentWorkspaceBrowseInput,
+  AgentWorkspaceCreateFolderInput,
+  AgentWorkspaceFolderDescriptor,
   AgentWorkspaceFolderListing,
   AgentWorkspaceListInput,
   AgentWorkspaceRegisterInput,
@@ -136,6 +138,12 @@ export class FakeAgentBackend implements AgentBackend, FakeRuntimeHost {
     _input: AgentWorkspaceBrowseInput,
   ): Promise<AgentWorkspaceFolderListing> {
     throw new AgentBackendError("unsupported", "The fake backend cannot browse folders");
+  }
+
+  async createWorkspaceFolder(
+    _input: AgentWorkspaceCreateFolderInput,
+  ): Promise<AgentWorkspaceFolderDescriptor> {
+    throw new AgentBackendError("unsupported", "The fake backend cannot create folders");
   }
 
   async registerWorkspace(

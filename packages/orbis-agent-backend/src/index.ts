@@ -12,6 +12,7 @@ export {
   type AgentModelThinkingLevelMetadata,
   type AgentWorkspaceDescriptor,
   type AgentWorkspaceBrowseInput,
+  type AgentWorkspaceCreateFolderInput,
   type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceListInput,
