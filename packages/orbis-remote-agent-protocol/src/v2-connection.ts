@@ -17,6 +17,7 @@ import {
   type AgentModelMetadata,
   type AgentSessionRef,
   type AgentWorkspaceDescriptor,
+  type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
 } from "@orbisapp/orbis-agent-backend";
@@ -71,6 +72,7 @@ import type {
   RemoteAgentV2SessionSummary,
   RemoteAgentV2UpdateInput,
   RemoteAgentV2WorkspaceBrowseInput,
+  RemoteAgentV2WorkspaceCreateFolderInput,
   RemoteAgentV2WorkspaceRegisterInput,
   RemoteAgentV2Usage,
 } from "./v2-types";
@@ -98,6 +100,9 @@ export type RemoteAgentV2SyncResult =
 
 export interface RemoteAgentV2Connection {
   browseWorkspaces(input: RemoteAgentV2WorkspaceBrowseInput): Promise<AgentWorkspaceFolderListing>;
+  createWorkspaceFolder(
+    input: RemoteAgentV2WorkspaceCreateFolderInput,
+  ): Promise<AgentWorkspaceFolderDescriptor>;
   cancel(input: RemoteAgentV2CancelInput): Promise<{ readonly cancelled: boolean }>;
   close(): void;
   createSession(input: RemoteAgentV2CreateInput): Promise<RemoteAgentV2SessionRecord>;
@@ -873,6 +878,12 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
       },
       false,
       input.signal,
+    );
+  }
+
+  async createWorkspaceFolder(input: RemoteAgentV2WorkspaceCreateFolderInput) {
+    return this.request(ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder, input, (value) =>
+      parseSchema(v2WorkspaceFolderSchema, value, "Created workspace folder"),
     );
   }
 

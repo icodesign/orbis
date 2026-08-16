@@ -126,6 +126,12 @@ export interface AgentWorkspaceRegisterInput {
   readonly folderRef: string;
 }
 
+export interface AgentWorkspaceCreateFolderInput {
+  readonly driverId: AgentDriverId;
+  readonly name: string;
+  readonly parentFolderRef: string;
+}
+
 export interface AgentWorkspaceRegisterResult {
   readonly created: boolean;
   readonly workspace: AgentWorkspaceDescriptor;
@@ -219,6 +225,9 @@ export interface AgentBackend {
 
   close(): Promise<void>;
   browseWorkspaceFolders(input: AgentWorkspaceBrowseInput): Promise<AgentWorkspaceFolderListing>;
+  createWorkspaceFolder(
+    input: AgentWorkspaceCreateFolderInput,
+  ): Promise<AgentWorkspaceFolderDescriptor>;
   connectRuntime(ref: AgentSessionRef): Promise<AgentSessionRuntime>;
   createSession(input: AgentSessionCreateInput): Promise<AgentSessionRecord>;
   listDrivers(): Promise<readonly AgentDriverDescriptor[]>;

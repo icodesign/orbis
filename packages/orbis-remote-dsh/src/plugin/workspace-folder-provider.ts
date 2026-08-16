@@ -11,6 +11,7 @@ import {
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
 } from "@orbisapp/orbis-agent-backend";
+
 import type { DshRemoteWorkspaceProvider } from "../host";
 
 const TOKEN_PREFIX = "folder.v1";
@@ -130,6 +131,44 @@ class DshWorkspaceFolderProvider implements DshRemoteWorkspaceProvider {
     return operation;
   }
 
+  async create(input: {
+    readonly folderRef: string;
+    readonly name: string;
+  }): Promise<AgentWorkspaceFolderDescriptor> {
+    if (
+      input.name.trim() === "" ||
+      input.name === "." ||
+      input.name === ".." ||
+      input.name.includes("/") ||
+      input.name.includes("\\")
+    ) {
+      throw new AgentBackendError("invalid_argument", "Folder name is invalid");
+    }
+
+    try {
+      const resolved = await this.resolveFolder(input.folderRef);
+      const createdPath = await this.browser.createDirectory(resolved.path, input.name);
+      const canonical = await realpath(createdPath);
+      if (!contained(resolved.root.path, canonical)) {
+        throw new AgentBackendError("unavailable", "The created folder is outside the workspace");
+      }
+      const metadata = await stat(canonical);
+      if (!metadata.isDirectory()) {
+        throw new AgentBackendError("unavailable", "The created folder is unavailable");
+      }
+      const segments = this.relativeSegments(resolved.root.path, canonical);
+      return this.descriptor(resolved.root, segments, basename(canonical), false);
+    } catch (error) {
+      if (isAgentBackendError(error)) throw error;
+      if (directoryPickerErrorCode(error) === "directory-exists") {
+        throw new AgentBackendError("conflict", "A folder with this name already exists");
+      }
+      throw new AgentBackendError("unavailable", "The server folder could not be created", {
+        retryable: true,
+      });
+    }
+  }
+
   private breadcrumbs(
     root: RootRecord,
     segments: readonly string[],
@@ -230,6 +269,12 @@ class DshWorkspaceFolderProvider implements DshRemoteWorkspaceProvider {
     }
     return value as unknown as FolderPayload;
   }
+}
+
+function directoryPickerErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 export async function createDshWorkspaceFolderProvider(

@@ -14,10 +14,10 @@ import {
   type AgentSessionProjection,
   type AgentSessionRef,
   type AgentSessionStatePatch,
+  type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
 } from "@orbisapp/orbis-agent-backend";
-import { DshLocalBackend, type DshLocalSessionRuntime } from "../adapter";
 import type {
   RemoteAgentV2Backend,
   RemoteAgentV2ContentBlock,
@@ -34,6 +34,8 @@ import type {
   RemoteAgentV2SessionSummary,
 } from "@orbisapp/remote-agent-protocol";
 
+import { DshLocalBackend, type DshLocalSessionRuntime } from "../adapter";
+
 const DSH_HOST_BACKEND_ID = agentBackendId("dsh-host");
 
 export interface DshRemoteWorkspaceProvider {
@@ -41,6 +43,10 @@ export interface DshRemoteWorkspaceProvider {
     readonly folderRef?: string;
     readonly signal?: AbortSignal;
   }): Promise<AgentWorkspaceFolderListing>;
+  create(input: {
+    readonly folderRef: string;
+    readonly name: string;
+  }): Promise<AgentWorkspaceFolderDescriptor>;
   register(input: { readonly folderRef: string }): Promise<AgentWorkspaceRegisterResult>;
 }
 
@@ -561,6 +567,18 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
       throw new AgentBackendError("unsupported", "Server folder browsing is unavailable");
     }
     return this.workspaces.browse({ ...(folderRef === undefined ? {} : { folderRef }), signal });
+  }
+
+  async createWorkspaceFolder(
+    driverId: AgentSessionRef["driverId"],
+    parentFolderRef: string,
+    name: string,
+  ): Promise<AgentWorkspaceFolderDescriptor> {
+    this.assertDshDriver(driverId);
+    if (this.workspaces === undefined) {
+      throw new AgentBackendError("unsupported", "Server folder creation is unavailable");
+    }
+    return this.workspaces.create({ folderRef: parentFolderRef, name });
   }
 
   async registerWorkspace(

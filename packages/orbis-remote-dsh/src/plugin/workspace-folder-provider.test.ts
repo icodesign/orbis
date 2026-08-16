@@ -25,8 +25,10 @@ async function fixture() {
   await mkdir(child, { recursive: true });
   const browser: DirectoryPickerBrowseCapability = {
     kind: "browse",
-    createDirectory: async () => {
-      throw new Error("unused");
+    createDirectory: async (path, name) => {
+      const created = join(path, name);
+      await mkdir(created);
+      return created;
     },
     list: async (path): Promise<DirectoryListing> => {
       const current = await realpath(path ?? root);
@@ -70,6 +72,27 @@ test("browse exposes opaque refs and registers the selected canonical directory"
   expect(result).toMatchObject({
     created: true,
     workspace: { displayName: "project", ref: "workspace-a" },
+  });
+});
+
+test("creates a child folder under the selected canonical directory", async () => {
+  const { provider, root } = await fixture();
+  const roots = await provider.browse({});
+  const created = await provider.create({ folderRef: roots.entries[0]!.ref, name: "fresh" });
+
+  expect(created).toMatchObject({ displayName: "fresh", hidden: false, selectable: true });
+  expect(created.ref).not.toContain(root);
+  await expect(readdir(join(root, "fresh"))).resolves.toEqual([]);
+});
+
+test("rejects invalid folder names before touching the directory picker", async () => {
+  const { provider } = await fixture();
+  const roots = await provider.browse({});
+
+  await expect(
+    provider.create({ folderRef: roots.entries[0]!.ref, name: "../escape" }),
+  ).rejects.toMatchObject({
+    code: "invalid_argument",
   });
 });
 

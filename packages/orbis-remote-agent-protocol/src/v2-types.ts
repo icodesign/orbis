@@ -6,6 +6,7 @@ import type {
   AgentModelSelection,
   AgentSessionRef,
   AgentWorkspaceDescriptor,
+  AgentWorkspaceFolderDescriptor,
   AgentWorkspaceFolderListing,
   AgentWorkspaceRegisterResult,
 } from "@orbisapp/orbis-agent-backend";
@@ -227,6 +228,13 @@ export interface RemoteAgentV2WorkspaceRegisterInput {
   readonly idempotencyKey: string;
 }
 
+export interface RemoteAgentV2WorkspaceCreateFolderInput {
+  readonly driverId: AgentSessionRef["driverId"];
+  readonly idempotencyKey: string;
+  readonly name: string;
+  readonly parentFolderRef: string;
+}
+
 export interface RemoteAgentV2PromptInput {
   readonly ref: AgentSessionRef;
   readonly content: readonly RemoteAgentV2ContentBlock[];
@@ -284,6 +292,11 @@ export interface RemoteAgentV2Backend {
     folderRef?: string,
     signal?: AbortSignal,
   ): Promise<AgentWorkspaceFolderListing>;
+  createWorkspaceFolder(
+    driverId: AgentSessionRef["driverId"],
+    parentFolderRef: string,
+    name: string,
+  ): Promise<AgentWorkspaceFolderDescriptor>;
   connectRuntime(ref: AgentSessionRef): Promise<RemoteAgentV2Runtime>;
   createSession(
     input: Omit<RemoteAgentV2CreateInput, "idempotencyKey">,

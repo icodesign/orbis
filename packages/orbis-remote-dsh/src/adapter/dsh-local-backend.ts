@@ -25,6 +25,8 @@ import {
   type AgentModelSelection,
   type AgentWorkspaceDescriptor,
   type AgentWorkspaceBrowseInput,
+  type AgentWorkspaceCreateFolderInput,
+  type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterInput,
   type AgentWorkspaceRegisterResult,
@@ -377,6 +379,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     _input: AgentWorkspaceBrowseInput,
   ): Promise<AgentWorkspaceFolderListing> {
     throw new AgentBackendError("unsupported", "Local DSH folder browsing is host-owned");
+  }
+
+  async createWorkspaceFolder(
+    _input: AgentWorkspaceCreateFolderInput,
+  ): Promise<AgentWorkspaceFolderDescriptor> {
+    throw new AgentBackendError("unsupported", "Local DSH folder creation is host-owned");
   }
 
   async registerWorkspace(

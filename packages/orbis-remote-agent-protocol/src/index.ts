@@ -77,5 +77,6 @@ export type {
   RemoteAgentV2Usage,
   RemoteAgentV2UpdateInput,
   RemoteAgentV2WorkspaceBrowseInput,
+  RemoteAgentV2WorkspaceCreateFolderInput,
   RemoteAgentV2WorkspaceRegisterInput,
 } from "./v2-types";

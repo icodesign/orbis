@@ -342,6 +342,15 @@ export const v2WorkspacesBrowseInputSchema = z
   .object({ driverId: nonEmptyString, folderRef: nonEmptyString.optional() })
   .passthrough();
 
+export const v2WorkspacesCreateFolderInputSchema = z
+  .object({
+    driverId: nonEmptyString,
+    idempotencyKey: nonEmptyString,
+    name: nonEmptyString,
+    parentFolderRef: nonEmptyString,
+  })
+  .passthrough();
+
 export const v2WorkspacesRegisterInputSchema = z
   .object({
     driverId: nonEmptyString,

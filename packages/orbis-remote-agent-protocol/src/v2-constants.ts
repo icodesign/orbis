@@ -8,6 +8,7 @@ export const ORBIS_REMOTE_AGENT_V2_METHODS = {
   modelsList: "orbis.models.list",
   workspacesList: "orbis.workspaces.list",
   workspacesBrowse: "orbis.workspaces.browse",
+  workspacesCreateFolder: "orbis.workspaces.createFolder",
   workspacesRegister: "orbis.workspaces.register",
   sessionsList: "orbis.sessions.list",
   sessionsCreate: "orbis.sessions.create",
@@ -26,6 +27,10 @@ export const ORBIS_REMOTE_AGENT_V2_METHOD_SCOPES = {
   [ORBIS_REMOTE_AGENT_V2_METHODS.modelsList]: [ORBIS_REMOTE_SCOPES.agentRead],
   [ORBIS_REMOTE_AGENT_V2_METHODS.workspacesList]: [ORBIS_REMOTE_SCOPES.agentRead],
   [ORBIS_REMOTE_AGENT_V2_METHODS.workspacesBrowse]: [ORBIS_REMOTE_SCOPES.workspaceBrowse],
+  [ORBIS_REMOTE_AGENT_V2_METHODS.workspacesCreateFolder]: [
+    ORBIS_REMOTE_SCOPES.workspaceBrowse,
+    ORBIS_REMOTE_SCOPES.agentWrite,
+  ],
   [ORBIS_REMOTE_AGENT_V2_METHODS.workspacesRegister]: [
     ORBIS_REMOTE_SCOPES.workspaceBrowse,
     ORBIS_REMOTE_SCOPES.agentWrite,
