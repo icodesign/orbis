@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs
 import { dirname } from "node:path";
 
 import { remoteScopeModeSchema, type RemoteScopeMode } from "@orbisapp/transport";
+import { z } from "zod";
 
 export interface OrbisDshPeer {
   readonly keyId: string;
@@ -25,93 +26,72 @@ export interface OrbisDshHostState {
   readonly peers: readonly OrbisDshPeer[];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const validDateString = z.string().refine((value) => !Number.isNaN(Date.parse(value)));
+const hostIdSchema = z.string().min(1).max(256);
 
-function requiredString(value: unknown, label: string, maximum = 16_384): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
-    throw new Error("Orbis host state " + label + " is invalid");
-  }
-  return value;
-}
+const orbisDshPeerSchema = z
+  .object({
+    keyId: z.string().min(1).max(512),
+    publicKey: z.string().min(1).max(16_384),
+    deviceId: z.string().min(1).max(256),
+    deviceName: z.string().min(1).max(256).optional(),
+    version: z.string().min(1).max(128),
+    scopeMode: z.preprocess((value) => value ?? "all", remoteScopeModeSchema),
+    scopes: z
+      .array(z.string().min(1).max(128))
+      .min(1)
+      .max(64)
+      .refine((scopes) => new Set(scopes).size === scopes.length, {
+        message: "Orbis host state peer scopes must be unique",
+        path: ["scopes"],
+      }),
+    pairedAt: validDateString.max(128),
+    lastConnectedAt: validDateString.max(128).optional(),
+  })
+  .transform(
+    (peer): OrbisDshPeer => ({
+      keyId: peer.keyId,
+      publicKey: peer.publicKey,
+      deviceId: peer.deviceId,
+      ...(peer.deviceName === undefined ? {} : { deviceName: peer.deviceName }),
+      version: peer.version,
+      scopeMode: peer.scopeMode,
+      scopes: peer.scopes,
+      pairedAt: peer.pairedAt,
+      ...(peer.lastConnectedAt === undefined ? {} : { lastConnectedAt: peer.lastConnectedAt }),
+    }),
+  );
 
-function optionalString(value: unknown, label: string, maximum = 16_384): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredString(value, label, maximum);
-}
-
-function optionalPort(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1024 || value > 65_535) {
-    throw new Error("Orbis host state directPort is invalid");
-  }
-  return value;
-}
-
-function endpointRevision(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("Orbis host state endpointRevision is invalid");
-  }
-  return value;
-}
-
-function parsePeer(value: unknown): OrbisDshPeer {
-  if (!isRecord(value)) throw new Error("Orbis host state peer is invalid");
-  const scopes = value.scopes;
-  if (
-    !Array.isArray(scopes) ||
-    scopes.length === 0 ||
-    scopes.length > 64 ||
-    scopes.some((scope) => typeof scope !== "string" || scope.length === 0 || scope.length > 128) ||
-    new Set(scopes).size !== scopes.length
-  ) {
-    throw new Error("Orbis host state peer scopes are invalid");
-  }
-  const pairedAt = requiredString(value.pairedAt, "peer pairedAt", 128);
-  if (Number.isNaN(Date.parse(pairedAt))) {
-    throw new Error("Orbis host state peer pairedAt is invalid");
-  }
-  const lastConnectedAt = optionalString(value.lastConnectedAt, "peer lastConnectedAt", 128);
-  if (lastConnectedAt !== undefined && Number.isNaN(Date.parse(lastConnectedAt))) {
-    throw new Error("Orbis host state peer lastConnectedAt is invalid");
-  }
-  const deviceName = optionalString(value.deviceName, "peer deviceName", 256);
-  const scopeMode = remoteScopeModeSchema.parse(value.scopeMode ?? "all");
-  return {
-    keyId: requiredString(value.keyId, "peer keyId", 512),
-    publicKey: requiredString(value.publicKey, "peer publicKey"),
-    deviceId: requiredString(value.deviceId, "peer deviceId", 256),
-    ...(deviceName === undefined ? {} : { deviceName }),
-    version: requiredString(value.version, "peer version", 128),
-    scopeMode,
-    scopes: [...scopes],
-    pairedAt,
-    ...(lastConnectedAt === undefined ? {} : { lastConnectedAt }),
-  };
-}
+const orbisDshHostStateSchema = z
+  .object({
+    version: z.literal(2),
+    hostId: hostIdSchema,
+    hostName: z.string().min(1).max(256).optional(),
+    directPort: z.number().int().min(1024).max(65_535).optional(),
+    endpointRevision: z.number().int().nonnegative(),
+    peers: z
+      .array(orbisDshPeerSchema)
+      .max(256)
+      .refine((peers) => new Set(peers.map((peer) => peer.keyId)).size === peers.length, {
+        message: "Orbis host state contains duplicate peer keys",
+        path: ["peers"],
+      }),
+  })
+  .transform(
+    (state): OrbisDshHostState => ({
+      version: 2,
+      hostId: state.hostId,
+      ...(state.hostName === undefined ? {} : { hostName: state.hostName }),
+      ...(state.directPort === undefined ? {} : { directPort: state.directPort }),
+      endpointRevision: state.endpointRevision,
+      peers: state.peers,
+    }),
+  );
 
 function parseState(value: unknown): OrbisDshHostState {
-  if (!isRecord(value) || value.version !== 2) {
-    throw new Error("Orbis host state is unsupported or corrupt");
-  }
-  if (!Array.isArray(value.peers) || value.peers.length > 256) {
-    throw new Error("Orbis host state peers are invalid");
-  }
-  const peers = value.peers.map(parsePeer);
-  if (new Set(peers.map((peer) => peer.keyId)).size !== peers.length) {
-    throw new Error("Orbis host state contains duplicate peer keys");
-  }
-  return {
-    version: 2,
-    hostId: requiredString(value.hostId, "hostId", 256),
-    ...(value.hostName === undefined
-      ? {}
-      : { hostName: optionalString(value.hostName, "hostName", 256) }),
-    ...(value.directPort === undefined ? {} : { directPort: optionalPort(value.directPort) }),
-    endpointRevision: endpointRevision(value.endpointRevision),
-    peers,
-  };
+  const result = orbisDshHostStateSchema.safeParse(value);
+  if (!result.success) throw new Error("Orbis host state is unsupported or corrupt");
+  return result.data;
 }
 
 function clone<T>(value: T): T {
@@ -121,7 +101,7 @@ function clone<T>(value: T): T {
 function defaultState(createHostId: () => string): OrbisDshHostState {
   return {
     version: 2,
-    hostId: requiredString(createHostId(), "generated hostId", 256),
+    hostId: hostIdSchema.parse(createHostId()),
     endpointRevision: 0,
     peers: [],
   };

@@ -35,6 +35,8 @@ import type {
   AgentSessionEventListener,
   AgentSessionMetadata,
   AgentSessionStateChangedEvent,
+  AgentPermissionResponseInput,
+  AgentPermissionResponseResult,
 } from "./events";
 import {
   agentDeliveryCursor,
@@ -469,6 +471,13 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     if (this.status !== "running") return { cancelled: false };
     await this.finish("cancelled");
     return { cancelled: true };
+  }
+
+  async respondPermission(
+    _input: AgentPermissionResponseInput,
+  ): Promise<AgentPermissionResponseResult> {
+    this.assertOpen();
+    return { accepted: false };
   }
 
   async close(): Promise<void> {

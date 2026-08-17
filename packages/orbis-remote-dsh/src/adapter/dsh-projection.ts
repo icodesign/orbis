@@ -179,6 +179,27 @@ function parseToolArguments(value: string): AgentJsonValue | undefined {
   }
 }
 
+function toolResultContentBlocks(value: unknown): readonly AgentContentBlock[] {
+  if (!Array.isArray(value)) return [];
+  const blocks: AgentContentBlock[] = [];
+  for (const rawBlock of value) {
+    if (typeof rawBlock !== "object" || rawBlock === null || Array.isArray(rawBlock)) continue;
+    const block = rawBlock as JsonRecord;
+    if (block.type === "text" && typeof block.text === "string") {
+      blocks.push({ text: block.text, type: "text" });
+    } else if (block.type === "reasoning" && typeof block.text === "string") {
+      blocks.push({ text: block.text, type: "thinking" });
+    } else if (
+      block.type === "resource" &&
+      typeof block.name === "string" &&
+      typeof block.uri === "string"
+    ) {
+      blocks.push({ name: block.name, type: "resource", uri: block.uri });
+    }
+  }
+  return blocks;
+}
+
 /**
  * The distinct `field` values of an array-valued source member as one name, in
  * first-seen order; `undefined` when the member names nothing readable.
@@ -357,10 +378,12 @@ function projectToolResult(
   }
   const call = toolCalls.get(callId);
   const output = dshJson(toolResult.content);
+  const contentBlocks = toolResultContentBlocks(toolResult.content);
   const isError = toolResult.isError === true || data.error !== undefined;
   return {
     callId,
     ...(call?.input === undefined ? {} : { input: call.input }),
+    content: contentBlocks,
     createdAt: dshTimestamp(event.time),
     cursor: agentDeliveryCursor(0),
     id: dshEntryId(event),

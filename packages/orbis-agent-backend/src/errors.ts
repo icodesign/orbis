@@ -5,7 +5,6 @@ export type AgentBackendErrorCode =
   | "cursor_conflict"
   | "invalid_argument"
   | "not_found"
-  | "permission_expired"
   | "protocol"
   | "revision_conflict"
   | "unavailable"

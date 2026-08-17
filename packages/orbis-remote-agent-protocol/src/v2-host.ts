@@ -12,6 +12,7 @@ import {
   isSameAgentSessionRef,
   type AgentBackendId,
   type AgentDeliveryCursor,
+  type AgentEntryId,
   type AgentJsonValue,
   type AgentSessionRef,
 } from "@orbisapp/orbis-agent-backend";
@@ -47,6 +48,7 @@ import {
   v2WorkspacesCreateFolderInputSchema,
   v2WorkspacesRegisterInputSchema,
   v2PromptInputSchema,
+  v2PermissionResponseInputSchema,
   v2RefSchema,
   v2SyncInputSchema,
   v2UpdateInputSchema,
@@ -64,6 +66,7 @@ import type {
   RemoteAgentV2Limits,
   RemoteAgentV2ModelSelection,
   RemoteAgentV2PromptInput,
+  RemoteAgentV2PermissionResponseInput,
   RemoteAgentV2SessionEvent,
   RemoteAgentV2SessionRecord,
   RemoteAgentV2SessionSnapshot,
@@ -409,6 +412,16 @@ function parseUpdateInput(value: JsonValue): RemoteAgentV2UpdateInput {
   };
 }
 
+function parsePermissionResponseInput(value: JsonValue): RemoteAgentV2PermissionResponseInput {
+  const input = parseSchema(v2PermissionResponseInputSchema, value, "Permission response input");
+  return {
+    idempotencyKey: input.idempotencyKey,
+    optionId: input.optionId,
+    ref: parseRef(input.ref),
+    requestId: input.requestId,
+  };
+}
+
 function publicRef(backendId: AgentBackendId, nativeRef: AgentSessionRef): AgentSessionRef {
   return createAgentSessionRef({
     backendId,
@@ -529,6 +542,7 @@ function entryEvent(
   eventId: string,
   occurredAt: RemoteAgentV2SessionEvent["occurredAt"],
   source: RemoteAgentV2SessionEvent["source"],
+  settlesEntryId?: AgentEntryId,
 ): RemoteAgentV2SessionEvent {
   return {
     channel: "replayable",
@@ -538,6 +552,7 @@ function entryEvent(
     occurredAt,
     sessionId: ref.sessionId,
     source: sourceFor(ref, source),
+    ...(settlesEntryId === undefined ? {} : { settlesEntryId }),
     type: "entry.appended",
   };
 }
@@ -605,10 +620,6 @@ function asTransportError(error: unknown): OrbisTransportError {
   switch (error.code) {
     case "invalid_argument":
       return new OrbisTransportError("invalid_argument", error.message);
-    case "permission_expired":
-      return new OrbisTransportError("remote_request", error.message, {
-        serverCode: "permission_expired",
-      });
     case "protocol":
       return new OrbisTransportError("protocol", error.message);
     case "not_found":
@@ -724,7 +735,6 @@ export class OrbisRemoteAgentV2Host {
       attachments: false,
       dispose: false,
       fork: false,
-      permission: false,
       presence: false,
       ...options.capabilities,
     };
@@ -806,9 +816,10 @@ export class OrbisRemoteAgentV2Host {
           return await this.prompt(parsePromptInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsCancel:
           return await this.cancel(parseCancelInput(params), context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission:
+          return await this.respondPermission(parsePermissionResponseInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsUpdate:
           return await this.update(parseUpdateInput(params), context);
-        case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission:
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsFork:
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsDispose:
           throw new AgentBackendError(
@@ -1158,6 +1169,41 @@ export class OrbisRemoteAgentV2Host {
     });
   }
 
+  private async respondPermission(
+    input: RemoteAgentV2PermissionResponseInput,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      await this.assertDriverCapability(owner.nativeRef.driverId, "permission.respond");
+      const key = this.idempotencyKey(
+        context.peer,
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission,
+        input.idempotencyKey,
+        input.ref.sessionId,
+      );
+      const claim = await this.store.claimIdempotency(key);
+      if (claim.kind === "accepted") return toJsonResult(claim.result);
+      if (claim.kind === "pending") {
+        throw new AgentBackendError(
+          "unavailable",
+          "The prior permission response is still reconciling",
+          { retryable: true },
+        );
+      }
+      const result = toJsonResult(
+        await this.requiredRuntime(owner).respondPermission({
+          requestId: input.requestId,
+          optionId: input.optionId,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await this.store.completeIdempotency(key, result as AgentJsonValue);
+      return result;
+    });
+  }
+
   private async update(
     input: RemoteAgentV2UpdateInput,
     context: RemoteAgentHostRequestContext,
@@ -1323,6 +1369,7 @@ export class OrbisRemoteAgentV2Host {
                 driverId: owner.ref.driverId,
                 nativeType: "reconciled",
               },
+          isTriggeredEntry ? event.settlesEntryId : undefined,
         ),
       );
     }
@@ -1350,9 +1397,11 @@ export class OrbisRemoteAgentV2Host {
             entryId: event.entryId,
             part: event.part,
           }
-        : event.type === "run.activity"
-          ? { detail: event.detail, kind: event.kind, runId: event.runId }
-          : { devices: event.devices }),
+        : event.type === "tool.state.changed"
+          ? { tool: event.tool }
+          : event.type === "run.activity"
+            ? { detail: event.detail, kind: event.kind, runId: event.runId }
+            : { devices: event.devices }),
       channel: "transient",
       type: event.type,
     } as RemoteAgentV2SessionEvent;
@@ -1496,14 +1545,19 @@ export class OrbisRemoteAgentV2Host {
 
   private async assertDriverCapability(
     driverId: AgentSessionRef["driverId"],
-    capability: "workspace.open",
+    capability: "permission.respond" | "workspace.open",
   ): Promise<void> {
     const driver = (await this.backend.listDrivers()).find(
       (candidate) => candidate.id === driverId,
     );
     if (driver === undefined) throw new AgentBackendError("not_found", "The driver is unavailable");
     if (!hasAgentDriverCapability(driver, capability)) {
-      throw new AgentBackendError("unsupported", "The driver cannot open server workspaces");
+      throw new AgentBackendError(
+        "unsupported",
+        capability === "permission.respond"
+          ? "The driver cannot respond to permission requests"
+          : "The driver cannot open server workspaces",
+      );
     }
   }
 

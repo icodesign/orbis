@@ -2,6 +2,26 @@ import { jsonValueSchema } from "@orbisapp/transport";
 import { z } from "zod";
 
 const nonEmptyString = z.string().min(1);
+const boundedPermissionId = nonEmptyString.max(1024).refine((value) => {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return value === value.trim();
+});
+const boundedPermissionDetail = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if ((code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f) {
+        return false;
+      }
+    }
+    return true;
+  });
 const safeInteger = z.number().int().refine(Number.isSafeInteger);
 const nonNegativeInteger = safeInteger.min(0);
 const positiveInteger = safeInteger.min(1);
@@ -78,6 +98,13 @@ export const v2ContentBlockSchema = z.discriminatedUnion("type", [
     .passthrough(),
   z
     .object({ name: nonEmptyString, type: z.literal("resource"), uri: nonEmptyString })
+    .passthrough(),
+]);
+
+export const v2StreamingContentBlockSchema = z.discriminatedUnion("type", [
+  z.object({ text: z.string(), type: z.literal("text") }).passthrough(),
+  z
+    .object({ redacted: z.boolean().optional(), text: z.string(), type: z.literal("thinking") })
     .passthrough(),
 ]);
 
@@ -171,26 +198,45 @@ export const v2QueuedInputSchema = z
   })
   .passthrough();
 
-export const v2PermissionSchema = z
+const v2PermissionOptionSchema = z
   .object({
-    callId: nonEmptyString.optional(),
-    defaultOptionId: nonEmptyString,
-    detail: z.string().optional(),
-    expiresAt: timestamp,
-    options: z.array(
-      z
-        .object({
-          kind: z.enum(["allow_once", "allow_always", "reject_once", "reject_always"]),
-          label: nonEmptyString,
-          optionId: nonEmptyString,
-        })
-        .passthrough(),
-    ),
-    requestId: nonEmptyString,
-    requestedAt: timestamp,
-    title: nonEmptyString,
+    kind: z.enum(["allow_once", "allow_always", "reject_once", "reject_always"]),
+    label: boundedPermissionId,
+    optionId: boundedPermissionId,
   })
   .passthrough();
+
+export const v2PermissionSchema = z
+  .object({
+    callId: boundedPermissionId.optional(),
+    detail: boundedPermissionDetail.optional(),
+    options: z.array(v2PermissionOptionSchema).min(2).max(16),
+    requestId: boundedPermissionId,
+    requestedAt: timestamp,
+    title: boundedPermissionId,
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const optionIds = new Set(value.options.map((option) => option.optionId));
+    if (optionIds.size !== value.options.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Permission option ids must be unique",
+      });
+    }
+    if (!value.options.some((option) => option.kind.startsWith("allow_"))) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Permission request requires an allow option",
+      });
+    }
+    if (!value.options.some((option) => option.kind.startsWith("reject_"))) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Permission request requires a reject option",
+      });
+    }
+  });
 
 export const v2StateSchema = z
   .object({
@@ -240,7 +286,9 @@ export const v2OverlaySchema = z
       z
         .object({
           callId: nonEmptyString,
-          chunkSeq: positiveInteger,
+          // A tool can enter pending state before its first streamed input or
+          // output fragment. Zero means no delta has been observed yet.
+          chunkSeq: nonNegativeInteger,
           content: z.array(v2ContentBlockSchema).optional(),
           entryId: nonEmptyString,
           input: jsonValueSchema.optional(),
@@ -252,7 +300,14 @@ export const v2OverlaySchema = z
     streaming: z
       .object({
         chunkSeq: positiveInteger,
-        content: z.array(v2ContentBlockSchema),
+        blocks: z.array(
+          z
+            .object({
+              blockIndex: nonNegativeInteger,
+              content: v2StreamingContentBlockSchema,
+            })
+            .passthrough(),
+        ),
         entryId: nonEmptyString,
       })
       .passthrough()
@@ -308,7 +363,6 @@ export const v2HelloResultSchema = z
         ]),
         dispose: z.boolean(),
         fork: z.boolean(),
-        permission: z.boolean(),
         presence: z.boolean(),
       })
       .passthrough(),
@@ -450,10 +504,10 @@ export const v2EntriesInputSchema = z
 
 export const v2PermissionResponseInputSchema = z
   .object({
-    idempotencyKey: nonEmptyString,
-    optionId: nonEmptyString,
+    idempotencyKey: boundedPermissionId,
+    optionId: boundedPermissionId,
     ref: v2RefSchema,
-    requestId: nonEmptyString,
+    requestId: boundedPermissionId,
   })
   .passthrough();
 
@@ -487,6 +541,7 @@ export const v2SessionEventSchema = z.union([
         nativeType: nonEmptyString.optional(),
         version: nonEmptyString.optional(),
       }),
+      settlesEntryId: nonEmptyString.optional(),
       type: z.literal("entry.appended"),
     })
     .passthrough(),
@@ -514,13 +569,36 @@ export const v2SessionEventSchema = z.union([
       entryId: nonEmptyString,
       eventId: nonEmptyString,
       occurredAt: timestamp,
-      part: z.enum(["text", "thinking", "tool_output"]),
+      part: z.enum(["text", "thinking", "tool_input", "tool_output"]),
       sessionId: nonEmptyString,
       source: v2RefSchema.pick({ backendId: true, driverId: true }).extend({
         nativeType: nonEmptyString.optional(),
         version: nonEmptyString.optional(),
       }),
       type: z.literal("entry.delta"),
+    })
+    .passthrough(),
+  z
+    .object({
+      channel: z.literal("transient"),
+      eventId: nonEmptyString,
+      occurredAt: timestamp,
+      sessionId: nonEmptyString,
+      source: v2RefSchema.pick({ backendId: true, driverId: true }).extend({
+        nativeType: nonEmptyString.optional(),
+        version: nonEmptyString.optional(),
+      }),
+      tool: z
+        .object({
+          callId: nonEmptyString,
+          content: z.array(v2ContentBlockSchema).optional(),
+          entryId: nonEmptyString,
+          input: jsonValueSchema.optional(),
+          name: nonEmptyString,
+          status: z.enum(["cancelled", "error", "pending", "running", "success"]),
+        })
+        .passthrough(),
+      type: z.literal("tool.state.changed"),
     })
     .passthrough(),
   z

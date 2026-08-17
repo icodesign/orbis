@@ -1,16 +1,8 @@
-import { expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { agentDriverId } from "@orbisapp/orbis-agent-backend";
-import type {
-  DshAgent,
-  DshAgentInboxEvent,
-  DshSession,
-  DshSessionEvent,
-  DshUserMessage,
-} from "../adapter";
 import {
   ORBIS_REMOTE_AGENT_V2_METHOD_LIST,
   ORBIS_REMOTE_AGENT_V2_METHODS,
@@ -23,7 +15,15 @@ import type {
   TransportEvent,
   WebSocketEvent,
 } from "@orbisapp/transport";
+import { expect, test } from "vitest";
 
+import type {
+  DshAgent,
+  DshAgentInboxEvent,
+  DshSession,
+  DshSessionEvent,
+  DshUserMessage,
+} from "../adapter";
 import { OrbisRemoteDshHost } from "./orbis-remote-dsh-host";
 
 const peer: RemoteHostPeer = {
@@ -532,7 +532,11 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       kind: "snapshot",
       overlay: {
         runId: "turn-1",
-        streaming: { content: [{ text: "streaming", type: "text" }], entryId: "message-1-1" },
+        streaming: {
+          chunkSeq: 1,
+          blocks: [{ blockIndex: 0, content: { text: "streaming", type: "text" } }],
+          entryId: "message-1-1",
+        },
       },
     });
     emitNative({
@@ -566,10 +570,10 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
         runningTools: [
           {
             callId: "call-1",
-            content: [{ text: '{"path":"/workspace/demo.ts"}', type: "text" }],
             entryId: "tool-call-1",
+            input: { path: "/workspace/demo.ts" },
             name: "read",
-            status: "running",
+            status: "pending",
           },
         ],
       },

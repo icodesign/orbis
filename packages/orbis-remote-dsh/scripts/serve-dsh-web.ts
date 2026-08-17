@@ -5,6 +5,12 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { z } from "zod";
+
+const packageManifestSchema = z.object({
+  dependencies: z.record(z.string(), z.unknown()),
+});
+
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_DSH_HOME = join(homedir(), ".dsh");
 const DSH_PROFILE = "web";
@@ -205,12 +211,8 @@ async function profileDependencies(home: string): Promise<ReadonlySet<string> | 
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  if (typeof manifest !== "object" || manifest === null || !("dependencies" in manifest)) {
-    return new Set();
-  }
-  const dependencies = manifest.dependencies;
-  if (typeof dependencies !== "object" || dependencies === null) return new Set();
-  return new Set(Object.keys(dependencies));
+  const result = packageManifestSchema.safeParse(manifest);
+  return new Set(result.success ? Object.keys(result.data.dependencies) : []);
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {

@@ -9,6 +9,7 @@ import type {
   AgentWorkspaceFolderDescriptor,
   AgentWorkspaceFolderListing,
   AgentWorkspaceRegisterResult,
+  AgentPermissionOption,
 } from "@orbisapp/orbis-agent-backend";
 import type {
   AgentBackendId,
@@ -23,6 +24,10 @@ import type { RemoteAgentHostPeer, RemoteAgentHostRequestContext } from "./host"
 
 export type RemoteAgentV2JsonValue = AgentJsonValue;
 export type RemoteAgentV2ContentBlock = AgentContentBlock;
+export type RemoteAgentV2StreamingContentBlock = Extract<
+  RemoteAgentV2ContentBlock,
+  { readonly type: "text" | "thinking" }
+>;
 
 export interface RemoteAgentV2ModelSelection extends AgentModelSelection {}
 
@@ -54,14 +59,8 @@ export interface RemoteAgentV2PermissionRequest {
   readonly callId?: string;
   readonly title: string;
   readonly detail?: string;
-  readonly options: readonly {
-    readonly optionId: string;
-    readonly label: string;
-    readonly kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
-  }[];
-  readonly defaultOptionId: string;
+  readonly options: readonly AgentPermissionOption[];
   readonly requestedAt: AgentTimestamp;
-  readonly expiresAt: AgentTimestamp;
 }
 
 export type RemoteAgentV2RunState = "idle" | "running" | "suspended" | "error";
@@ -144,7 +143,11 @@ export interface RemoteAgentV2Overlay {
   readonly runId: AgentRunId;
   readonly streaming?: {
     readonly entryId: AgentEntryId;
-    readonly content: readonly RemoteAgentV2ContentBlock[];
+    /** Indexed blocks preserve thinking/text interleaving across snapshots. */
+    readonly blocks: readonly {
+      readonly blockIndex: number;
+      readonly content: RemoteAgentV2StreamingContentBlock;
+    }[];
     readonly chunkSeq: number;
   };
   readonly runningTools: readonly {
@@ -177,7 +180,6 @@ export interface RemoteAgentV2SessionRecord extends RemoteAgentV2SessionSummary 
 }
 
 export interface RemoteAgentV2HostCapabilities {
-  readonly permission: boolean;
   readonly presence: boolean;
   readonly attachments:
     | { readonly maxBytes: number; readonly mimeTypes: readonly string[] }
@@ -281,7 +283,19 @@ export interface RemoteAgentV2Runtime {
       readonly idempotencyKey?: string;
     },
   ): Promise<RemoteAgentV2PromptReceipt>;
+  respondPermission(
+    input: Omit<RemoteAgentV2PermissionResponseInput, "ref" | "idempotencyKey"> & {
+      readonly idempotencyKey?: string;
+    },
+  ): Promise<{ readonly accepted: boolean }>;
   subscribe(listener: (event: RemoteAgentV2SessionEvent) => void): () => void;
+}
+
+export interface RemoteAgentV2PermissionResponseInput {
+  readonly ref: AgentSessionRef;
+  readonly requestId: string;
+  readonly optionId: string;
+  readonly idempotencyKey: string;
 }
 
 export interface RemoteAgentV2Backend {
@@ -346,6 +360,8 @@ export type RemoteAgentV2SessionEvent =
       readonly type: "entry.appended";
       readonly cursor: AgentDeliveryCursor;
       readonly entry: RemoteAgentV2Entry;
+      /** Transient overlay identity settled by this live durable append. */
+      readonly settlesEntryId?: AgentEntryId;
     })
   | (RemoteAgentV2EventBase & {
       readonly channel: "state";
@@ -357,10 +373,22 @@ export type RemoteAgentV2SessionEvent =
       readonly channel: "transient";
       readonly type: "entry.delta";
       readonly entryId: AgentEntryId;
-      readonly part: "text" | "thinking" | "tool_output";
+      readonly part: "text" | "thinking" | "tool_input" | "tool_output";
       readonly blockIndex: number;
       readonly chunkSeq: number;
       readonly delta: string;
+    })
+  | (RemoteAgentV2EventBase & {
+      readonly channel: "transient";
+      readonly type: "tool.state.changed";
+      readonly tool: {
+        readonly callId: string;
+        readonly content?: readonly RemoteAgentV2ContentBlock[];
+        readonly entryId: AgentEntryId;
+        readonly input?: RemoteAgentV2JsonValue;
+        readonly name: string;
+        readonly status: "cancelled" | "error" | "pending" | "running" | "success";
+      };
     })
   | (RemoteAgentV2EventBase & {
       readonly channel: "transient";

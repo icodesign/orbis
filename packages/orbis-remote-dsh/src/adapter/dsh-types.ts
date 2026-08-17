@@ -108,6 +108,40 @@ export interface DshApiResponse<T> {
   readonly rpcId: string;
 }
 
+export interface DshApiMuxFrame {
+  readonly type:
+    | "approval/requested"
+    | "approval/resolved"
+    | "session/event"
+    | "session/subscribed"
+    | "stream/error";
+  readonly sessionId?: unknown;
+  readonly approvalId?: string;
+  readonly rpcId?: string;
+  readonly toolName?: string;
+  readonly callId?: string;
+  readonly reason?: string;
+  readonly outcome?: "allowed-once" | "rejected" | "cancelled" | "unavailable";
+}
+
+export interface DshApiMuxRequest {
+  readonly payload: DshApiMuxFrame;
+  readonly rpcId: string;
+}
+
+export interface DshApiApprovalResponse {
+  readonly type: "client-response";
+  readonly rpcId: string;
+  readonly result: {
+    readonly ok: true;
+    readonly value: {
+      readonly approvalId: string;
+      readonly outcome: "allowed-once" | "rejected";
+      readonly sessionId: unknown;
+    };
+  };
+}
+
 /** Public DSH gateway seam shared by Web and other interactive front doors. */
 export interface DshApiProxy {
   readonly llm: {
@@ -133,6 +167,20 @@ export interface DshApiProxy {
       readonly rpcId: string;
     }): Promise<DshApiResponse<{ readonly selected: DshModelTarget }>>;
   };
+  /** Existing DSH mux/response carrier; no second approval waterfall is registered. */
+  readonly events?: {
+    mux(
+      request: {
+        readonly payload: { readonly since?: Readonly<Record<string, number>> };
+        readonly rpcId: string;
+      },
+      signal: AbortSignal,
+    ): AsyncIterable<DshApiMuxRequest>;
+  };
+  readonly respond?: (message: DshApiApprovalResponse) => Promise<{
+    readonly accepted: boolean;
+    readonly reason?: "not-pending" | "bad-response";
+  }>;
 }
 
 export interface DshAgent {

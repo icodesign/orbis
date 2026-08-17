@@ -5,6 +5,7 @@ import {
   agentRunId,
   agentTimestamp,
   createAgentDriverDescriptor,
+  type AgentJsonValue,
   type AgentQueuedInput,
   type AgentContentBlock,
   type AgentDriverDescriptor,
@@ -148,7 +149,7 @@ function v2Snapshot(
     mode: null,
     model: projection.metadata.model ?? null,
     pendingInputs: context.pendingInputs ?? [],
-    pendingPermissions: [],
+    pendingPermissions: projection.pendingPermissions ?? [],
     ref,
     revision: stateRevision,
     runState: runState(projection),
@@ -190,6 +191,9 @@ function eventEntry(
     channel: "replayable",
     cursor: agentDeliveryCursor(0),
     entry: v2Entry(event.payload.entry, parentId),
+    ...(event.payload.settlesEntryId === undefined
+      ? {}
+      : { settlesEntryId: event.payload.settlesEntryId }),
     type: "entry.appended",
   };
 }
@@ -217,6 +221,18 @@ function transientDelta(
     entryId: event.payload.entryId,
     part: event.payload.part,
     type: "entry.delta",
+  };
+}
+
+function transientToolState(
+  ref: AgentSessionRef,
+  event: Extract<AgentSessionEvent, { type: "tool.state.changed" }>,
+): RemoteAgentV2SessionEvent {
+  return {
+    ...baseEvent(ref, event),
+    channel: "transient",
+    tool: event.payload.tool,
+    type: "tool.state.changed",
   };
 }
 
@@ -271,6 +287,9 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
   private readonly removeNative: () => void;
   private lastEntryId: RemoteAgentV2Entry["id"] | null;
   private overlay: RemoteAgentV2Overlay | undefined;
+  private readonly toolInputBuffers = new Map<string, string>();
+  /** Identities that have been durably settled; late deltas must not recreate them. */
+  private readonly settledEntries = new Set<string>();
   private closed = false;
 
   constructor(
@@ -340,6 +359,19 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     };
   }
 
+  async respondPermission(input: {
+    readonly requestId: string;
+    readonly optionId: string;
+    readonly idempotencyKey?: string;
+  }): Promise<{ readonly accepted: boolean }> {
+    this.assertOpen();
+    return this.native.respondPermission({
+      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+      optionId: input.optionId,
+      requestId: input.requestId,
+    });
+  }
+
   subscribe(listener: (event: RemoteAgentV2SessionEvent) => void): () => void {
     this.assertOpen();
     this.listeners.add(listener);
@@ -351,13 +383,22 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
       case "entry.appended": {
         const mapped = eventEntry(this.ref, event, this.lastEntryId);
         this.lastEntryId = event.payload.entry.id;
-        this.removeCommittedOverlay(event.payload.entry.id);
+        if (event.payload.settlesEntryId !== undefined) {
+          this.settledEntries.add(String(event.payload.settlesEntryId));
+        }
+        this.removeCommittedOverlay(
+          event.payload.settlesEntryId,
+          event.payload.entry.kind === "tool" ? event.payload.entry.callId : undefined,
+        );
         return mapped;
       }
       case "entry.delta": {
         this.appendMessageOverlay(event);
         return transientDelta(this.ref, event);
       }
+      case "tool.state.changed":
+        this.updateToolState(event);
+        return transientToolState(this.ref, event);
       case "session.state.changed": {
         const patch = statePatch(event.payload.patch);
         if (patch.pendingInputs !== undefined)
@@ -406,67 +447,159 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
   }
 
   private appendMessageOverlay(event: Extract<AgentSessionEvent, { type: "entry.delta" }>): void {
+    if (this.settledEntries.has(String(event.payload.entryId))) return;
+    if (event.payload.part === "tool_input") {
+      this.updateToolInput(event);
+      return;
+    }
     if (event.payload.part === "tool_output") {
-      this.appendToolOverlay(event);
+      this.appendToolOutput(event);
       return;
     }
     const current = this.overlay;
     if (current === undefined) return;
     const streaming = current.streaming ?? {
-      content: [],
+      blocks: [],
       entryId: event.payload.entryId,
       chunkSeq: 0,
     };
-    const content = [...streaming.content];
+    const blocks = [...streaming.blocks];
     const type = event.payload.part === "thinking" ? "thinking" : "text";
-    const previous = content.at(-1);
+    const index = blocks.findIndex((block) => block.blockIndex === event.payload.blockIndex);
+    const previous = index === -1 ? undefined : blocks[index]?.content;
+    if (previous !== undefined && previous.type !== type) return;
     if (previous?.type === type) {
-      content[content.length - 1] = {
-        ...previous,
-        text: `${previous.text}${event.payload.delta}`,
+      blocks[index] = {
+        blockIndex: event.payload.blockIndex,
+        content: { ...previous, text: `${previous.text}${event.payload.delta}` },
       };
     } else {
-      content.push({ text: event.payload.delta, type });
+      blocks.push({
+        blockIndex: event.payload.blockIndex,
+        content: { text: event.payload.delta, type },
+      });
+      blocks.sort((left, right) => left.blockIndex - right.blockIndex);
     }
     this.updateOverlay({
       ...current,
-      streaming: { ...streaming, chunkSeq: event.payload.chunkSeq, content },
+      streaming: { ...streaming, blocks, chunkSeq: event.payload.chunkSeq },
     });
   }
 
-  private appendToolOverlay(event: Extract<AgentSessionEvent, { type: "entry.delta" }>): void {
+  private appendToolOutput(event: Extract<AgentSessionEvent, { type: "entry.delta" }>): void {
     const current = this.overlay;
     if (current === undefined) return;
-    const callId = String(event.payload.entryId).replace(/^tool-/u, "");
     const existing = current.runningTools.find((tool) => tool.entryId === event.payload.entryId);
+    if (existing === undefined) return;
     const content = [
       ...(existing?.content ?? []),
       { text: event.payload.delta, type: "text" as const },
     ];
-    const tool = {
-      ...(existing ?? {
-        callId,
-        entryId: event.payload.entryId,
-        name: "tool",
-        status: "running" as const,
-      }),
-      ...(this.native.overlayTool(String(event.payload.entryId)) ?? {}),
-      entryId: event.payload.entryId,
-    };
     this.updateOverlay({
       ...current,
       runningTools: [
         ...current.runningTools.filter((candidate) => candidate.entryId !== event.payload.entryId),
-        { ...tool, chunkSeq: event.payload.chunkSeq, content },
+        { ...existing, chunkSeq: event.payload.chunkSeq, content },
       ],
     });
   }
 
-  private removeCommittedOverlay(entryId: AgentSessionEntry["id"]): void {
+  private updateToolInput(event: Extract<AgentSessionEvent, { type: "entry.delta" }>): void {
     const current = this.overlay;
     if (current === undefined) return;
-    const streaming = current.streaming?.entryId === entryId ? undefined : current.streaming;
-    const runningTools = current.runningTools.filter((tool) => tool.entryId !== entryId);
+    const existing = current.runningTools.find((tool) => tool.entryId === event.payload.entryId);
+    if (existing === undefined) return;
+
+    const key = String(existing.entryId);
+    const buffered = `${this.toolInputBuffers.get(key) ?? ""}${event.payload.delta}`;
+    this.toolInputBuffers.set(key, buffered);
+    let input: AgentJsonValue | undefined;
+    try {
+      input = JSON.parse(buffered) as AgentJsonValue;
+    } catch {
+      input = undefined;
+    }
+
+    this.updateOverlay({
+      ...current,
+      runningTools: current.runningTools.map((tool) =>
+        tool.entryId === existing.entryId
+          ? {
+              ...tool,
+              ...(input === undefined ? {} : { input }),
+              chunkSeq: event.payload.chunkSeq,
+            }
+          : tool,
+      ),
+    });
+  }
+
+  private updateToolState(event: Extract<AgentSessionEvent, { type: "tool.state.changed" }>): void {
+    const current = this.overlay;
+    if (current === undefined) return;
+    const state = event.payload.tool;
+    const existing = current.runningTools.find(
+      (tool) => tool.entryId === state.entryId || tool.callId === state.callId,
+    );
+    const matches = (tool: RemoteAgentV2Overlay["runningTools"][number]) =>
+      tool.entryId === state.entryId || tool.callId === state.callId;
+
+    if (state.status === "success" || state.status === "error" || state.status === "cancelled") {
+      this.settledEntries.add(String(state.entryId));
+      this.toolInputBuffers.delete(String(state.entryId));
+      const runningTools = current.runningTools.filter((tool) => !matches(tool));
+      if (runningTools.length === current.runningTools.length) return;
+      this.updateOverlay({ ...current, runningTools });
+      return;
+    }
+    if (this.settledEntries.has(String(state.entryId))) return;
+
+    const key = String(state.entryId);
+    if (state.input !== undefined) this.toolInputBuffers.delete(key);
+    const bufferedInput = this.parseBufferedToolInput(key);
+    const input = state.input ?? existing?.input ?? bufferedInput;
+    const content = state.content ?? existing?.content;
+    const tool = {
+      callId: state.callId,
+      entryId: state.entryId,
+      name: state.name,
+      status: state.status,
+      ...(input === undefined ? {} : { input }),
+      ...(content === undefined ? {} : { content }),
+      chunkSeq: existing?.chunkSeq ?? 0,
+    };
+    this.updateOverlay({
+      ...current,
+      runningTools: [...current.runningTools.filter((candidate) => !matches(candidate)), tool],
+    });
+  }
+
+  private parseBufferedToolInput(key: string): AgentJsonValue | undefined {
+    const buffered = this.toolInputBuffers.get(key);
+    if (buffered === undefined) return undefined;
+    try {
+      return JSON.parse(buffered) as AgentJsonValue;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private removeCommittedOverlay(
+    settlesEntryId: AgentSessionEntry["id"] | undefined,
+    callId?: string,
+  ): void {
+    const current = this.overlay;
+    if (current === undefined || settlesEntryId === undefined) return;
+    const streaming = current.streaming?.entryId === settlesEntryId ? undefined : current.streaming;
+    const runningTools = current.runningTools.filter(
+      (tool) => tool.entryId !== settlesEntryId && (callId === undefined || tool.callId !== callId),
+    );
+    this.toolInputBuffers.delete(String(settlesEntryId));
+    if (callId !== undefined) {
+      for (const tool of current.runningTools) {
+        if (tool.callId === callId) this.toolInputBuffers.delete(String(tool.entryId));
+      }
+    }
     if (streaming === current.streaming && runningTools.length === current.runningTools.length)
       return;
     if (streaming === undefined) {

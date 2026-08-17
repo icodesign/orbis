@@ -62,6 +62,7 @@ export type {
   RemoteAgentV2ModelSelection,
   RemoteAgentV2Overlay,
   RemoteAgentV2PermissionRequest,
+  RemoteAgentV2PermissionResponseInput,
   RemoteAgentV2PromptInput,
   RemoteAgentV2PromptReceipt,
   RemoteAgentV2QueuedInput,

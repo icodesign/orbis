@@ -79,7 +79,6 @@ function helloResult(): JsonValue {
       attachments: false,
       dispose: false,
       fork: false,
-      permission: false,
       presence: false,
     },
     drivers: [
@@ -115,12 +114,93 @@ function entryEvent(): TransportEvent {
     occurredAt,
     sessionId: ref.sessionId,
     source: { backendId: ref.backendId, driverId: ref.driverId },
+    settlesEntryId: "stream:1",
     type: "entry.appended",
   };
   return {
     durability: "durable",
     eventId: "event-a",
     eventSeq: 1,
+    payload: {
+      event: event as unknown as AgentJsonValue,
+      protocolVersion: 2,
+      scope: {
+        kind: "session",
+        ref: {
+          backendId: ref.backendId,
+          driverId: ref.driverId,
+          nativeSessionId: ref.nativeSessionId,
+          sessionId: ref.sessionId,
+        },
+      },
+    } as unknown as JsonValue,
+    sessionId: ref.sessionId,
+    source: { harness: "dsh" },
+    time: occurredAt,
+    type: ORBIS_REMOTE_AGENT_V2_EVENT_TYPE,
+  };
+}
+
+function toolStateEvent(): TransportEvent {
+  const occurredAt = agentTimestamp("2026-08-11T00:00:03.000Z");
+  const event = {
+    channel: "transient",
+    eventId: "tool-state-a",
+    occurredAt,
+    sessionId: ref.sessionId,
+    source: { backendId: ref.backendId, driverId: ref.driverId },
+    tool: {
+      callId: "call-a",
+      entryId: "tool-call-a",
+      input: { path: "/workspace/demo.ts" },
+      name: "read",
+      status: "running",
+    },
+    type: "tool.state.changed",
+  };
+  return {
+    durability: "transient",
+    eventId: "tool-state-a",
+    eventSeq: 2,
+    payload: {
+      event: event as unknown as AgentJsonValue,
+      protocolVersion: 2,
+      scope: {
+        kind: "session",
+        ref: {
+          backendId: ref.backendId,
+          driverId: ref.driverId,
+          nativeSessionId: ref.nativeSessionId,
+          sessionId: ref.sessionId,
+        },
+      },
+    } as unknown as JsonValue,
+    sessionId: ref.sessionId,
+    source: { harness: "dsh" },
+    time: occurredAt,
+    type: ORBIS_REMOTE_AGENT_V2_EVENT_TYPE,
+  };
+}
+
+function toolInputDeltaEvent(): TransportEvent {
+  const occurredAt = agentTimestamp("2026-08-11T00:00:04.000Z");
+  const event = {
+    blockIndex: 0,
+    channel: "transient",
+    chunkSeq: 1,
+    delta: '{"path":"/workspace/demo.ts"}',
+    entryId: "tool-call-a",
+    eventId: "tool-input-a",
+    occurredAt,
+    part: "tool_input",
+    sessionId: ref.sessionId,
+    source: { backendId: ref.backendId, driverId: ref.driverId },
+    type: "entry.delta",
+  };
+  return {
+    durability: "transient",
+    eventId: "tool-input-a",
+    eventSeq: 3,
     payload: {
       event: event as unknown as AgentJsonValue,
       protocolVersion: 2,
@@ -252,7 +332,12 @@ test("v2 connection enforces hello-first and delivers replayable events without 
 
   expect(deliveries).toHaveLength(2);
   expect(deliveries[0]).toMatchObject({
-    event: { cursor: 1, entry: { id: "entry-a" }, type: "entry.appended" },
+    event: {
+      cursor: 1,
+      entry: { id: "entry-a" },
+      settlesEntryId: "stream:1",
+      type: "entry.appended",
+    },
     ref,
     transportEvent: { eventSeq: 1 },
   });
@@ -271,6 +356,40 @@ test("v2 hello rejects a client with no common protocol version", async () => {
       connection.hello({ device: { name: "Old client" }, supportedVersions: [1] }),
     ),
   ).toMatchObject({ code: "version_unsupported" });
+});
+
+test("v2 connection decodes tool state and tool input events", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  const deliveries: unknown[] = [];
+  connection.onEvent((delivery) => deliveries.push(delivery));
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  transport.emit(toolStateEvent());
+  transport.emit(toolInputDeltaEvent());
+
+  expect(deliveries).toMatchObject([
+    {
+      event: {
+        tool: {
+          callId: "call-a",
+          entryId: "tool-call-a",
+          input: { path: "/workspace/demo.ts" },
+          name: "read",
+          status: "running",
+        },
+        type: "tool.state.changed",
+      },
+    },
+    {
+      event: {
+        entryId: "tool-call-a",
+        part: "tool_input",
+        type: "entry.delta",
+      },
+    },
+  ]);
 });
 
 test("v2 connection preserves protocol failures returned by the host", async () => {
@@ -351,6 +470,18 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
     hostRevision: "revision-b",
     kind: "snapshot",
     oldestCursor: 0,
+    overlay: {
+      runId: "run-a",
+      runningTools: [
+        {
+          callId: "call-a",
+          chunkSeq: 0,
+          entryId: "tool-call-a",
+          name: "read",
+          status: "pending",
+        },
+      ],
+    },
     state: {
       configOptions: {},
       createdAt: "2026-08-11T00:00:00.000Z",
@@ -378,7 +509,11 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
 
   const result = await connection.sync({ mode: "once", ref });
 
-  expect(result).toMatchObject({ hostRevision: "revision-b", kind: "snapshot" });
+  expect(result).toMatchObject({
+    hostRevision: "revision-b",
+    kind: "snapshot",
+    overlay: { runningTools: [{ chunkSeq: 0 }] },
+  });
 });
 
 test("v2 connection rejects a session event whose scope disagrees with its source", async () => {

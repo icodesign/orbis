@@ -1,8 +1,15 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { z } from "zod";
+
 import { type OrbisDshHostService } from "./host-service";
 
 const MAX_BODY_BYTES = 32 * 1024;
+
+const configureRequestSchema = z.object({
+  directPort: z.number().int(),
+  hostName: z.string(),
+});
 
 export interface OrbisHttpRoute {
   readonly kind: "prefix";
@@ -73,7 +80,7 @@ function failure(response: ServerResponse, status: number, error: unknown): void
   send(response, status, { error: message });
 }
 
-async function jsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function jsonBody(request: IncomingMessage): Promise<unknown> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
@@ -82,26 +89,11 @@ async function jsonBody(request: IncomingMessage): Promise<Record<string, unknow
     if (size > MAX_BODY_BYTES) throw new Error("The request body is too large");
     chunks.push(bytes);
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     throw new Error("The request body must be valid JSON");
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("The request body must be a JSON object");
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function string(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(label + " must be a string");
-  return value;
-}
-
-function integer(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value)) throw new Error(label + " must be an integer");
-  return value as number;
 }
 
 function methodNotAllowed(response: ServerResponse): void {
@@ -127,11 +119,11 @@ export function createOrbisHttpRoute(service: OrbisDshHostService): OrbisHttpRou
         }
         if (pathname === "/orbis/config") {
           if (request.method !== "PUT") return methodNotAllowed(response);
-          const body = await jsonBody(request);
-          await service.configure({
-            directPort: integer(body.directPort, "directPort"),
-            hostName: string(body.hostName, "hostName"),
-          });
+          const result = configureRequestSchema.safeParse(await jsonBody(request));
+          if (!result.success) {
+            throw new Error("The request body must include directPort and hostName");
+          }
+          await service.configure(result.data);
           send(response, 200, await service.status());
           return;
         }

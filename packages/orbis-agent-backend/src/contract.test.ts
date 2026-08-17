@@ -12,11 +12,14 @@ import {
   createAgentDriverDescriptor,
   createAgentSessionProjection,
   createAgentSessionRef,
+  validateAgentPermissionRequest,
+  validateAgentPermissionResponseInput,
   type AgentEntryAppendedEvent,
   type AgentEntryDeltaEvent,
   type AgentSessionStateChangedEvent,
   type AgentSessionEvent,
   type AgentSessionMetadata,
+  type AgentToolStateChangedEvent,
 } from "./index";
 import { FakeAgentBackend } from "./testkit";
 
@@ -254,17 +257,35 @@ describe("agent backend contract", () => {
         chunkSeq: 1,
         delta: "not persisted",
         entryId: agentEntryId("stream-1"),
-        part: "text",
+        part: "tool_input",
       },
       sessionId: ref.sessionId,
       source: { backendId: ref.backendId, driverId: ref.driverId },
       type: "entry.delta",
+    };
+    const toolState: AgentToolStateChangedEvent = {
+      durability: "transient",
+      eventId: agentEventId("event-tool-state"),
+      occurredAt: FIXED_TIME,
+      payload: {
+        tool: {
+          callId: "call-1",
+          entryId: agentEntryId("tool-call-1"),
+          input: { path: "/workspace/demo.ts" },
+          name: "read",
+          status: "running",
+        },
+      },
+      sessionId: ref.sessionId,
+      source: { backendId: ref.backendId, driverId: ref.driverId },
+      type: "tool.state.changed",
     };
 
     const afterStart = expectApplied(runStarted);
     const afterEntry = expectApplied(entry, afterStart);
     const duplicate = applyAgentSessionEvent(afterEntry, entry);
     const ignoredTransient = applyAgentSessionEvent(afterEntry, transient);
+    const ignoredToolState = applyAgentSessionEvent(afterEntry, toolState);
     const gap = applyAgentSessionEvent(afterEntry, durableEntryEvent(3, "event-4", "entry-4"));
     const stale = applyAgentSessionEvent(
       afterEntry,
@@ -284,6 +305,8 @@ describe("agent backend contract", () => {
     expect(duplicate).toMatchObject({ kind: "ignored", reason: "duplicate" });
     expect(ignoredTransient).toMatchObject({ kind: "ignored", reason: "transient" });
     expect(ignoredTransient.projection).toBe(afterEntry);
+    expect(ignoredToolState).toMatchObject({ kind: "ignored", reason: "transient" });
+    expect(ignoredToolState.projection).toBe(afterEntry);
     expect(gap).toMatchObject({
       expectedCursor: agentDeliveryCursor(2),
       kind: "gap",
@@ -291,5 +314,59 @@ describe("agent backend contract", () => {
     });
     expect(stale).toMatchObject({ kind: "conflict", error: { code: "cursor_conflict" } });
     expect(wrongSource).toMatchObject({ kind: "conflict", error: { code: "protocol" } });
+  });
+
+  test("validates permission options as a full decision set and preserves multiline detail", () => {
+    const request = validateAgentPermissionRequest({
+      detail: "The tool needs access to this file.\nReview the path before continuing.",
+      options: [
+        { kind: "allow_once", label: "Allow once", optionId: "allow-once" },
+        { kind: "reject_once", label: "Reject", optionId: "reject-once" },
+      ],
+      requestId: "request-1",
+      requestedAt: FIXED_TIME,
+      title: "Read a file",
+    });
+    expect(request.detail).toContain("\n");
+
+    expect(() =>
+      validateAgentPermissionRequest({
+        options: [
+          { kind: "allow_once", label: "Allow", optionId: "same" },
+          { kind: "reject_once", label: "Reject", optionId: "same" },
+        ],
+        requestId: "request-2",
+        requestedAt: FIXED_TIME,
+        title: "Duplicate options",
+      }),
+    ).toThrow(/unique/u);
+    expect(() =>
+      validateAgentPermissionRequest({
+        options: [
+          { kind: "allow_once", label: "Allow", optionId: "allow" },
+          { kind: "allow_always", label: "Always allow", optionId: "always" },
+        ],
+        requestId: "request-3",
+        requestedAt: FIXED_TIME,
+        title: "Missing rejection",
+      }),
+    ).toThrow(/reject option/u);
+    expect(() =>
+      validateAgentPermissionRequest({
+        options: [
+          { kind: "reject_once", label: "Reject", optionId: "reject" },
+          { kind: "reject_always", label: "Always reject", optionId: "always-reject" },
+        ],
+        requestId: "request-4",
+        requestedAt: FIXED_TIME,
+        title: "Missing approval",
+      }),
+    ).toThrow(/allow option/u);
+    expect(
+      validateAgentPermissionResponseInput({
+        optionId: "allow-once",
+        requestId: "request-1",
+      }),
+    ).toEqual({ optionId: "allow-once", requestId: "request-1" });
   });
 });

@@ -1,6 +1,12 @@
 import type { AgentDriverDescriptor } from "./capabilities";
 import { AgentBackendError } from "./errors";
-import type { AgentJsonValue, AgentModelSelection, AgentSessionEventListener } from "./events";
+import type {
+  AgentJsonValue,
+  AgentModelSelection,
+  AgentPermissionResponseInput,
+  AgentPermissionResponseResult,
+  AgentSessionEventListener,
+} from "./events";
 import type {
   AgentBackendId,
   AgentDriverId,
@@ -191,6 +197,7 @@ export interface AgentSessionRuntime {
   close(): Promise<void>;
   getStatus(): AgentRuntimeStatus;
   prompt(input: AgentPromptInput): Promise<AgentPromptReceipt>;
+  respondPermission(input: AgentPermissionResponseInput): Promise<AgentPermissionResponseResult>;
   subscribe(listener: AgentSessionEventListener): () => void;
 }
 

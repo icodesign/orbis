@@ -157,6 +157,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
   let current = snapshot([]);
   const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
   let prompts = 0;
+  let permissionResponses = 0;
   let updates = 0;
   const runtime: RemoteAgentV2Runtime = {
     cancel: async () => ({ cancelled: false }),
@@ -164,6 +165,11 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     prompt: async () => {
       prompts += 1;
       return { acceptedAt: now, queued: false, runId: agentRunId("run-1") };
+    },
+    respondPermission: async (input) => {
+      permissionResponses += 1;
+      expect(input).toMatchObject({ optionId: "allow-once", requestId: "permission-1" });
+      return { accepted: true };
     },
     ref: nativeRef,
     subscribe: (listener) => {
@@ -199,7 +205,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     hostId: agentBackendId("native"),
     listDrivers: async () => [
       createAgentDriverDescriptor({
-        capabilities: ["model.select", "session.list", "workspace.open"],
+        capabilities: ["model.select", "permission.respond", "session.list", "workspace.open"],
         displayName: "DSH",
         id: "dsh",
       }),
@@ -396,13 +402,43 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       type: "orbis.event",
     });
 
+    runtimeListeners.forEach((listener) =>
+      listener({
+        channel: "transient",
+        eventId: agentEventId("native-tool-state-1"),
+        occurredAt: now,
+        sessionId: nativeRef.sessionId,
+        source: { backendId: nativeRef.backendId, driverId: nativeRef.driverId },
+        tool: {
+          callId: "call-1",
+          entryId: agentEntryId("tool-call-1"),
+          input: { path: "/workspace/demo.ts" },
+          name: "read",
+          status: "running",
+        },
+        type: "tool.state.changed",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(4);
+    expect(sent[3]).toMatchObject({
+      durability: "transient",
+      payload: {
+        event: {
+          tool: { callId: "call-1", name: "read", status: "running" },
+          type: "tool.state.changed",
+        },
+      },
+      type: "orbis.event",
+    });
+
     const replay = await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
       params({ afterCursor: 0, afterEntryId: null, mode: "once", ref: publicRef }),
       context(),
     );
     expect(replay).toMatchObject({ hasMore: false, kind: "replay", throughCursor: 2 });
-    expect(sent).toHaveLength(5);
+    expect(sent).toHaveLength(6);
 
     const older = await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsEntries,
@@ -441,6 +477,28 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       context(),
     );
     expect(prompts).toBe(1);
+
+    const permission = {
+      idempotencyKey: "permission-1",
+      optionId: "allow-once",
+      ref: publicRef,
+      requestId: "permission-1",
+    };
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission,
+        params(permission),
+        context(),
+      ),
+    ).resolves.toEqual({ accepted: true });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission,
+        params(permission),
+        context(),
+      ),
+    ).resolves.toEqual({ accepted: true });
+    expect(permissionResponses).toBe(1);
 
     const retryablePrompt = {
       ...prompt,

@@ -11,6 +11,7 @@ import {
   createAgentSessionRef,
   createAgentDriverDescriptor,
   isAgentBackendError,
+  validateAgentPermissionRequest,
   type AgentBackendErrorCode,
   type AgentDriverDescriptor,
   type AgentJsonValue,
@@ -143,7 +144,7 @@ export interface RemoteAgentV2Connection {
     readonly requestId: string;
     readonly optionId: string;
     readonly idempotencyKey: string;
-  }): Promise<{ readonly accepted: boolean; readonly resolvedBy?: string }>;
+  }): Promise<{ readonly accepted: boolean }>;
   sync(input: {
     readonly ref: AgentSessionRef;
     readonly afterCursor?: number;
@@ -399,31 +400,11 @@ function parseQueuedInput(value: unknown): RemoteAgentV2SessionState["pendingInp
 }
 
 function parsePermission(value: unknown): RemoteAgentV2PermissionRequest {
-  const input = record(value, "Permission request");
-  return {
-    requestId: string(input, "requestId", "Permission request id"),
-    ...(input.callId === undefined
-      ? {}
-      : { callId: string(input, "callId", "Permission call id") }),
-    title: string(input, "title", "Permission title"),
-    ...(input.detail === undefined ? {} : { detail: string(input, "detail", "Permission detail") }),
-    options: array(input, "options", "Permission options").map(parsePermissionOption),
-    defaultOptionId: string(input, "defaultOptionId", "Default permission option"),
-    requestedAt: agentTimestamp(string(input, "requestedAt", "Permission request time")),
-    expiresAt: agentTimestamp(string(input, "expiresAt", "Permission expiry")),
-  };
-}
-
-function parsePermissionOption(value: unknown): RemoteAgentV2PermissionRequest["options"][number] {
-  const input = record(value, "Permission option");
-  const kind = string(input, "kind", "Permission option kind");
-  if (!["allow_once", "allow_always", "reject_once", "reject_always"].includes(kind))
-    protocolError("Permission option kind is invalid");
-  return {
-    optionId: string(input, "optionId", "Permission option id"),
-    label: string(input, "label", "Permission option label"),
-    kind: kind as RemoteAgentV2PermissionRequest["options"][number]["kind"],
-  };
+  try {
+    return validateAgentPermissionRequest(value);
+  } catch {
+    protocolError("Permission request is invalid");
+  }
 }
 
 function parseSummary(value: unknown): RemoteAgentV2SessionSummary {
@@ -450,9 +431,20 @@ function parseStreaming(value: unknown): NonNullable<RemoteAgentV2Overlay["strea
   const input = parseSchema(v2OverlaySchema.shape.streaming.unwrap(), value, "Streaming overlay");
   return {
     entryId: agentEntryId(input.entryId),
-    content: input.content.map(parseContent),
+    blocks: input.blocks.map((block) => ({
+      blockIndex: block.blockIndex,
+      content: parseStreamingContent(block.content),
+    })),
     chunkSeq: input.chunkSeq,
   };
+}
+
+function parseStreamingContent(
+  value: unknown,
+): NonNullable<RemoteAgentV2Overlay["streaming"]>["blocks"][number]["content"] {
+  const content = parseContent(value);
+  if (content.type === "text" || content.type === "thinking") return content;
+  throw new AgentBackendError("protocol", "Streaming overlay content must be text or thinking");
 }
 
 function parseRunningTool(value: unknown): RemoteAgentV2Overlay["runningTools"][number] {
@@ -500,7 +492,6 @@ function parseHello(value: unknown): RemoteAgentV2Hello {
     hostId: agentBackendId(input.hostId),
     hostRevision: input.hostRevision,
     capabilities: {
-      permission: input.capabilities.permission,
       presence: input.capabilities.presence,
       attachments:
         input.capabilities.attachments === false
@@ -542,6 +533,7 @@ function parseEvent(value: unknown): RemoteAgentV2SessionEvent | RemoteAgentV2De
     (input.channel === "state" && type !== "session.state.changed") ||
     (input.channel === "transient" &&
       type !== "entry.delta" &&
+      type !== "tool.state.changed" &&
       type !== "run.activity" &&
       type !== "presence.changed")
   ) {
@@ -564,6 +556,9 @@ function parseEvent(value: unknown): RemoteAgentV2SessionEvent | RemoteAgentV2De
       type: parsed.type,
       cursor: agentDeliveryCursor(parsed.cursor),
       entry: parseEntry(parsed.entry),
+      ...(parsed.settlesEntryId === undefined
+        ? {}
+        : { settlesEntryId: agentEntryId(parsed.settlesEntryId) }),
     };
   }
   if (parsed.type === "session.state.changed") {
@@ -585,6 +580,23 @@ function parseEvent(value: unknown): RemoteAgentV2SessionEvent | RemoteAgentV2De
       blockIndex: parsed.blockIndex,
       chunkSeq: parsed.chunkSeq,
       delta: parsed.delta,
+    };
+  }
+  if (parsed.type === "tool.state.changed") {
+    return {
+      ...base,
+      channel: parsed.channel,
+      tool: {
+        callId: parsed.tool.callId,
+        ...(parsed.tool.content === undefined
+          ? {}
+          : { content: parsed.tool.content.map(parseContent) }),
+        entryId: agentEntryId(parsed.tool.entryId),
+        ...(parsed.tool.input === undefined ? {} : { input: json(parsed.tool.input) }),
+        name: parsed.tool.name,
+        status: parsed.tool.status,
+      },
+      type: parsed.type,
     };
   }
   if (parsed.type === "run.activity") {
@@ -737,15 +749,13 @@ function parseTransportError(error: unknown): AgentBackendError {
               ? error.serverCode === "revision_conflict"
                 ? "revision_conflict"
                 : "conflict"
-              : error.code === "remote_request" && error.serverCode === "permission_expired"
-                ? "permission_expired"
-                : error.code === "remote_request" && error.serverCode === "version_unsupported"
-                  ? "version_unsupported"
-                  : error.code === "remote_request" && error.serverCode === "unsupported"
+              : error.code === "remote_request" && error.serverCode === "version_unsupported"
+                ? "version_unsupported"
+                : error.code === "remote_request" && error.serverCode === "unsupported"
+                  ? "unsupported"
+                  : error.code === "remote_request" && error.serverCode === "method_not_found"
                     ? "unsupported"
-                    : error.code === "remote_request" && error.serverCode === "method_not_found"
-                      ? "unsupported"
-                      : "unavailable";
+                    : "unavailable";
   return new AgentBackendError(mappedCode, error.message, {
     ...(error.serverCode === undefined ? {} : { details: { serverCode: error.serverCode } }),
     retryable: error.retryable,
@@ -1031,12 +1041,7 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
       { ...input, ref: refPayload(input.ref) },
       (value) => {
         const output = record(value, "Permission result");
-        return {
-          accepted: boolean(output, "accepted", "Permission accepted"),
-          ...(output.resolvedBy === undefined
-            ? {}
-            : { resolvedBy: string(output, "resolvedBy", "Resolved by") }),
-        };
+        return { accepted: boolean(output, "accepted", "Permission accepted") };
       },
     );
   }

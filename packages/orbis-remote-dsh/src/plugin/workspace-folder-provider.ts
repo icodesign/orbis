@@ -11,6 +11,7 @@ import {
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
 } from "@orbisapp/orbis-agent-backend";
+import { z } from "zod";
 
 import type { DshRemoteWorkspaceProvider } from "../host";
 
@@ -27,6 +28,19 @@ interface FolderPayload {
   readonly root: number;
   readonly segments: readonly string[];
 }
+
+const folderSegmentSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (segment) =>
+      segment !== "." && segment !== ".." && !segment.includes("/") && !segment.includes("\\"),
+  );
+
+const folderPayloadSchema = z.object({
+  root: z.number().int(),
+  segments: z.array(folderSegmentSchema),
+});
 
 export interface CreateDshWorkspaceFolderProviderOptions {
   readonly browser: DirectoryPickerBrowseCapability;
@@ -248,26 +262,11 @@ class DshWorkspaceFolderProvider implements DshRemoteWorkspaceProvider {
     } catch {
       throw new AgentBackendError("invalid_argument", "Folder reference is invalid");
     }
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      !("root" in value) ||
-      !Number.isSafeInteger(value.root) ||
-      !("segments" in value) ||
-      !Array.isArray(value.segments) ||
-      value.segments.some(
-        (segment) =>
-          typeof segment !== "string" ||
-          !segment ||
-          segment === "." ||
-          segment === ".." ||
-          segment.includes("/") ||
-          segment.includes("\\"),
-      )
-    ) {
+    const result = folderPayloadSchema.safeParse(value);
+    if (!result.success) {
       throw new AgentBackendError("invalid_argument", "Folder reference is invalid");
     }
-    return value as unknown as FolderPayload;
+    return result.data;
   }
 }
 

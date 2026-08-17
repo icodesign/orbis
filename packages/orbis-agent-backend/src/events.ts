@@ -131,19 +131,35 @@ export interface AgentQueuedInput {
   readonly queuedAt: AgentTimestamp;
 }
 
+export type AgentPermissionOptionKind =
+  | "allow_always"
+  | "allow_once"
+  | "reject_always"
+  | "reject_once";
+
+export interface AgentPermissionOption {
+  readonly kind: AgentPermissionOptionKind;
+  readonly label: string;
+  readonly optionId: string;
+}
+
 export interface AgentPermissionRequest {
   readonly callId?: string;
-  readonly defaultOptionId: string;
   readonly detail?: string;
-  readonly expiresAt: AgentTimestamp;
-  readonly options: readonly {
-    readonly kind: "allow_always" | "allow_once" | "reject_always" | "reject_once";
-    readonly label: string;
-    readonly optionId: string;
-  }[];
+  readonly options: readonly AgentPermissionOption[];
   readonly requestedAt: AgentTimestamp;
   readonly requestId: string;
   readonly title: string;
+}
+
+export interface AgentPermissionResponseInput {
+  readonly idempotencyKey?: string;
+  readonly optionId: string;
+  readonly requestId: string;
+}
+
+export interface AgentPermissionResponseResult {
+  readonly accepted: boolean;
 }
 
 export interface AgentPublicError {
@@ -178,7 +194,15 @@ interface AgentTransientEventBase extends AgentSessionEventBase {
 }
 
 export interface AgentEntryAppendedEvent extends AgentDurableEventBase {
-  readonly payload: { readonly entry: AgentSessionEntry };
+  readonly payload: {
+    readonly entry: AgentSessionEntry;
+    /**
+     * Transient entry identity settled by this durable append.  Producers must
+     * provide this when a streamed overlay is committed; durable-only/replayed
+     * entries intentionally omit it.
+     */
+    readonly settlesEntryId?: AgentEntryId;
+  };
   readonly type: "entry.appended";
 }
 
@@ -221,9 +245,23 @@ export interface AgentEntryDeltaEvent extends AgentTransientEventBase {
     readonly chunkSeq: number;
     readonly delta: string;
     readonly entryId: AgentEntryId;
-    readonly part: "text" | "thinking" | "tool_output";
+    readonly part: "text" | "thinking" | "tool_input" | "tool_output";
   };
   readonly type: "entry.delta";
+}
+
+export interface AgentToolStateChangedEvent extends AgentTransientEventBase {
+  readonly payload: {
+    readonly tool: {
+      readonly callId: string;
+      readonly content?: readonly AgentContentBlock[];
+      readonly entryId: AgentEntryId;
+      readonly input?: AgentJsonValue;
+      readonly name: string;
+      readonly status: "cancelled" | "error" | "pending" | "running" | "success";
+    };
+  };
+  readonly type: "tool.state.changed";
 }
 
 export interface AgentRunActivityEvent extends AgentTransientEventBase {
@@ -253,7 +291,8 @@ export type AgentTransientSessionEvent =
   | AgentEntryDeltaEvent
   | AgentPresenceChangedEvent
   | AgentRunActivityEvent
-  | AgentSessionStateChangedEvent;
+  | AgentSessionStateChangedEvent
+  | AgentToolStateChangedEvent;
 
 export type AgentSessionEvent = AgentDurableSessionEvent | AgentTransientSessionEvent;
 

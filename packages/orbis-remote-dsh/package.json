@@ -81,7 +81,8 @@
     "tsx": "^4.23.12",
     "typescript": "rc",
     "vitest": "^4.1.10",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

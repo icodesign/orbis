@@ -61,8 +61,12 @@ export type {
   AgentMessageEntry,
   AgentMessageRole,
   AgentModelSelection,
-  AgentNoticeEntry,
+  AgentPermissionOption,
+  AgentPermissionOptionKind,
   AgentPermissionRequest,
+  AgentPermissionResponseInput,
+  AgentPermissionResponseResult,
+  AgentNoticeEntry,
   AgentPresenceChangedEvent,
   AgentPresenceDevice,
   AgentPublicError,
@@ -77,6 +81,7 @@ export type {
   AgentSessionRunState,
   AgentSessionStateChangedEvent,
   AgentSessionStatePatch,
+  AgentToolStateChangedEvent,
   AgentToolEntry,
   AgentTransientSessionEvent,
   AgentUsage,
@@ -117,3 +122,7 @@ export {
   type AgentRunSummary,
   type AgentSessionProjection,
 } from "./projection";
+export {
+  validateAgentPermissionRequest,
+  validateAgentPermissionResponseInput,
+} from "./permissions";

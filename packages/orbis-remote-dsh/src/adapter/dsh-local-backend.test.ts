@@ -1,5 +1,3 @@
-import { describe, expect, test } from "vitest";
-
 import {
   agentDriverId,
   agentTimestamp,
@@ -7,6 +5,7 @@ import {
   type AgentSessionEvent,
   type AgentTimestamp,
 } from "@orbisapp/orbis-agent-backend";
+import { describe, expect, test } from "vitest";
 
 import { DshLocalBackend } from "./dsh-local-backend";
 import type {
@@ -14,6 +13,8 @@ import type {
   DshAgentHandle,
   DshAgentInboxEvent,
   DshAgentOptions,
+  DshApiApprovalResponse,
+  DshApiMuxRequest,
   DshContext,
   DshSession,
   DshSessionCatalogEntry,
@@ -54,6 +55,7 @@ class TestAgent implements DshAgent {
   readonly followups: DshUserMessage[] = [];
   readonly steers: DshUserMessage[] = [];
   cancelCalls: Array<{ readonly keepInbox?: boolean }> = [];
+  cancelFailure = false;
   status: "idle" | "running" = "idle";
 
   constructor(
@@ -64,6 +66,7 @@ class TestAgent implements DshAgent {
 
   cancel(_cause: { readonly kind: "user" }, options?: { readonly keepInbox?: boolean }): void {
     this.cancelCalls.push(options ?? {});
+    if (this.cancelFailure) throw new Error("cancel failed");
     this.status = "idle";
   }
 
@@ -91,13 +94,18 @@ class TestDsh {
     string,
     { readonly model: string; readonly provider: string }
   >();
+  readonly approvalResponses: DshApiApprovalResponse[] = [];
+  approvalResponse: {
+    readonly accepted: boolean;
+    readonly reason?: "not-pending" | "bad-response";
+  } = { accepted: true };
   readonly sessions = new Map<string, TestSession>();
 
   private readonly listeners = new Set<(session: DshSession, native: DshSessionEvent) => void>();
   private readonly inboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
   private readonly materialized = new Set<string>();
 
-  constructor() {
+  constructor(readonly approvals = false) {
     this.context = {
       apiProxy: {
         llm: {
@@ -179,6 +187,17 @@ class TestDsh {
             return { result: { ok: true as const, value: { selected } }, rpcId };
           },
         },
+        ...(this.approvals
+          ? {
+              events: {
+                mux: (_request: unknown, signal: AbortSignal) => this.approvalMux(signal),
+              },
+              respond: async (message: DshApiApprovalResponse) => {
+                this.approvalResponses.push(message);
+                return this.approvalResponse;
+              },
+            }
+          : {}),
       },
       agents: {
         create: async (input) => {
@@ -296,6 +315,42 @@ class TestDsh {
       listener({ agent, message });
   }
 
+  private readonly approvalWaiters: Array<(request: DshApiMuxRequest | undefined) => void> = [];
+  private readonly approvalQueue: DshApiMuxRequest[] = [];
+
+  emitApproval(request: DshApiMuxRequest): void {
+    const waiter = this.approvalWaiters.shift();
+    if (waiter === undefined) this.approvalQueue.push(request);
+    else waiter(request);
+  }
+
+  private async *approvalMux(signal: AbortSignal): AsyncIterable<DshApiMuxRequest> {
+    while (!signal.aborted) {
+      const request = await new Promise<DshApiMuxRequest | undefined>((resolve) => {
+        if (signal.aborted) {
+          resolve(undefined);
+          return;
+        }
+        const queued = this.approvalQueue.shift();
+        if (queued !== undefined) {
+          resolve(queued);
+          return;
+        }
+        const abort = () => {
+          signal.removeEventListener("abort", abort);
+          resolve(undefined);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        this.approvalWaiters.push((value) => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        });
+      });
+      if (request === undefined) return;
+      yield request;
+    }
+  }
+
   private handleFor(agent: TestAgent): DshAgentHandle {
     return {
       agent,
@@ -337,6 +392,39 @@ async function expectCode(operation: () => Promise<unknown>, code: string): Prom
   } catch (error) {
     expect(error).toMatchObject({ code });
   }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for DSH approval state");
+}
+
+function approvalRequested(approvalId: string, toolName: string): DshApiMuxRequest {
+  return {
+    payload: {
+      approvalId,
+      callId: `call-${approvalId}`,
+      reason: "line one\nline two",
+      sessionId: "created-session",
+      toolName,
+      type: "approval/requested",
+    },
+    rpcId: `rpc-${approvalId}`,
+  };
+}
+
+function pendingPermissionIds(events: readonly AgentSessionEvent[]): string[] {
+  const state = [...events]
+    .reverse()
+    .find(
+      (native): native is Extract<AgentSessionEvent, { type: "session.state.changed" }> =>
+        native.type === "session.state.changed" &&
+        native.payload.patch.pendingPermissions !== undefined,
+    );
+  return state?.payload.patch.pendingPermissions?.map((request) => request.requestId) ?? [];
 }
 
 describe("DSH local backend", () => {
@@ -587,6 +675,7 @@ describe("DSH local backend", () => {
       },
       {
         callId: "tool-1",
+        content: [{ text: "contents", type: "text" }],
         input: { path: "/workspace/demo.ts" },
         kind: "tool",
         name: "read",
@@ -596,6 +685,216 @@ describe("DSH local backend", () => {
     ]);
     expect(projection.lastRun).toMatchObject({ id: "turn-1", state: "completed" });
     expect(projection.state).toBe("idle");
+  });
+
+  test("emits DSH tool input and execution state as distinct transient events", async () => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
+    testDsh.emit(
+      "created-session",
+      event("assistant/chunk", 1, {
+        chunk: {
+          argumentsDelta: '{"path":"/workspace/demo.ts"}',
+          id: "tool-1",
+          index: 2,
+          name: "read",
+          type: "tool-call-delta",
+        },
+        step: 1,
+        turn: 1,
+      }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("tool/call", 2, {
+        arguments: '{"path":"/workspace/demo.ts"}',
+        callId: "tool-1",
+        name: "read",
+        step: 1,
+        turn: 1,
+      }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("tool/result", 3, {
+        message: {
+          content: [
+            {
+              content: [{ text: "contents", type: "text" }],
+              toolCallId: "tool-1",
+              type: "tool-result",
+            },
+          ],
+          role: "tool",
+          source: { callId: "tool-1", kind: "tool" },
+        },
+        step: 1,
+        turn: 1,
+      }),
+    );
+
+    expect(events.filter((native) => native.type === "entry.delta")).toMatchObject([
+      {
+        payload: {
+          blockIndex: 2,
+          delta: '{"path":"/workspace/demo.ts"}',
+          entryId: "tool-tool-1",
+          part: "tool_input",
+        },
+      },
+    ]);
+    expect(events.filter((native) => native.type === "tool.state.changed")).toMatchObject([
+      { payload: { tool: { callId: "tool-1", name: "read", status: "pending" } } },
+      {
+        payload: {
+          tool: {
+            callId: "tool-1",
+            input: { path: "/workspace/demo.ts" },
+            name: "read",
+            status: "running",
+          },
+        },
+      },
+      {
+        payload: {
+          tool: {
+            callId: "tool-1",
+            content: [{ text: "contents", type: "text" }],
+            status: "success",
+          },
+        },
+      },
+    ]);
+    expect(events.map((native) => native.type).slice(-2)).toEqual([
+      "tool.state.changed",
+      "entry.appended",
+    ]);
+    expect(events.find((native) => native.type === "entry.appended")).toMatchObject({
+      payload: { settlesEntryId: "tool-tool-1" },
+    });
+  });
+
+  test("bridges approval mux requests, responses, resolution, and reconnect state", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emitApproval(approvalRequested("approval-1", "read"));
+    testDsh.emitApproval(approvalRequested("approval-2", "write"));
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-1,approval-2");
+
+    await expect(
+      runtime.respondPermission({ requestId: "approval-1", optionId: "allow_once" }),
+    ).resolves.toEqual({ accepted: true });
+    expect(testDsh.approvalResponses).toMatchObject([
+      {
+        result: {
+          ok: true,
+          value: {
+            approvalId: "approval-1",
+            outcome: "allowed-once",
+            sessionId: "created-session",
+          },
+        },
+        rpcId: "rpc-approval-1",
+      },
+    ]);
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-2");
+
+    await expect(
+      runtime.respondPermission({ requestId: "approval-1", optionId: "allow_once" }),
+    ).resolves.toEqual({ accepted: false });
+
+    testDsh.emitApproval(approvalRequested("approval-3", "copy"));
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-2,approval-3");
+    testDsh.emitApproval({
+      payload: {
+        approvalId: "approval-2",
+        sessionId: "created-session",
+        type: "approval/resolved",
+      },
+      rpcId: "rpc-resolved-2",
+    });
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-3");
+
+    await runtime.close();
+    const reconnected = await backend.connectRuntime(record.ref);
+    const reconnectEvents: AgentSessionEvent[] = [];
+    reconnected.subscribe((native) => reconnectEvents.push(native));
+    expect(pendingPermissionIds(reconnectEvents)).toEqual(["approval-3"]);
+
+    await backend.close();
+  });
+
+  test("settles DSH approval races without leaving stale pending requests", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emitApproval(approvalRequested("approval-race", "read"));
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-race");
+    testDsh.approvalResponse = { accepted: false, reason: "not-pending" };
+    await expect(
+      runtime.respondPermission({ requestId: "approval-race", optionId: "allow_once" }),
+    ).resolves.toEqual({ accepted: false });
+    await waitFor(() => pendingPermissionIds(events).length === 0);
+
+    testDsh.emitApproval(approvalRequested("approval-bad", "write"));
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-bad");
+    testDsh.approvalResponse = { accepted: false, reason: "bad-response" };
+    await expectCode(
+      () => runtime.respondPermission({ requestId: "approval-bad", optionId: "allow_once" }),
+      "protocol",
+    );
+    expect(pendingPermissionIds(events)).toEqual(["approval-bad"]);
+
+    await backend.close();
+  });
+
+  test("keeps a pending approval visible when native DSH cancel fails", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    await runtime.prompt({ text: "Start a run" });
+    testDsh.emitApproval(approvalRequested("approval-cancel", "delete"));
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-cancel");
+    testDsh.agent("created-session").cancelFailure = true;
+
+    await expectCode(() => runtime.cancel(), "unavailable");
+    await expect(backend.readSession(record.ref)).resolves.toMatchObject({
+      pendingPermissions: [{ requestId: "approval-cancel" }],
+    });
+    expect(testDsh.approvalResponses).toHaveLength(0);
+
+    await backend.close();
   });
 
   test("projects producer-supplied context as context entries named by producer", async () => {
