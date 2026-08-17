@@ -316,6 +316,47 @@ describe("agent backend contract", () => {
     expect(wrongSource).toMatchObject({ kind: "conflict", error: { code: "protocol" } });
   });
 
+  test("advances the selected branch leaf when a durable entry extends it", () => {
+    const root = durableEntryEvent(1, "event-root", "entry-root");
+    const initial = { ...createProjection(), leafEntryId: null };
+    const afterRoot = expectApplied(root, initial);
+
+    expect(afterRoot.leafEntryId).toBe(root.payload.entry.id);
+
+    const childEvent = durableEntryEvent(2, "event-child", "entry-child");
+    const child = {
+      ...childEvent,
+      payload: {
+        ...childEvent.payload,
+        entry: {
+          ...childEvent.payload.entry,
+          id: agentEntryId("entry-child"),
+          parentId: root.payload.entry.id,
+        },
+      },
+    } satisfies AgentEntryAppendedEvent;
+    const afterChild = expectApplied(child, afterRoot);
+
+    expect(afterChild.leafEntryId).toBe(child.payload.entry.id);
+    expect(afterChild.revision).toBe(afterRoot.revision);
+
+    const forkEvent = durableEntryEvent(3, "event-fork", "entry-fork");
+    const fork = {
+      ...forkEvent,
+      payload: {
+        ...forkEvent.payload,
+        entry: {
+          ...forkEvent.payload.entry,
+          id: agentEntryId("entry-fork"),
+          parentId: agentEntryId("entry-other-branch"),
+        },
+      },
+    } satisfies AgentEntryAppendedEvent;
+    const afterFork = expectApplied(fork, afterChild);
+
+    expect(afterFork.leafEntryId).toBe(child.payload.entry.id);
+  });
+
   test("validates permission options as a full decision set and preserves multiline detail", () => {
     const request = validateAgentPermissionRequest({
       detail: "The tool needs access to this file.\nReview the path before continuing.",

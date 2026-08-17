@@ -241,10 +241,19 @@ function applyDurableEvent(
           entryId: event.payload.entry.id,
         });
       }
+      // Appending to the selected branch advances its leaf without changing
+      // session-state revision. Entries from another branch stay in inventory
+      // but must not change the branch currently rendered by the client.
+      const leafEntryId =
+        projection.leafEntryId !== undefined &&
+        event.payload.entry.parentId === projection.leafEntryId
+          ? event.payload.entry.id
+          : undefined;
       return {
         kind: "applied",
         projection: nextProjection(projection, event, {
           entries: [...projection.entries, event.payload.entry],
+          ...(leafEntryId === undefined ? {} : { leafEntryId }),
         }),
       };
     }
