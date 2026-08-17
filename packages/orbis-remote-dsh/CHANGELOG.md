@@ -1,5 +1,11 @@
 # @orbisapp/remote-dsh
 
+## 0.2.3
+
+### Patch Changes
+
+- 267a2c5: Added permission/approval in protocol
+
 ## 0.2.2
 
 ### Patch Changes
