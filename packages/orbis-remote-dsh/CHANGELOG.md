@@ -1,5 +1,11 @@
 # @orbisapp/remote-dsh
 
+## 0.2.4
+
+### Patch Changes
+
+- eff04d3: Improve permissions/approvals
+
 ## 0.2.3
 
 ### Patch Changes
