@@ -15,10 +15,10 @@ updates across multiple devices.
 2. Install the Orbis plugin into DSH.
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add @orbisapp/remote-dsh
+npx @deepseek-ai/dsh plugin --profile web add @orbisapp/remote-dsh@latest
 ```
 
-3. Configure the plugin and pair your device from the DSH web plugin page.
+3. Configure the plugin and pair your device from the DSH web plugin page (Settings - Plugins - Orbis tab).
 
 ## Development
 

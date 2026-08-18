@@ -18,6 +18,7 @@ const hostExternals = [
   "@deepseek-ai/dsh-host-webserver",
   "@deepseek-ai/dsh-host-directory-picker",
   "@deepseek-ai/dsh-llm",
+  "@deepseek-ai/dsh-permission-presets",
   "@deepseek-ai/dsh-home-paths",
   "@deepseek-ai/dsh-session",
   "@deepseek-ai/dsh-session-persistence",

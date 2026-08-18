@@ -1,6 +1,5 @@
 import { AgentBackendError } from "./errors";
 import type {
-  AgentJsonValue,
   AgentPermissionRequest,
   AgentQueuedInput,
   AgentDurableSessionEvent,
@@ -8,6 +7,7 @@ import type {
   AgentSessionEntry,
   AgentSessionEvent,
   AgentSessionMetadata,
+  AgentSessionConfigOption,
   AgentSessionStateChangedEvent,
   AgentUsage,
 } from "./events";
@@ -43,7 +43,7 @@ export interface AgentAppliedDurableEvent {
  */
 export interface AgentSessionProjection {
   readonly activeRun?: AgentRunSummary;
-  readonly configOptions?: Readonly<Record<string, AgentJsonValue>>;
+  readonly configOptions?: readonly AgentSessionConfigOption[];
   readonly cursor: AgentDeliveryCursor;
   readonly cwd?: string | null;
   readonly entries: readonly AgentSessionEntry[];

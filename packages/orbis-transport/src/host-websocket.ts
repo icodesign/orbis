@@ -102,6 +102,9 @@ export interface RemoteHostAcknowledgement {
 
 export interface RemoteHostPeerError {
   handshakeId?: string;
+  keyId?: string;
+  mode?: OrbisE2eeHandshakeMode;
+  pairingId?: string;
   error: OrbisTransportError;
 }
 
@@ -194,6 +197,20 @@ function asTransportError(error: unknown, fallback: string): OrbisTransportError
 
 function requestKey(handshakeId: string, requestId: string): string {
   return `${handshakeId}\u0000${requestId}`;
+}
+
+function peerErrorContext(input: {
+  readonly handshakeId: string;
+  readonly keyId: string;
+  readonly mode: OrbisE2eeHandshakeMode;
+  readonly pairingId?: string;
+}): Pick<RemoteHostPeerError, "handshakeId" | "keyId" | "mode" | "pairingId"> {
+  return {
+    handshakeId: input.handshakeId,
+    keyId: input.keyId,
+    mode: input.mode,
+    ...(input.pairingId === undefined ? {} : { pairingId: input.pairingId }),
+  };
 }
 
 function endpointManifestProvider(
@@ -727,7 +744,7 @@ export class OrbisRemoteHostConnection {
       } catch (error) {
         this.disconnectPeer(frame.handshakeId);
         this.notifyPeerError({
-          handshakeId: frame.handshakeId,
+          ...peerErrorContext(session.peer),
           error: asTransportError(error, "The peer sent an invalid encrypted frame"),
         });
       }
@@ -739,7 +756,12 @@ export class OrbisRemoteHostConnection {
   private async acceptPeer(frame: SecureHelloEnvelope): Promise<void> {
     if (this.peerSessions.has(frame.handshakeId)) {
       this.notifyPeerError({
-        handshakeId: frame.handshakeId,
+        ...peerErrorContext({
+          handshakeId: frame.handshakeId,
+          keyId: frame.senderKeyId,
+          mode: frame.mode,
+          pairingId: frame.pairingId,
+        }),
         error: new OrbisTransportError("authentication", "The peer handshake was replayed"),
       });
       return;
@@ -814,7 +836,12 @@ export class OrbisRemoteHostConnection {
     } catch (error) {
       this.peerSessions.delete(frame.handshakeId);
       this.notifyPeerError({
-        handshakeId: frame.handshakeId,
+        ...peerErrorContext({
+          handshakeId: frame.handshakeId,
+          keyId: frame.senderKeyId,
+          mode: frame.mode,
+          pairingId: frame.pairingId,
+        }),
         error: asTransportError(error, "The encrypted peer handshake failed"),
       });
     }
@@ -956,7 +983,7 @@ export class OrbisRemoteHostConnection {
     } catch (error) {
       if (error instanceof OrbisTransportError && error.code === "invalid_argument") {
         this.disconnectPeer(session.peer.handshakeId);
-        this.notifyPeerError({ handshakeId: session.peer.handshakeId, error });
+        this.notifyPeerError({ ...peerErrorContext(session.peer), error });
       }
       throw error;
     }

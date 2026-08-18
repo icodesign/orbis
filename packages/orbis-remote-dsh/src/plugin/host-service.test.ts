@@ -5,11 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  createPairingSecret,
   generateDeviceIdentity,
   ORBIS_REMOTE_SCOPES,
   OrbisRemoteConnection,
   parsePairingInvitation,
   type RemoteHostRequestHandler,
+  type WebSocketFactory,
+  type WebSocketLike,
 } from "@orbisapp/transport";
 import { describe, expect, test } from "vitest";
 
@@ -110,6 +113,54 @@ async function freePort(): Promise<number> {
       server.close(() => resolve(port));
     });
   });
+}
+
+async function waitForPairingFailure(service: OrbisDshHostService): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await service.status()).pairing?.phase === "failed") return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("The pairing did not enter the failed state");
+}
+
+async function waitForDeviceError(service: OrbisDshHostService, keyId: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await service.status()).devices.some((device) => device.keyId === keyId && device.error)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("The device did not enter the failed state");
+}
+
+function tamperFirstFrame(factory: WebSocketFactory): WebSocketFactory {
+  return (request): WebSocketLike => {
+    const socket = factory(request);
+    let firstFrame = true;
+    return {
+      get readyState() {
+        return socket.readyState;
+      },
+      get protocol() {
+        return socket.protocol;
+      },
+      addEventListener: (type, listener) => socket.addEventListener(type, listener),
+      removeEventListener: (type, listener) => socket.removeEventListener(type, listener),
+      send: (data) => {
+        if (!firstFrame) {
+          socket.send(data);
+          return;
+        }
+        firstFrame = false;
+        const frame = JSON.parse(data) as { ciphertext?: string };
+        if (typeof frame.ciphertext === "string") {
+          frame.ciphertext = `${frame.ciphertext.startsWith("A") ? "B" : "A"}${frame.ciphertext.slice(1)}`;
+        }
+        socket.send(JSON.stringify(frame));
+      },
+      close: (code, reason) => socket.close(code, reason),
+    };
+  };
 }
 
 function directConfiguration(directPort: number): OrbisDshConfigurationInput {
@@ -318,6 +369,116 @@ describe("OrbisDshHostService", () => {
       expect(storedIdentity?.value).toBeDefined();
       expect(JSON.parse(storedIdentity?.value ?? "{}")).toHaveProperty("publicKey");
       expect((await service.status()).pairing).toBeUndefined();
+    } finally {
+      await service.dispose();
+      await cleanup();
+    }
+  });
+
+  test("routes a failed pairing handshake to the pairing state", async () => {
+    const { store, cleanup } = await makeFixture();
+    const service = createService(store, new MemoryCredentials(), fakeAgentHostFactory());
+    try {
+      await service.configure(directConfiguration(await freePort()));
+      const pairing = await service.startPairing();
+      const invitation = parsePairingInvitation(pairing.invitation);
+      const clientIdentity = await generateDeviceIdentity(secureRandom);
+
+      await expect(
+        OrbisRemoteConnection.connectEndpoint({
+          websocketUrl: invitation.endpoint.url,
+          hostId: invitation.hostId,
+          peer: {
+            deviceId: clientIdentity.keyId,
+            deviceName: "Failed iPhone",
+            role: "client",
+            version: "1.0.0",
+          },
+          security: {
+            mode: "pairing",
+            identity: clientIdentity,
+            remotePublicKey: invitation.hostPublicKey,
+            pairing: {
+              pairingId: invitation.pairingId,
+              secret: await createPairingSecret(secureRandom),
+            },
+          },
+          random: secureRandom,
+          webSocketFactory: await createNodeWebSocketFactory(),
+          handshakeTimeoutMs: 500,
+        }),
+      ).rejects.toThrow();
+
+      await waitForPairingFailure(service);
+      const status = await service.status();
+      expect(status.connection.error).toBeUndefined();
+      expect(status.pairing).toMatchObject({
+        phase: "failed",
+        error: expect.any(String),
+      });
+    } finally {
+      await service.dispose();
+      await cleanup();
+    }
+  });
+
+  test("routes a failed authenticated handshake to its paired device", async () => {
+    const { store, cleanup } = await makeFixture();
+    const service = createService(store, new MemoryCredentials(), fakeAgentHostFactory());
+    try {
+      await service.configure(directConfiguration(await freePort()));
+      const pairing = await service.startPairing();
+      const invitation = parsePairingInvitation(pairing.invitation);
+      await service.cancelPairing();
+
+      const clientIdentity = await generateDeviceIdentity(secureRandom);
+      await store.update((state) => ({
+        ...state,
+        peers: [
+          {
+            keyId: clientIdentity.keyId,
+            publicKey: clientIdentity.publicKey,
+            deviceId: "device-1",
+            deviceName: "Existing iPhone",
+            version: "1.0.0",
+            scopeMode: "all",
+            scopes: [ORBIS_REMOTE_SCOPES.connect],
+            pairedAt: "2026-08-18T00:00:00.000Z",
+          },
+        ],
+      }));
+
+      await expect(
+        OrbisRemoteConnection.connectEndpoint({
+          websocketUrl: invitation.endpoint.url,
+          hostId: invitation.hostId,
+          peer: {
+            deviceId: "device-1",
+            deviceName: "Existing iPhone",
+            role: "client",
+            version: "1.0.0",
+          },
+          security: {
+            mode: "authenticated",
+            identity: clientIdentity,
+            remotePublicKey: invitation.hostPublicKey,
+          },
+          random: secureRandom,
+          webSocketFactory: tamperFirstFrame(await createNodeWebSocketFactory()),
+          handshakeTimeoutMs: 500,
+        }),
+      ).rejects.toThrow();
+
+      await waitForDeviceError(service, clientIdentity.keyId);
+      const status = await service.status();
+      expect(status.connection.error).toBeUndefined();
+      expect(status.devices).toContainEqual(
+        expect.objectContaining({
+          keyId: clientIdentity.keyId,
+          connected: false,
+          error: expect.any(String),
+        }),
+      );
     } finally {
       await service.dispose();
       await cleanup();

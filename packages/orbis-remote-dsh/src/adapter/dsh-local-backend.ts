@@ -41,6 +41,7 @@ import {
   type AgentPromptReceipt,
   type AgentRuntimeStatus,
   type AgentSessionCreateInput,
+  type AgentSessionConfigOption,
   type AgentSessionEvent,
   type AgentSessionEventListener,
   type AgentSessionProjection,
@@ -82,6 +83,7 @@ import type {
   DshSessionCatalogEntry,
   DshSessionEvent,
   DshSessionInspection,
+  DshSessionPermissionProvider,
   DshUserMessage,
   DshWorkspace,
   DshWorkspaceId,
@@ -225,6 +227,8 @@ export interface DshLocalBackendOptions {
   readonly agentOptions?: DshAgentOptions;
   readonly now?: () => AgentTimestamp;
   readonly onError?: (error: AgentBackendError) => void;
+  /** Optional composition seam for DSH's session permission preset service. */
+  readonly permissionPresets?: DshSessionPermissionProvider;
   /** DSH's branded `SessionId` constructor, injected from `@deepseek-ai/dsh-session`. */
   readonly toSessionId: (value: string) => unknown;
 }
@@ -254,6 +258,10 @@ interface DshLocalControllerHost {
     ref: AgentSessionRef,
     selection: AgentModelSelection,
   ): Promise<AgentModelSelection>;
+  permissionOptions(
+    ref: AgentSessionRef,
+    events?: readonly DshSessionEvent[],
+  ): AgentSessionConfigOption | undefined;
 }
 
 type DshInboxTarget = "next-step" | "next-turn";
@@ -343,12 +351,21 @@ function stateRevisionForEvents(events: readonly DshSessionEvent[]): number {
       runStartForDshEvent(event) !== undefined ||
       runFinishForDshEvent(event) !== undefined ||
       metadataPatchForDshEvent(event) !== undefined ||
+      isDshPermissionConfigEvent(event) ||
       event.type === "agent/inbox/spliced"
     ) {
       revision += 1;
     }
   }
   return revision;
+}
+
+function isDshPermissionConfigEvent(event: DshSessionEvent): boolean {
+  return (
+    event.type === "permission/preset" ||
+    event.type === "sandbox/mode" ||
+    event.type === "approval/policy"
+  );
 }
 
 function optionalWorkspace(value: string | undefined): string {
@@ -681,7 +698,8 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     this.assertOpen();
     this.assertDshRef(ref);
     return this.withPublicErrors(async () => {
-      const projection = await this.inspectProjection(ref);
+      const inspection = await this.inspect(ref);
+      const projection = readDshSessionProjection(ref, inspection);
       const controller = this.controllers.get(agentSessionLocatorKey(ref));
       let decorated = projection;
       if (controller !== undefined) {
@@ -695,7 +713,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
           decorated = { ...projection, metadata: { ...projection.metadata, model } };
         }
       }
-      return { ...decorated, workspaceRef: await this.workspaceRefFor(ref) };
+      const permissionOptions = this.permissionOptions(ref, inspection.events);
+      return {
+        ...decorated,
+        ...(permissionOptions === undefined ? {} : { configOptions: [permissionOptions] }),
+        workspaceRef: await this.workspaceRefFor(ref),
+      };
     });
   }
 
@@ -708,6 +731,33 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     const keys = Object.keys(input.patch);
     if (keys.length === 0) {
       throw new AgentBackendError("invalid_argument", "A DSH session update requires a patch");
+    }
+    if (input.patch.configOptions !== undefined) {
+      const value = input.patch.configOptions.permissions;
+      if (keys.length !== 1 || Object.keys(input.patch.configOptions).length !== 1) {
+        throw new AgentBackendError(
+          "invalid_argument",
+          "DSH permission updates must set the permissions option",
+        );
+      }
+      if (typeof value !== "string") {
+        throw new AgentBackendError("invalid_argument", "DSH permission preset is invalid");
+      }
+      const provider = this.options.permissionPresets;
+      if (provider === undefined) {
+        throw new AgentBackendError("unsupported", "DSH permission preset updates are unavailable");
+      }
+      const controller = await this.controllerFor(ref);
+      const currentRevision = controller.currentStateRevision();
+      if (input.expectedRevision !== undefined && input.expectedRevision !== currentRevision) {
+        throw new AgentBackendError("revision_conflict", "The DSH session state has changed", {
+          details: { currentRevision, expectedRevision: input.expectedRevision },
+        });
+      }
+      return this.withPublicErrors(async () => {
+        await provider.set(ref.nativeSessionId, value);
+        return { revision: await this.readStateRevision(ref) };
+      });
     }
     if (keys.length !== 1 || input.patch.model === undefined) {
       throw new AgentBackendError("unsupported", "DSH only supports session model updates");
@@ -769,6 +819,13 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
 
   now(): AgentTimestamp {
     return this.clock();
+  }
+
+  permissionOptions(
+    ref: AgentSessionRef,
+    events?: readonly DshSessionEvent[],
+  ): AgentSessionConfigOption | undefined {
+    return this.options.permissionPresets?.describe(ref.nativeSessionId, events);
   }
 
   async readCurrentModel(ref: AgentSessionRef): Promise<AgentModelSelection | undefined> {
@@ -1526,6 +1583,13 @@ class DshLocalSessionController {
         // An explicit null clears the title; an absent key leaves it alone.
         if (metadata.title !== undefined) this.title = metadata.title ?? undefined;
         this.emitState(event, "metadata", metadata);
+      }
+
+      if (isDshPermissionConfigEvent(event)) {
+        const permissionOptions = this.host.permissionOptions(this.ref, this.agent.session.events);
+        if (permissionOptions !== undefined) {
+          this.emitState(event, "permission-config", { configOptions: [permissionOptions] });
+        }
       }
 
       const entry = this.projector.project(event);

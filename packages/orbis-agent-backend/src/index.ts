@@ -74,6 +74,8 @@ export type {
   AgentRunActivityEvent,
   AgentRunOutcome,
   AgentSessionEntry,
+  AgentSessionConfigOption,
+  AgentSessionConfigOptionChoice,
   AgentSessionEvent,
   AgentSessionEventListener,
   AgentSessionMetadata,

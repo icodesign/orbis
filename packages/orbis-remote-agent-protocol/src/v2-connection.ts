@@ -364,7 +364,7 @@ function parseState(value: unknown): RemoteAgentV2SessionState {
     title: input.title,
     model: input.model === null ? null : parseModel(input.model),
     mode: input.mode,
-    configOptions: input.configOptions as Readonly<Record<string, RemoteAgentV2JsonValue>>,
+    configOptions: input.configOptions,
     workspaceRef: input.workspaceRef,
     cwd: input.cwd,
     leafEntryId: input.leafEntryId === null ? null : agentEntryId(input.leafEntryId),
@@ -643,7 +643,7 @@ function parsePatch(value: unknown): RemoteAgentV2SessionStatePatch {
     ...(input.configOptions === undefined
       ? {}
       : {
-          configOptions: input.configOptions as Readonly<Record<string, RemoteAgentV2JsonValue>>,
+          configOptions: input.configOptions,
         }),
     ...(input.workspaceRef === undefined ? {} : { workspaceRef: input.workspaceRef }),
     ...(input.cwd === undefined ? {} : { cwd: input.cwd }),

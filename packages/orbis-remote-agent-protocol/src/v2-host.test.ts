@@ -122,7 +122,7 @@ function snapshot(
   return {
     entries,
     state: {
-      configOptions: {},
+      configOptions: [],
       createdAt: now,
       cwd: "/workspace",
       leafEntryId: entries.at(-1)?.id ?? null,

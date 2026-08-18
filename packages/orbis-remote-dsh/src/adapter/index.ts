@@ -28,6 +28,7 @@ export type {
   DshSessionEvent,
   DshSessionHeader,
   DshSessionInspection,
+  DshSessionPermissionProvider,
   DshSessionPersistence,
   DshUserMessage,
   DshWorkspace,

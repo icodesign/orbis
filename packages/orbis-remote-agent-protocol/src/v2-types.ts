@@ -4,6 +4,7 @@ import type {
   AgentJsonValue,
   AgentModelMetadata,
   AgentModelSelection,
+  AgentSessionConfigOption,
   AgentSessionRef,
   AgentWorkspaceDescriptor,
   AgentWorkspaceFolderDescriptor,
@@ -24,6 +25,7 @@ import type { RemoteAgentHostPeer, RemoteAgentHostRequestContext } from "./host"
 
 export type RemoteAgentV2JsonValue = AgentJsonValue;
 export type RemoteAgentV2ContentBlock = AgentContentBlock;
+export type RemoteAgentV2SessionConfigOption = AgentSessionConfigOption;
 export type RemoteAgentV2StreamingContentBlock = Extract<
   RemoteAgentV2ContentBlock,
   { readonly type: "text" | "thinking" }
@@ -70,7 +72,7 @@ export interface RemoteAgentV2SessionState {
   readonly title: string | null;
   readonly model: RemoteAgentV2ModelSelection | null;
   readonly mode: string | null;
-  readonly configOptions: Readonly<Record<string, RemoteAgentV2JsonValue>>;
+  readonly configOptions: readonly RemoteAgentV2SessionConfigOption[];
   readonly workspaceRef: string | null;
   readonly cwd: string | null;
   readonly leafEntryId: AgentEntryId | null;

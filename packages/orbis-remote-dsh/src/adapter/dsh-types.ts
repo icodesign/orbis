@@ -4,6 +4,8 @@
  * packages; the DSH bundle is the sole runtime composition point.
  */
 
+import type { AgentSessionConfigOption } from "@orbisapp/orbis-agent-backend";
+
 export type DshWorkspaceId = string & { readonly __dshWorkspaceId: unique symbol };
 
 export interface DshSessionHeader {
@@ -41,6 +43,15 @@ export interface DshSession {
 export interface DshSessionInspection {
   readonly events: readonly DshSessionEvent[];
   readonly meta: DshSessionHeader;
+}
+
+/** Optional host-owned bridge for DSH's session permission preset service. */
+export interface DshSessionPermissionProvider {
+  describe(
+    nativeSessionId: string,
+    events?: readonly DshSessionEvent[],
+  ): AgentSessionConfigOption | undefined;
+  set(nativeSessionId: string, value: string): void | Promise<void>;
 }
 
 /** DSH's durable session catalog and append-only history seam. */

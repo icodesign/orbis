@@ -80,6 +80,24 @@ export const v2WorkspaceFolderSchema = z
   })
   .passthrough();
 
+const v2SessionConfigOptionChoiceSchema = z
+  .object({
+    description: z.string().optional(),
+    name: nonEmptyString,
+    value: nonEmptyString,
+  })
+  .passthrough();
+
+export const v2SessionConfigOptionSchema = z
+  .object({
+    currentValue: nonEmptyString,
+    description: z.string().optional(),
+    id: nonEmptyString,
+    name: nonEmptyString,
+    options: z.array(v2SessionConfigOptionChoiceSchema).min(1),
+  })
+  .passthrough();
+
 export const v2ContentBlockSchema = z.discriminatedUnion("type", [
   z.object({ text: z.string(), type: z.literal("text") }).passthrough(),
   z
@@ -241,7 +259,7 @@ export const v2PermissionSchema = z
 export const v2StateSchema = z
   .object({
     activeRun: v2RunSummarySchema.nullable().optional(),
-    configOptions: jsonObject,
+    configOptions: z.array(v2SessionConfigOptionSchema),
     createdAt: timestamp,
     cwd: z.string().nullable(),
     lastRun: v2RunSummarySchema.nullable().optional(),
@@ -263,7 +281,7 @@ export const v2StateSchema = z
 export const v2StatePatchSchema = z
   .object({
     activeRun: v2RunSummarySchema.nullable().optional(),
-    configOptions: jsonObject.optional(),
+    configOptions: z.array(v2SessionConfigOptionSchema).optional(),
     cwd: z.string().nullable().optional(),
     lastRun: v2RunSummarySchema.nullable().optional(),
     leafEntryId: nonEmptyString.nullable().optional(),

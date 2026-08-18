@@ -9,6 +9,7 @@ export interface OrbisDevice {
   readonly pairedAt: string;
   readonly lastConnectedAt?: string;
   readonly connected: boolean;
+  readonly error?: string;
 }
 
 export interface OrbisStatus {

@@ -1,6 +1,5 @@
-import { describe, expect, test } from "vitest";
-
 import { sha256 } from "@hpke/common";
+import { describe, expect, test } from "vitest";
 
 import {
   createPairingSecret,
@@ -400,6 +399,12 @@ describe("OrbisRemoteHostConnection peers", () => {
     fixture.socket.receive(initiator.frame);
     await waitFor(() => errors.length > 0, "pairing error");
 
+    expect(errors[0]).toMatchObject({
+      handshakeId: initiator.frame.handshakeId,
+      keyId: fixture.client.keyId,
+      mode: "pairing",
+      pairingId: "pairing-bad",
+    });
     expect(errors[0]?.error.code).toBe("authentication");
     expect(fixture.connection.state).toBe("open");
     expect(fixture.connection.peers).toHaveLength(0);
@@ -585,6 +590,11 @@ describe("OrbisRemoteHostConnection harness bridge", () => {
     tampered.ciphertext = `${tampered.ciphertext.startsWith("A") ? "B" : "A"}${tampered.ciphertext.slice(1)}`;
     fixture.socket.receive(tampered);
     await waitFor(() => errors.length > 0, "tampered peer error");
+    expect(errors[0]).toMatchObject({
+      handshakeId: client.handshakeId,
+      keyId: fixture.client.keyId,
+      mode: "authenticated",
+    });
     expect(fixture.connection.peers).toHaveLength(0);
     expect(fixture.connection.state).toBe("open");
 

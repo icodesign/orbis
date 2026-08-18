@@ -141,7 +141,7 @@ function v2Snapshot(
   });
   const state: RemoteAgentV2SessionState = {
     activeRun: projection.activeRun === undefined ? undefined : runSummary(projection.activeRun),
-    configOptions: {},
+    configOptions: projection.configOptions ?? [],
     createdAt: projection.metadata.createdAt,
     cwd: context.cwd ?? null,
     lastRun: projection.lastRun === undefined ? undefined : runSummary(projection.lastRun),

@@ -369,6 +369,11 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
                     })}
                   </>
                 )}
+                {device.error && (
+                  <div role="alert" style={{ color: "var(--dsh-danger, #dc2626)" }}>
+                    {t("deviceConnectionProblem")}
+                  </div>
+                )}
               </div>
             </div>
             <Button

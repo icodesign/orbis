@@ -13,16 +13,14 @@ import type {} from "@deepseek-ai/dsh-session-persistence";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
 import type {} from "@deepseek-ai/dsh-workspace";
 import z from "@deepseek-ai/schemastery";
-import {
-  OrbisRemoteDshHost,
-  type OrbisRemoteDshHostDshOptions,
-} from "../host";
 
+import type { DshSessionPermissionProvider } from "../adapter";
+import { OrbisRemoteDshHost, type OrbisRemoteDshHostDshOptions } from "../host";
+import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
 import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-session-catalog";
 import { OrbisDshFileLogger } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
 import { createOrbisHttpRoute } from "./http-api";
-import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
 import { OrbisDshStateStore } from "./state-store";
 import { createDshWorkspaceFolderProvider } from "./workspace-folder-provider";
 
@@ -35,6 +33,8 @@ export const inject = [
   "webServer",
   "sessionPersistence",
   "sessionProjectionCache",
+  "sessions",
+  "permissionPresets",
   "workspaceRegistry",
 ] as const;
 
@@ -79,6 +79,56 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
     // `workspace`; the current Harness service is exposed as `workspaceRegistry`.
     workspace: context.workspaceRegistry,
   } as unknown as OrbisRemoteDshHostDshOptions["context"];
+}
+
+interface PermissionPresetContext {
+  readonly permissionPresets?: {
+    readonly names: readonly string[];
+    current(events: readonly unknown[]): string;
+    optionOf(name: string): {
+      readonly description?: string;
+      readonly name: string;
+      readonly value: string;
+    };
+    set(session: { readonly events: readonly unknown[] }, name: string): void;
+  };
+  readonly sessions?: {
+    get(id: unknown): { readonly events: readonly unknown[] } | undefined;
+  };
+}
+
+function createDshPermissionProvider(context: Context): DshSessionPermissionProvider {
+  const services = context as unknown as PermissionPresetContext;
+  return {
+    describe(nativeSessionId, events) {
+      const permissionPresets = services.permissionPresets;
+      if (permissionPresets === undefined) return undefined;
+      const session = services.sessions?.get(SessionId(nativeSessionId));
+      const sessionEvents = events ?? session?.events;
+      if (sessionEvents === undefined) return undefined;
+      const currentValue = permissionPresets.current(sessionEvents);
+      const options = [
+        ...permissionPresets.names.map((name) => permissionPresets.optionOf(name)),
+        ...(permissionPresets.names.includes(currentValue)
+          ? []
+          : [permissionPresets.optionOf(currentValue)]),
+      ];
+      return {
+        currentValue,
+        id: "permissions",
+        name: "Permissions",
+        options,
+      };
+    },
+    set(nativeSessionId, value) {
+      const permissionPresets = services.permissionPresets;
+      const session = services.sessions?.get(SessionId(nativeSessionId));
+      if (permissionPresets === undefined || session === undefined) {
+        throw new Error(`DSH session "${nativeSessionId}" is unavailable for permission update`);
+      }
+      permissionPresets.set(session, value);
+    },
+  };
 }
 
 /**
@@ -127,6 +177,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
                 dshContext.sessionPersistence,
                 context.sessionProjectionCache as DshSessionProjectionCache,
               ),
+            permissionPresets: createDshPermissionProvider(context),
             toSessionId: SessionId,
           },
           hostId,

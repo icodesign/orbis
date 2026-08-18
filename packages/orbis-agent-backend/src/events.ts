@@ -23,6 +23,22 @@ export interface AgentModelSelection {
   readonly thinkingLevel?: string;
 }
 
+/** One selectable value advertised by a session-scoped configuration option. */
+export interface AgentSessionConfigOptionChoice {
+  readonly description?: string;
+  readonly name: string;
+  readonly value: string;
+}
+
+/** A driver-owned session configuration control exposed to clients. */
+export interface AgentSessionConfigOption {
+  readonly currentValue: string;
+  readonly description?: string;
+  readonly id: string;
+  readonly name: string;
+  readonly options: readonly AgentSessionConfigOptionChoice[];
+}
+
 export interface AgentSessionMetadata {
   readonly createdAt: AgentTimestamp;
   readonly model?: AgentModelSelection | null;
@@ -213,7 +229,7 @@ export interface AgentSessionStatePatch {
     readonly id: AgentRunId;
     readonly startedAt: AgentTimestamp;
   } | null;
-  readonly configOptions?: Readonly<Record<string, AgentJsonValue>>;
+  readonly configOptions?: readonly AgentSessionConfigOption[];
   readonly cwd?: string | null;
   readonly lastRun?: {
     readonly error?: AgentPublicError;

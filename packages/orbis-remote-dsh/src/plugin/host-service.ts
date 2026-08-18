@@ -19,6 +19,7 @@ import {
   type OrbisRemoteHostConnection,
   type RemoteHost,
   type RemoteHostPeer,
+  type RemoteHostPeerError,
   type RemoteHostRequestHandler,
   type RemoteHostResolvedPeer,
   type RemoteScopeMode,
@@ -153,7 +154,10 @@ export interface OrbisDshStatus {
     readonly invitation: string;
     readonly error?: string;
   };
-  readonly devices: readonly (OrbisDshPeer & { readonly connected: boolean })[];
+  readonly devices: readonly (OrbisDshPeer & {
+    readonly connected: boolean;
+    readonly error?: string;
+  })[];
 }
 
 function nodeSecureRandom(length: number): Promise<Uint8Array> {
@@ -285,6 +289,7 @@ export class OrbisDshHostService {
   private connectionDisposers: Array<() => void> = [];
   private connectionState: HostConnectionState = "disconnected";
   private connectionError?: string;
+  private readonly deviceErrors = new Map<string, string>();
   private pending?: PendingPairing;
   private readonly discoverDirectAddresses: () => readonly OrbisDshDiscoveredAddress[];
   private endpointRevisionValue = 0;
@@ -341,7 +346,14 @@ export class OrbisDshHostService {
       },
       ...(this.pending === undefined ? {} : { pairing: this.pairingStatus(this.pending) }),
       devices: state.peers
-        .map((peer) => ({ ...peer, connected: connectedKeys.has(peer.keyId) }))
+        .map((peer) => {
+          const error = this.deviceErrors.get(peer.keyId);
+          return {
+            ...peer,
+            connected: connectedKeys.has(peer.keyId),
+            ...(error === undefined ? {} : { error }),
+          };
+        })
         .sort((left, right) => right.pairedAt.localeCompare(left.pairedAt)),
     };
   }
@@ -460,6 +472,7 @@ export class OrbisDshHostService {
         }
         return { ...current, peers };
       });
+      this.deviceErrors.delete(keyId);
       for (const peer of this.connection?.peers ?? []) {
         if (peer.keyId === keyId) this.connection?.disconnectPeer(peer.handshakeId);
       }
@@ -521,6 +534,7 @@ export class OrbisDshHostService {
           this.releaseConnection(listener!, false, "Orbis stopped unexpectedly"),
         ),
         listener.onPeer((peer) => {
+          this.deviceErrors.delete(peer.keyId);
           void this.noteConnected(peer);
           this.logger.info("peer.connected", {
             deviceId: peer.descriptor.deviceId,
@@ -529,9 +543,12 @@ export class OrbisDshHostService {
           });
         }),
         listener.onPeerError((event) => {
-          this.connectionError = errorMessage(event.error, "A paired device connection failed");
+          this.routePeerError(event);
           this.logger.error("peer.error", {
             ...(event.handshakeId === undefined ? {} : { handshakeId: event.handshakeId }),
+            ...(event.keyId === undefined ? {} : { keyId: event.keyId }),
+            ...(event.mode === undefined ? {} : { mode: event.mode }),
+            ...(event.pairingId === undefined ? {} : { pairingId: event.pairingId }),
             ...orbisDshErrorFields(event.error),
           });
         }),
@@ -555,6 +572,7 @@ export class OrbisDshHostService {
     const connection = this.connection;
     if (connection === undefined) {
       this.stopEndpointMonitor();
+      this.deviceErrors.clear();
       this.connectionState = "disconnected";
       return;
     }
@@ -570,6 +588,7 @@ export class OrbisDshHostService {
     if (this.connection !== connection) return;
     this.stopEndpointMonitor();
     this.connection = undefined;
+    this.deviceErrors.clear();
     for (const dispose of this.connectionDisposers.splice(0)) dispose();
     this.connectionState = "disconnected";
     if (!expected) this.connectionError = unexpectedMessage;
@@ -639,6 +658,30 @@ export class OrbisDshHostService {
     }).catch((error) => {
       this.connectionError = errorMessage(error, "Could not update paired device state");
     });
+  }
+
+  private routePeerError(event: RemoteHostPeerError): void {
+    const message = errorMessage(event.error, "The Orbis peer connection failed");
+    if (event.mode === "pairing") {
+      const pending = this.pending;
+      if (pending !== undefined && pending.pairingId === event.pairingId) {
+        this.failPending(pending, message);
+      }
+      return;
+    }
+    if (event.mode !== "authenticated" || event.keyId === undefined) return;
+    void this.noteDeviceError(event.keyId, message);
+  }
+
+  private async noteDeviceError(keyId: string, message: string): Promise<void> {
+    try {
+      const state = await this.stateStore.load();
+      if (this.connection === undefined || !state.peers.some((peer) => peer.keyId === keyId))
+        return;
+      this.deviceErrors.set(keyId, message);
+    } catch (error) {
+      this.logger.error("peer.error_state_failed", orbisDshErrorFields(error));
+    }
   }
 
   private async resolvePeer(frame: SecureHelloEnvelope): Promise<RemoteHostResolvedPeer> {
@@ -766,11 +809,16 @@ export class OrbisDshHostService {
     pending.expiryTimer = setTimeout(() => {
       void this.exclusive(async () => {
         if (this.pending !== pending || pending.controller.signal.aborted) return;
-        pending.phase = "failed";
-        pending.error = "The pairing invitation expired";
-        pending.controller.abort();
+        this.failPending(pending, "The pairing invitation expired");
       }).catch(() => undefined);
     }, delay);
+  }
+
+  private failPending(pending: PendingPairing, message: string): void {
+    if (this.pending !== pending || pending.phase === "failed") return;
+    pending.phase = "failed";
+    pending.error = message;
+    pending.controller.abort();
   }
 
   private clearPending(pending: PendingPairing): void {

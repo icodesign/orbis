@@ -483,7 +483,7 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
       ],
     },
     state: {
-      configOptions: {},
+      configOptions: [],
       createdAt: "2026-08-11T00:00:00.000Z",
       cwd: null,
       leafEntryId: null,
