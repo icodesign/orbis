@@ -22,7 +22,7 @@ import {
   parsePairingInvitation,
 } from "@orbisapp/transport";
 
-import { createNodeWebSocketFactory } from "../src/node-websocket.ts";
+import { createNodeWebSocketFactory } from "../src/plugin/node-websocket.ts";
 import { delay, waitFor } from "./real-profile-e2e-utils.ts";
 
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -343,7 +343,7 @@ async function persistedIndexEntryCount(path) {
 }
 
 async function assertDshCompatibility() {
-  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.0-rc.6";
+  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.1-rc.2";
   const probeRoot = await mkdtemp(join(tmpdir(), "orbis-dsh-compat-"));
   const probeEnv = {
     ...process.env,

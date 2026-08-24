@@ -1,16 +1,28 @@
 import type {
   AgentContentBlock,
+  AgentAttachmentReadResult,
+  AgentPromptContentBlock,
   AgentDriverDescriptor,
   AgentJsonValue,
   AgentModelMetadata,
   AgentModelSelection,
   AgentSessionConfigOption,
   AgentSessionRef,
+  AgentQuestionAnswerItem,
+  AgentQuestionItem,
+  AgentQuestionOption,
+  AgentQuestionPlanReviewIntent,
+  AgentQuestionRequest,
+  AgentQuestionResponse,
+  AgentWorkState,
   AgentWorkspaceDescriptor,
   AgentWorkspaceFolderDescriptor,
   AgentWorkspaceFolderListing,
   AgentWorkspaceRegisterResult,
   AgentPermissionOption,
+  AgentPromptReferenceCompletionInput,
+  AgentPromptReferenceCompletionResult,
+  AgentSessionSubagentEntry,
 } from "@orbisapp/orbis-agent-backend";
 import type {
   AgentBackendId,
@@ -25,6 +37,17 @@ import type { RemoteAgentHostPeer, RemoteAgentHostRequestContext } from "./host"
 
 export type RemoteAgentV2JsonValue = AgentJsonValue;
 export type RemoteAgentV2ContentBlock = AgentContentBlock;
+/** Prompt wire blocks never carry raw image bytes. Images reference a completed
+ * peer-scoped upload, which the host resolves before invoking the runtime. */
+export type RemoteAgentV2PromptContentBlock =
+  | { readonly text: string; readonly type: "text" }
+  | {
+      /** Peer-scoped completed upload identity; not a durable attachment id. */
+      readonly uploadId: string;
+      readonly mimeType: string;
+      readonly name?: string;
+      readonly type: "image_upload";
+    };
 export type RemoteAgentV2SessionConfigOption = AgentSessionConfigOption;
 export type RemoteAgentV2StreamingContentBlock = Extract<
   RemoteAgentV2ContentBlock,
@@ -65,6 +88,16 @@ export interface RemoteAgentV2PermissionRequest {
   readonly requestedAt: AgentTimestamp;
 }
 
+/** Ask User is a canonical interaction domain, independent from permission. */
+export type RemoteAgentV2QuestionOption = AgentQuestionOption;
+export type RemoteAgentV2QuestionPlanReviewIntent = AgentQuestionPlanReviewIntent;
+export type RemoteAgentV2QuestionItem = AgentQuestionItem;
+export type RemoteAgentV2QuestionRequest = AgentQuestionRequest;
+export type RemoteAgentV2QuestionAnswerItem = AgentQuestionAnswerItem;
+export type RemoteAgentV2QuestionResponse = AgentQuestionResponse;
+export type RemoteAgentV2WorkState = AgentWorkState;
+export type RemoteAgentV2SubagentEntry = AgentSessionSubagentEntry;
+
 export type RemoteAgentV2RunState = "idle" | "running" | "suspended" | "error";
 
 export interface RemoteAgentV2SessionState {
@@ -81,6 +114,8 @@ export interface RemoteAgentV2SessionState {
   readonly lastRun?: RemoteAgentV2RunSummary;
   readonly pendingInputs: readonly RemoteAgentV2QueuedInput[];
   readonly pendingPermissions: readonly RemoteAgentV2PermissionRequest[];
+  readonly pendingQuestions: readonly RemoteAgentV2QuestionRequest[];
+  readonly workState: RemoteAgentV2WorkState;
   readonly usageTotal?: RemoteAgentV2Usage;
   readonly createdAt: AgentTimestamp;
   readonly updatedAt: AgentTimestamp;
@@ -184,7 +219,14 @@ export interface RemoteAgentV2SessionRecord extends RemoteAgentV2SessionSummary 
 export interface RemoteAgentV2HostCapabilities {
   readonly presence: boolean;
   readonly attachments:
-    | { readonly maxBytes: number; readonly mimeTypes: readonly string[] }
+    | {
+        readonly downloadChunkBytes: number;
+        readonly maxImageBytes: number;
+        readonly maxImagesPerMessage: number;
+        readonly maxMessageImageBytes: number;
+        readonly mimeTypes: readonly string[];
+        readonly uploadChunkBytes: number;
+      }
     | false;
   readonly fork: boolean;
   readonly dispose: boolean;
@@ -241,7 +283,7 @@ export interface RemoteAgentV2WorkspaceCreateFolderInput {
 
 export interface RemoteAgentV2PromptInput {
   readonly ref: AgentSessionRef;
-  readonly content: readonly RemoteAgentV2ContentBlock[];
+  readonly content: readonly RemoteAgentV2PromptContentBlock[];
   readonly delivery?: "steer" | "follow_up";
   readonly expectedRevision?: number;
   readonly idempotencyKey: string;
@@ -281,12 +323,18 @@ export interface RemoteAgentV2Runtime {
   ): Promise<{ readonly cancelled: boolean }>;
   close(): Promise<void>;
   prompt(
-    input: Omit<RemoteAgentV2PromptInput, "ref" | "idempotencyKey"> & {
+    input: Omit<RemoteAgentV2PromptInput, "ref" | "idempotencyKey" | "content"> & {
+      readonly content: readonly AgentPromptContentBlock[];
       readonly idempotencyKey?: string;
     },
   ): Promise<RemoteAgentV2PromptReceipt>;
   respondPermission(
     input: Omit<RemoteAgentV2PermissionResponseInput, "ref" | "idempotencyKey"> & {
+      readonly idempotencyKey?: string;
+    },
+  ): Promise<{ readonly accepted: boolean }>;
+  respondQuestion(
+    input: Omit<RemoteAgentV2QuestionResponseInput, "ref" | "idempotencyKey"> & {
       readonly idempotencyKey?: string;
     },
   ): Promise<{ readonly accepted: boolean }>;
@@ -297,6 +345,13 @@ export interface RemoteAgentV2PermissionResponseInput {
   readonly ref: AgentSessionRef;
   readonly requestId: string;
   readonly optionId: string;
+  readonly idempotencyKey: string;
+}
+
+export interface RemoteAgentV2QuestionResponseInput {
+  readonly ref: AgentSessionRef;
+  readonly requestId: string;
+  readonly response: RemoteAgentV2QuestionResponse;
   readonly idempotencyKey: string;
 }
 
@@ -314,6 +369,9 @@ export interface RemoteAgentV2Backend {
     name: string,
   ): Promise<AgentWorkspaceFolderDescriptor>;
   connectRuntime(ref: AgentSessionRef): Promise<RemoteAgentV2Runtime>;
+  completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined>;
   createSession(
     input: Omit<RemoteAgentV2CreateInput, "idempotencyKey">,
   ): Promise<RemoteAgentV2SessionRecord>;
@@ -325,6 +383,10 @@ export interface RemoteAgentV2Backend {
   listSessions(input: {
     readonly driverId?: AgentSessionRef["driverId"];
   }): Promise<readonly RemoteAgentV2SessionSummary[]>;
+  listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly RemoteAgentV2SubagentEntry[]>;
   /**
    * Optional freshness hint for catalog rows the host is not already tracking
    * through a session runtime — a session created or advanced directly in the
@@ -334,6 +396,11 @@ export interface RemoteAgentV2Backend {
    */
   observeCatalog?(listener: () => void): () => void;
   readSession(ref: AgentSessionRef): Promise<RemoteAgentV2SessionSnapshot>;
+  readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentAttachmentReadResult>;
   registerWorkspace(
     driverId: AgentSessionRef["driverId"],
     folderRef: string,

@@ -4,7 +4,11 @@
  * packages; the DSH bundle is the sole runtime composition point.
  */
 
-import type { AgentSessionConfigOption } from "@orbisapp/orbis-agent-backend";
+import type {
+  AgentPromptReferenceCompletionResult,
+  AgentPromptReferenceSource,
+  AgentSessionConfigOption,
+} from "@orbisapp/orbis-agent-backend";
 
 export type DshWorkspaceId = string & { readonly __dshWorkspaceId: unique symbol };
 
@@ -22,6 +26,8 @@ export interface DshSessionHeader {
 export interface DshSessionCatalogEntry {
   readonly createdAt: number;
   readonly id: unknown;
+  readonly origin?: "subagent";
+  readonly parentSession?: unknown;
   /** Optional log-folded title supplied by the DSH session-query service. */
   readonly title?: string;
   readonly updatedAt: number;
@@ -54,6 +60,63 @@ export interface DshSessionPermissionProvider {
   set(nativeSessionId: string, value: string): void | Promise<void>;
 }
 
+/** Narrow composition seam for DSH's logged plan-mode service. */
+export interface DshSessionModeProvider {
+  get(agent: DshAgent): { readonly active: boolean; readonly pending?: boolean };
+  set(
+    agent: DshAgent,
+    active: boolean,
+  ):
+    | "committed"
+    | "queued"
+    | "cancelled"
+    | "noop"
+    | Promise<"committed" | "queued" | "cancelled" | "noop">;
+}
+
+/** DSH-owned grammar and candidate discovery for prompt references. */
+export interface DshPromptReferenceProvider {
+  complete(input: {
+    readonly agent: DshAgent;
+    readonly cursor: number;
+    readonly limit: number;
+    readonly signal?: AbortSignal;
+    readonly source: AgentPromptReferenceSource;
+    readonly text: string;
+  }): Promise<AgentPromptReferenceCompletionResult | undefined>;
+}
+
+/**
+ * Narrow composition seam for DSH's authoritative descendant listing. The
+ * plugin maps the official DSH rows into this structural shape; the adapter
+ * owns conversion to canonical AgentSessionRef values and validation.
+ */
+export type DshSessionSubagentEntry =
+  | {
+      readonly activity: "inactive" | "running";
+      readonly depth: number;
+      readonly hasChildren: boolean;
+      readonly id: unknown;
+      readonly kind: "child";
+      readonly label?: string;
+      readonly mode: "continuable" | "one-shot";
+      readonly parentId: unknown;
+    }
+  | {
+      readonly depth: number;
+      readonly id: unknown;
+      readonly kind: "diagnostic";
+      readonly parentId: unknown;
+      readonly reason: "corrupt" | "unavailable" | "unsupported";
+    };
+
+export interface DshSessionSubagentProvider {
+  listDescendants(
+    nativeSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<readonly DshSessionSubagentEntry[]>;
+}
+
 /** DSH's durable session catalog and append-only history seam. */
 export interface DshSessionPersistence {
   inspect(id: unknown, signal?: AbortSignal): Promise<DshSessionInspection>;
@@ -65,6 +128,37 @@ export interface DshUserMessage {
   readonly content?: readonly unknown[];
   readonly id: unknown;
 }
+
+/** DSH's provider-neutral durable image reference. */
+export interface DshImageAttachmentReference {
+  readonly attachmentId: string;
+  readonly bytes: number;
+  readonly height: number;
+  readonly mediaType: string;
+  readonly name?: string;
+  readonly width: number;
+}
+
+export interface DshEncodedImageAttachment {
+  readonly data: string;
+  readonly mediaType: string;
+  readonly name?: string;
+}
+
+/** Narrow attachment port owned by the DSH plugin composition. */
+export interface DshSessionAttachmentPort {
+  admitEncodedImages(
+    images: readonly DshEncodedImageAttachment[],
+  ): Promise<readonly DshImageAttachmentReference[]>;
+  readImage(
+    reference: DshImageAttachmentReference,
+    signal?: AbortSignal,
+  ): Promise<{ readonly data: Uint8Array; readonly reference: DshImageAttachmentReference }>;
+}
+
+export type DshUserMessageContent =
+  | { readonly text: string; readonly type: "text" }
+  | { readonly attachment: DshImageAttachmentReference; readonly type: "image" };
 
 export interface DshInbox {
   readonly nextStep: readonly DshUserMessage[];
@@ -112,6 +206,32 @@ export interface DshApiError {
   readonly message: string;
 }
 
+export interface DshApiQuestionOption {
+  readonly description?: string;
+  readonly label: string;
+}
+
+export interface DshApiQuestionIntent {
+  readonly approve: string;
+  readonly kind: "plan-review";
+}
+
+export interface DshApiQuestionItem {
+  readonly detail?: string;
+  readonly header?: string;
+  readonly id: string;
+  readonly intent?: DshApiQuestionIntent;
+  readonly multiSelect?: boolean;
+  readonly options?: readonly DshApiQuestionOption[];
+  readonly question: string;
+}
+
+export interface DshApiQuestionAnswerItem {
+  readonly custom?: string;
+  readonly id: string;
+  readonly selected: readonly string[];
+}
+
 export interface DshApiResponse<T> {
   readonly result:
     | { readonly ok: true; readonly value: T }
@@ -123,16 +243,22 @@ export interface DshApiMuxFrame {
   readonly type:
     | "approval/requested"
     | "approval/resolved"
+    | "question/requested"
+    | "question/resolved"
     | "session/event"
     | "session/subscribed"
     | "stream/error";
   readonly sessionId?: unknown;
   readonly approvalId?: string;
+  /** The DSH question request itself; its rpc id is the enclosing request.rpcId. */
+  readonly questions?: readonly DshApiQuestionItem[];
+  /** The enclosing request rpc id echoed by a question resolution. */
+  readonly questionRpcId?: string;
   readonly rpcId?: string;
   readonly toolName?: string;
   readonly callId?: string;
   readonly reason?: string;
-  readonly outcome?: "allowed-once" | "rejected" | "cancelled" | "unavailable";
+  readonly outcome?: "allowed-once" | "rejected" | "cancelled" | "unavailable" | "answered";
 }
 
 export interface DshApiMuxRequest {
@@ -140,7 +266,7 @@ export interface DshApiMuxRequest {
   readonly rpcId: string;
 }
 
-export interface DshApiApprovalResponse {
+export interface DshApiPermissionResponse {
   readonly type: "client-response";
   readonly rpcId: string;
   readonly result: {
@@ -152,6 +278,22 @@ export interface DshApiApprovalResponse {
     };
   };
 }
+
+export interface DshApiQuestionResponse {
+  readonly type: "client-response";
+  readonly rpcId: string;
+  readonly result:
+    | {
+        readonly ok: true;
+        readonly value: {
+          readonly answer: { readonly answers: readonly DshApiQuestionAnswerItem[] };
+          readonly sessionId: unknown;
+        };
+      }
+    | { readonly ok: false; readonly error: DshApiError };
+}
+
+export type DshApiInteractionResponse = DshApiPermissionResponse | DshApiQuestionResponse;
 
 /** Public DSH gateway seam shared by Web and other interactive front doors. */
 export interface DshApiProxy {
@@ -188,7 +330,7 @@ export interface DshApiProxy {
       signal: AbortSignal,
     ): AsyncIterable<DshApiMuxRequest>;
   };
-  readonly respond?: (message: DshApiApprovalResponse) => Promise<{
+  readonly respond?: (message: DshApiInteractionResponse) => Promise<{
     readonly accepted: boolean;
     readonly reason?: "not-pending" | "bad-response";
   }>;
@@ -248,6 +390,7 @@ export interface DshContext {
   /** Present when DSH's shared Web/API gateway owns session model targets. */
   readonly apiProxy?: DshApiProxy;
   readonly agents: DshAgentRegistry;
+  readonly planMode?: DshSessionModeProvider;
   readonly sessionPersistence: DshSessionPersistence;
   readonly workspace: DshWorkspaceRegistry;
   on(

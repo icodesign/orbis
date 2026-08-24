@@ -12,6 +12,12 @@ import {
   createAgentDriverDescriptor,
   isAgentBackendError,
   validateAgentPermissionRequest,
+  validateAgentQuestionRequest,
+  validateAgentQuestionResponseInput,
+  validateAgentPromptReferenceCompletionInput,
+  validateAgentPromptReferenceCompletionResult,
+  validateAgentSessionSubagentList,
+  validateAgentWorkState,
   type AgentBackendErrorCode,
   type AgentDriverDescriptor,
   type AgentJsonValue,
@@ -21,6 +27,9 @@ import {
   type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
+  type AgentPromptReferenceCompletionInput,
+  type AgentPromptReferenceCompletionResult,
+  type AgentSessionSubagentEntry,
 } from "@orbisapp/orbis-agent-backend";
 import {
   isOrbisTransportError,
@@ -33,6 +42,7 @@ import {
 import { ORBIS_REMOTE_AGENT_V2_EVENT_TYPE, ORBIS_REMOTE_AGENT_V2_METHODS } from "./v2-constants";
 import {
   v2ContentBlockSchema,
+  v2PromptContentBlockSchema,
   v2DriverSchema,
   v2EntrySchema,
   v2HelloInputSchema,
@@ -46,9 +56,13 @@ import {
   v2RefSchema,
   v2SessionEventSchema,
   v2SessionSummarySchema,
+  v2QuestionResponseInputSchema,
   v2StatePatchSchema,
   v2StateSchema,
   v2SyncResultSchema,
+  v2PromptReferenceCompletionResponseSchema,
+  v2SubagentEntrySchema,
+  v2SubagentListResponseSchema,
 } from "./v2-schemas";
 import type {
   RemoteAgentV2CancelInput,
@@ -63,7 +77,10 @@ import type {
   RemoteAgentV2ModelSelection,
   RemoteAgentV2Overlay,
   RemoteAgentV2PermissionRequest,
+  RemoteAgentV2QuestionRequest,
+  RemoteAgentV2QuestionResponseInput,
   RemoteAgentV2PromptInput,
+  RemoteAgentV2PromptContentBlock,
   RemoteAgentV2PromptReceipt,
   RemoteAgentV2RunSummary,
   RemoteAgentV2SessionEvent,
@@ -71,6 +88,7 @@ import type {
   RemoteAgentV2SessionState,
   RemoteAgentV2SessionStatePatch,
   RemoteAgentV2SessionSummary,
+  RemoteAgentV2SubagentEntry,
   RemoteAgentV2UpdateInput,
   RemoteAgentV2WorkspaceBrowseInput,
   RemoteAgentV2WorkspaceCreateFolderInput,
@@ -107,6 +125,9 @@ export interface RemoteAgentV2Connection {
   cancel(input: RemoteAgentV2CancelInput): Promise<{ readonly cancelled: boolean }>;
   close(): void;
   createSession(input: RemoteAgentV2CreateInput): Promise<RemoteAgentV2SessionRecord>;
+  completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined>;
   entries(input: {
     readonly ref: AgentSessionRef;
     readonly beforeCursor: number;
@@ -135,14 +156,39 @@ export interface RemoteAgentV2Connection {
     readonly sessions: readonly RemoteAgentV2SessionSummary[];
     readonly nextCursor?: string;
   }>;
+  listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly RemoteAgentV2SubagentEntry[]>;
   onClose(listener: () => void): () => void;
   onEvent(listener: (delivery: RemoteAgentV2Delivery) => void): () => void;
   onProtocolError(listener: (error: AgentBackendError) => void): () => void;
   prompt(input: RemoteAgentV2PromptInput): Promise<RemoteAgentV2PromptReceipt>;
+  uploadAttachment(input: {
+    readonly ref: AgentSessionRef;
+    readonly uploadId: string;
+    readonly totalBytes: number;
+    readonly mimeType: string;
+    readonly name?: string;
+    readonly data: string;
+  }): Promise<{ readonly uploadId: string }>;
+  abortAttachment(
+    uploadId: string,
+  ): Promise<{ readonly aborted: boolean; readonly uploadId: string }>;
+  readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+  ): Promise<import("@orbisapp/orbis-agent-backend").AgentAttachmentReadResult>;
   respondPermission(input: {
     readonly ref: AgentSessionRef;
     readonly requestId: string;
     readonly optionId: string;
+    readonly idempotencyKey: string;
+  }): Promise<{ readonly accepted: boolean }>;
+  respondQuestion(input: {
+    readonly ref: AgentSessionRef;
+    readonly requestId: string;
+    readonly response: RemoteAgentV2QuestionResponseInput["response"];
     readonly idempotencyKey: string;
   }): Promise<{ readonly accepted: boolean }>;
   sync(input: {
@@ -253,6 +299,10 @@ function parseModel(value: unknown): RemoteAgentV2ModelSelection {
 
 function parseContent(value: unknown): RemoteAgentV2ContentBlock {
   return parseSchema(v2ContentBlockSchema, value, "Content block");
+}
+
+function parsePromptContent(value: unknown): RemoteAgentV2PromptContentBlock {
+  return parseSchema(v2PromptContentBlockSchema, value, "Prompt content block");
 }
 
 function parseUsage(value: unknown): RemoteAgentV2Usage {
@@ -377,6 +427,8 @@ function parseState(value: unknown): RemoteAgentV2SessionState {
       : { lastRun: parseRun(input.lastRun) }),
     pendingInputs: input.pendingInputs.map(parseQueuedInput),
     pendingPermissions: input.pendingPermissions.map(parsePermission),
+    pendingQuestions: input.pendingQuestions.map(parseQuestionRequest),
+    workState: parseWorkState(input.workState),
     ...(input.usageTotal === undefined || input.usageTotal === null
       ? {}
       : { usageTotal: parseUsage(input.usageTotal) }),
@@ -404,6 +456,42 @@ function parsePermission(value: unknown): RemoteAgentV2PermissionRequest {
     return validateAgentPermissionRequest(value);
   } catch {
     protocolError("Permission request is invalid");
+  }
+}
+
+function parseQuestionRequest(value: unknown): RemoteAgentV2QuestionRequest {
+  try {
+    return validateAgentQuestionRequest(value);
+  } catch {
+    protocolError("Question request is invalid");
+  }
+}
+
+function parseSubagentEntry(value: unknown): AgentSessionSubagentEntry {
+  const input = parseSchema(v2SubagentEntrySchema, value, "Subagent entry");
+  const base = {
+    depth: input.depth,
+    parentRef: parseRef(input.parentRef),
+    ref: parseRef(input.ref),
+  };
+  if (input.kind === "diagnostic") {
+    return { ...base, kind: "diagnostic", reason: input.reason };
+  }
+  return {
+    ...base,
+    activity: input.activity,
+    hasChildren: input.hasChildren,
+    kind: "child",
+    ...(input.label === undefined ? {} : { label: input.label }),
+    mode: input.mode,
+  } as AgentSessionSubagentEntry;
+}
+
+function parseWorkState(value: unknown): RemoteAgentV2SessionState["workState"] {
+  try {
+    return validateAgentWorkState(value);
+  } catch {
+    protocolError("Work state is invalid");
   }
 }
 
@@ -510,10 +598,24 @@ function parseAttachments(
 ): NonNullable<RemoteAgentV2Hello["capabilities"]["attachments"]> {
   const input = record(value, "Attachment capability");
   return {
-    maxBytes: integer(input, "maxBytes", "Attachment max bytes", 1),
+    downloadChunkBytes: integer(input, "downloadChunkBytes", "Attachment download chunk bytes", 1),
+    maxImageBytes: integer(input, "maxImageBytes", "Attachment max image bytes", 1),
+    maxImagesPerMessage: integer(
+      input,
+      "maxImagesPerMessage",
+      "Attachment max images per message",
+      1,
+    ),
+    maxMessageImageBytes: integer(
+      input,
+      "maxMessageImageBytes",
+      "Attachment max message image bytes",
+      1,
+    ),
     mimeTypes: array(input, "mimeTypes", "Attachment MIME types").map((item) =>
       stringValue(item, "Attachment MIME type"),
     ),
+    uploadChunkBytes: integer(input, "uploadChunkBytes", "Attachment upload chunk bytes", 1),
   };
 }
 
@@ -665,6 +767,10 @@ function parsePatch(value: unknown): RemoteAgentV2SessionStatePatch {
     ...(input.pendingPermissions === undefined
       ? {}
       : { pendingPermissions: input.pendingPermissions.map(parsePermission) }),
+    ...(input.pendingQuestions === undefined
+      ? {}
+      : { pendingQuestions: input.pendingQuestions.map(parseQuestionRequest) }),
+    ...(input.workState === undefined ? {} : { workState: parseWorkState(input.workState) }),
     ...(input.usageTotal === undefined
       ? {}
       : { usageTotal: input.usageTotal === null ? null : parseUsage(input.usageTotal) }),
@@ -773,6 +879,25 @@ function refPayload(ref: AgentSessionRef): JsonValue {
 
 function toJson(value: unknown): JsonValue {
   return jsonValueSchema.parse(JSON.parse(JSON.stringify(value))) as JsonValue;
+}
+
+function decodeBase64(value: string): Uint8Array {
+  try {
+    const binary = atob(value);
+    if (btoa(binary) !== value) protocolError("Attachment data is not canonical base64");
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    protocolError("Attachment data is not valid base64");
+  }
+}
+
+function encodeBase64(value: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < value.length; offset += chunkSize) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
@@ -925,6 +1050,32 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
     });
   }
 
+  async listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly RemoteAgentV2SubagentEntry[]> {
+    const driver = this.helloResult?.drivers.find((candidate) => candidate.id === ref.driverId);
+    if (driver === undefined || !driver.capabilities.includes("session.subagents.list")) {
+      throw new AgentBackendError(
+        "unsupported",
+        "The driver does not support listing session subagents",
+      );
+    }
+    const value = await this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList,
+      { ref: refPayload(ref) },
+      (result) => parseSchema(v2SubagentListResponseSchema, result, "Subagent list result"),
+      false,
+      signal,
+    );
+    const entries = value.entries.map(parseSubagentEntry);
+    try {
+      return validateAgentSessionSubagentList(entries, ref);
+    } catch {
+      protocolError("Subagent list result is invalid");
+    }
+  }
+
   async createSession(input: RemoteAgentV2CreateInput) {
     return this.request(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsCreate,
@@ -937,6 +1088,54 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
         };
       },
     );
+  }
+
+  async completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined> {
+    const validated = validateAgentPromptReferenceCompletionInput(input);
+    const capability =
+      validated.source === "files" ? "prompt.references.files" : "prompt.references.sessions";
+    const driver = this.helloResult?.drivers.find(
+      (candidate) => candidate.id === validated.ref.driverId,
+    );
+    if (driver === undefined || !driver.capabilities.includes(capability)) {
+      throw new AgentBackendError(
+        "unsupported",
+        `The driver does not support ${validated.source} prompt references`,
+      );
+    }
+    const value = await this.request(
+      validated.source === "files"
+        ? ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles
+        : ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesSessions,
+      {
+        cursor: validated.cursor,
+        limit: validated.limit,
+        ref: refPayload(validated.ref),
+        source: validated.source,
+        text: validated.text,
+      },
+      (result) =>
+        parseSchema(
+          v2PromptReferenceCompletionResponseSchema,
+          result,
+          "Reference completion result",
+        ),
+      false,
+      validated.signal,
+    );
+    try {
+      return validateAgentPromptReferenceCompletionResult(value, validated);
+    } catch (error) {
+      if (isAgentBackendError(error) && error.code === "invalid_argument") {
+        throw new AgentBackendError(
+          "protocol",
+          "The remote prompt reference completion is invalid",
+        );
+      }
+      throw error;
+    }
   }
 
   async sync(input: {
@@ -1011,6 +1210,213 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
     );
   }
 
+  async uploadAttachment(input: {
+    readonly ref: AgentSessionRef;
+    readonly uploadId: string;
+    readonly totalBytes: number;
+    readonly mimeType: string;
+    readonly name?: string;
+    readonly data: string;
+  }): Promise<{ readonly uploadId: string }> {
+    if (this.helloResult?.capabilities.attachments === false || this.helloResult === undefined) {
+      throw new AgentBackendError("unsupported", "The remote host does not support attachments");
+    }
+    const capability = this.helloResult.capabilities.attachments;
+    const bytes = decodeBase64(input.data);
+    if (bytes.byteLength !== input.totalBytes) {
+      throw new AgentBackendError("invalid_argument", "Attachment byte count does not match data");
+    }
+    if (bytes.byteLength > capability.maxImageBytes) {
+      throw new AgentBackendError("invalid_argument", "Attachment exceeds the image byte limit");
+    }
+    await this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadBegin,
+      {
+        idempotencyKey: `${input.uploadId}:begin`,
+        mimeType: input.mimeType,
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ref: refPayload(input.ref),
+        totalBytes: input.totalBytes,
+        uploadId: input.uploadId,
+      },
+      (value) => {
+        const output = record(value, "Attachment upload begin result");
+        return { uploadId: string(output, "uploadId", "Attachment upload id") };
+      },
+    );
+    const rawChunkBytes = Math.max(3, Math.floor(capability.uploadChunkBytes / 3) * 3);
+    const encodedChunkChars = (rawChunkBytes / 3) * 4;
+    let encodedOffset = 0;
+    let rawOffset = 0;
+    while (encodedOffset < input.data.length) {
+      const isFinal = encodedOffset + encodedChunkChars >= input.data.length;
+      const chunk = input.data.slice(
+        encodedOffset,
+        isFinal ? undefined : encodedOffset + encodedChunkChars,
+      );
+      const chunkBytes = decodeBase64(chunk);
+      await this.request(
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk,
+        {
+          data: chunk,
+          idempotencyKey: `${input.uploadId}:chunk:${rawOffset}`,
+          offset: rawOffset,
+          uploadId: input.uploadId,
+        },
+        (value) => {
+          const output = record(value, "Attachment upload chunk result");
+          return {
+            nextOffset: integer(output, "nextOffset", "Attachment next offset"),
+            uploadId: string(output, "uploadId", "Attachment upload id"),
+          };
+        },
+      ).then((result) => {
+        if (result.uploadId !== input.uploadId) protocolError("Attachment upload id changed");
+        if (result.nextOffset !== rawOffset + chunkBytes.byteLength) {
+          protocolError("Attachment upload offset did not advance by the chunk size");
+        }
+      });
+      rawOffset += chunkBytes.byteLength;
+      encodedOffset += chunk.length;
+    }
+    return this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadFinish,
+      { idempotencyKey: `${input.uploadId}:finish`, uploadId: input.uploadId },
+      (value) => {
+        const output = record(value, "Attachment upload finish result");
+        return { uploadId: string(output, "uploadId", "Attachment upload id") };
+      },
+    );
+  }
+
+  async abortAttachment(
+    uploadId: string,
+  ): Promise<{ readonly aborted: boolean; readonly uploadId: string }> {
+    if (this.helloResult?.capabilities.attachments === false || this.helloResult === undefined) {
+      throw new AgentBackendError("unsupported", "The remote host does not support attachments");
+    }
+    return this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadAbort,
+      { idempotencyKey: `${uploadId}:abort`, uploadId },
+      (value) => {
+        const output = record(value, "Attachment upload abort result");
+        return {
+          aborted: boolean(output, "aborted", "Attachment abort result"),
+          uploadId: string(output, "uploadId", "Attachment upload id"),
+        };
+      },
+    );
+  }
+
+  async readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+  ): Promise<import("@orbisapp/orbis-agent-backend").AgentAttachmentReadResult> {
+    if (this.helloResult?.capabilities.attachments === false || this.helloResult === undefined) {
+      throw new AgentBackendError("unsupported", "The remote host does not support attachments");
+    }
+    let offset = 0;
+    let metadata:
+      | {
+          attachmentId: string;
+          bytes?: number;
+          height?: number;
+          mimeType: string;
+          name?: string;
+          width?: number;
+        }
+      | undefined;
+    const chunks: Uint8Array[] = [];
+    let expectedBytes: number | undefined;
+    for (;;) {
+      const result = await this.request(
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
+        { attachmentId, offset, ref: refPayload(ref) },
+        (value) => {
+          const output = record(value, "Attachment read result");
+          return {
+            attachmentId: string(output, "attachmentId", "Attachment id"),
+            data: string(output, "data", "Attachment data"),
+            eof: boolean(output, "eof", "Attachment EOF"),
+            mimeType: string(output, "mimeType", "Attachment MIME type"),
+            nextOffset: integer(output, "nextOffset", "Attachment next offset"),
+            ...(output.name === undefined
+              ? {}
+              : { name: string(output, "name", "Attachment name") }),
+            ...(output.bytes === undefined
+              ? {}
+              : { bytes: integer(output, "bytes", "Attachment bytes", 1) }),
+            ...(output.width === undefined
+              ? {}
+              : { width: integer(output, "width", "Attachment width", 1) }),
+            ...(output.height === undefined
+              ? {}
+              : { height: integer(output, "height", "Attachment height", 1) }),
+          };
+        },
+      );
+      if (result.attachmentId !== attachmentId) protocolError("Attachment id changed during read");
+      const chunk = decodeBase64(result.data);
+      if (!result.eof && chunk.byteLength % 3 !== 0) {
+        protocolError("Non-final attachment chunks must be three-byte aligned");
+      }
+      if (chunk.byteLength > this.helloResult.capabilities.attachments.downloadChunkBytes) {
+        protocolError("Attachment read chunk exceeds the advertised limit");
+      }
+      if (result.nextOffset !== offset + chunk.byteLength) {
+        protocolError("Attachment read offset does not match the chunk size");
+      }
+      if (result.nextOffset > this.helloResult.capabilities.attachments.maxImageBytes) {
+        protocolError("Attachment read exceeds the advertised image limit");
+      }
+      if (metadata === undefined) {
+        if (result.bytes === undefined) protocolError("Attachment byte count is missing");
+        if (result.bytes > this.helloResult.capabilities.attachments.maxImageBytes) {
+          protocolError("Attachment byte count exceeds the advertised image limit");
+        }
+        expectedBytes = result.bytes;
+        metadata = {
+          attachmentId: result.attachmentId,
+          ...(result.bytes === undefined ? {} : { bytes: result.bytes }),
+          ...(result.height === undefined ? {} : { height: result.height }),
+          mimeType: result.mimeType,
+          ...(result.name === undefined ? {} : { name: result.name }),
+          ...(result.width === undefined ? {} : { width: result.width }),
+        };
+      } else if (
+        result.mimeType !== metadata.mimeType ||
+        result.bytes !== metadata.bytes ||
+        result.name !== metadata.name ||
+        result.width !== metadata.width ||
+        result.height !== metadata.height
+      ) {
+        protocolError("Attachment metadata changed during read");
+      }
+      if (expectedBytes !== undefined && result.nextOffset > expectedBytes) {
+        protocolError("Attachment read exceeds the declared byte count");
+      }
+      if (!result.eof && expectedBytes !== undefined && result.nextOffset >= expectedBytes) {
+        protocolError("Attachment read reached the declared byte count before EOF");
+      }
+      chunks.push(chunk);
+      if (result.eof) {
+        if (expectedBytes !== result.nextOffset)
+          protocolError("Attachment EOF byte count is invalid");
+        break;
+      }
+      if (result.nextOffset <= offset) protocolError("Attachment read did not advance");
+      offset = result.nextOffset;
+    }
+    const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+    const bytes = new Uint8Array(size);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, cursor);
+      cursor += chunk.byteLength;
+    }
+    return { ...metadata!, data: encodeBase64(bytes) };
+  }
+
   cancel(input: RemoteAgentV2CancelInput) {
     return this.request(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsCancel,
@@ -1042,6 +1448,30 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
       (value) => {
         const output = record(value, "Permission result");
         return { accepted: boolean(output, "accepted", "Permission accepted") };
+      },
+    );
+  }
+
+  respondQuestion(input: {
+    readonly ref: AgentSessionRef;
+    readonly requestId: string;
+    readonly response: RemoteAgentV2QuestionResponseInput["response"];
+    readonly idempotencyKey: string;
+  }) {
+    const validated = validateAgentQuestionResponseInput({
+      idempotencyKey: input.idempotencyKey,
+      requestId: input.requestId,
+      response: input.response,
+    });
+    return this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+      {
+        ...validated,
+        ref: refPayload(input.ref),
+      },
+      (value) => {
+        const output = record(value, "Question result");
+        return { accepted: boolean(output, "accepted", "Question accepted") };
       },
     );
   }

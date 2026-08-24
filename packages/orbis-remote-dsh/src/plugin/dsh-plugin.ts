@@ -1,22 +1,44 @@
 import { join, resolve } from "node:path";
 
 import type { Context } from "@deepseek-ai/cordis";
+import type { Agent } from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-agent";
+import {
+  admitEncodedImages,
+  isImageAdmissionError,
+  type AttachmentStore,
+} from "@deepseek-ai/dsh-attachment";
+import type { EncodedImageAttachment, ImageAttachmentRef } from "@deepseek-ai/dsh-attachment/types";
 import type {} from "@deepseek-ai/dsh-credentials";
+import type {} from "@deepseek-ai/dsh-file-reference";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import type {} from "@deepseek-ai/dsh-host-apiproxy";
 import type { DirectoryPickerBrowseCapability } from "@deepseek-ai/dsh-host-directory-picker";
 import type {} from "@deepseek-ai/dsh-host-webserver";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import type { ContentBlock } from "@deepseek-ai/dsh-llm/types";
+import type {} from "@deepseek-ai/dsh-plan-mode";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
+import type {} from "@deepseek-ai/dsh-session-reference";
+import type { SubagentDescendantListEntry, SubagentRuntime } from "@deepseek-ai/dsh-subagent";
+import type {} from "@deepseek-ai/dsh-subagent";
 import type {} from "@deepseek-ai/dsh-workspace";
 import z from "@deepseek-ai/schemastery";
+import { AgentBackendError } from "@orbisapp/orbis-agent-backend";
 
-import type { DshSessionPermissionProvider } from "../adapter";
+import type {
+  DshEncodedImageAttachment,
+  DshImageAttachmentReference,
+  DshSessionAttachmentPort,
+  DshSessionModeProvider,
+  DshSessionPermissionProvider,
+  DshSessionSubagentProvider,
+} from "../adapter";
 import { OrbisRemoteDshHost, type OrbisRemoteDshHostDshOptions } from "../host";
 import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
+import { createDshPromptReferenceProvider } from "./dsh-prompt-reference-provider";
 import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-session-catalog";
 import { OrbisDshFileLogger } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
@@ -27,12 +49,16 @@ import { createDshWorkspaceFolderProvider } from "./workspace-folder-provider";
 export const name = "orbis-dsh-remote";
 export const inject = [
   "agents",
+  "subagents",
+  "attachments",
+  "fileReferences",
   "apiProxy",
   "credentials",
   "directoryPicker",
   "webServer",
   "sessionPersistence",
   "sessionProjectionCache",
+  "sessionReferenceResolver",
   "sessions",
   "permissionPresets",
   "workspaceRegistry",
@@ -60,19 +86,84 @@ export const Config: z<Config> = z.object({
 });
 
 function createDshUserMessage(input: {
-  readonly content: readonly [{ readonly text: string; readonly type: "text" }];
+  readonly content: readonly unknown[];
   readonly source: { readonly kind: "user" };
 }) {
+  const content = input.content.map((block): ContentBlock => {
+    if (typeof block !== "object" || block === null || Array.isArray(block)) {
+      throw new AgentBackendError("protocol", "The DSH user message content is invalid");
+    }
+    const candidate = block as Record<string, unknown>;
+    if (candidate.type === "text" && typeof candidate.text === "string") {
+      return { text: candidate.text, type: "text" };
+    }
+    if (
+      candidate.type === "image" &&
+      typeof candidate.attachment === "object" &&
+      candidate.attachment !== null
+    ) {
+      return { attachment: candidate.attachment as ImageAttachmentRef, type: "image" };
+    }
+    throw new AgentBackendError("protocol", "The DSH user message content is invalid");
+  });
   return createUserMessage({
-    content: [...input.content],
+    content,
     source: input.source,
   });
 }
 
+function dshImageReference(reference: ImageAttachmentRef): DshImageAttachmentReference {
+  return {
+    attachmentId: String(reference.attachmentId),
+    bytes: reference.bytes,
+    height: reference.height,
+    mediaType: reference.mediaType,
+    ...(reference.name === undefined ? {} : { name: reference.name }),
+    width: reference.width,
+  };
+}
+
+export function createDshAttachmentPort(context: Context): DshSessionAttachmentPort | undefined {
+  const attachments = (context as Context & { readonly attachments?: AttachmentStore }).attachments;
+  if (attachments === undefined) return undefined;
+  return {
+    async admitEncodedImages(images: readonly DshEncodedImageAttachment[]) {
+      try {
+        const refs = await admitEncodedImages(
+          attachments,
+          images.map(
+            (image): EncodedImageAttachment => ({
+              data: image.data,
+              mediaType: image.mediaType as EncodedImageAttachment["mediaType"],
+              ...(image.name === undefined ? {} : { name: image.name }),
+            }),
+          ),
+        );
+        return refs.map(dshImageReference);
+      } catch (error) {
+        if (isImageAdmissionError(error)) {
+          throw new AgentBackendError("invalid_argument", "The image attachment was rejected");
+        }
+        throw error;
+      }
+    },
+    async readImage(reference, signal) {
+      const stored = await attachments.readImage(reference as ImageAttachmentRef, signal);
+      return { data: stored.data, reference: dshImageReference(stored.ref) };
+    },
+  };
+}
+
+function dshPlanMode(context: Context): Context["planMode"] | undefined {
+  return context.get("planMode");
+}
+
 function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["context"] {
+  const planMode = dshPlanMode(context);
   return {
     ...(context.apiProxy === undefined ? {} : { apiProxy: context.apiProxy }),
     agents: context.agents,
+    ...(planMode === undefined ? {} : { planMode }),
     on: context.on.bind(context),
     sessionPersistence: context.sessionPersistence,
     // The generic Orbis backend keeps its own narrow DSH port named
@@ -131,6 +222,36 @@ function createDshPermissionProvider(context: Context): DshSessionPermissionProv
   };
 }
 
+export function createDshPlanModeProvider(context: Context): DshSessionModeProvider | undefined {
+  const planMode = dshPlanMode(context);
+  if (planMode === undefined) return undefined;
+  return {
+    get(agent) {
+      return planMode.get(agent as unknown as Agent);
+    },
+    set(agent, active) {
+      return planMode.set(agent as unknown as Agent, active);
+    },
+  };
+}
+
+/**
+ * Keeps the official DSH descendant listing authoritative. The adapter owns
+ * native-id to canonical-ref mapping; this composition seam only supplies the
+ * exact DSH rows and caller cancellation signal without parsing or reordering.
+ */
+export function createDshSessionSubagentProvider(
+  context: Context,
+): DshSessionSubagentProvider | undefined {
+  const subagents = (context as Context & { readonly subagents?: SubagentRuntime }).subagents;
+  if (subagents === undefined) return undefined;
+  return {
+    listDescendants(nativeSessionId, signal): Promise<readonly SubagentDescendantListEntry[]> {
+      return subagents.listDescendants(SessionId(nativeSessionId), signal);
+    },
+  };
+}
+
 /**
  * Mount the DSH remote harness adapter plus the loopback-only Orbis device
  * management route. The plugin deliberately refuses a LAN-bound DSH web
@@ -178,6 +299,10 @@ export async function apply(context: Context, config?: Config): Promise<void> {
                 context.sessionProjectionCache as DshSessionProjectionCache,
               ),
             permissionPresets: createDshPermissionProvider(context),
+            planMode: createDshPlanModeProvider(context),
+            attachments: createDshAttachmentPort(context),
+            promptReferences: createDshPromptReferenceProvider(context),
+            subagents: createDshSessionSubagentProvider(context),
             toSessionId: SessionId,
           },
           hostId,

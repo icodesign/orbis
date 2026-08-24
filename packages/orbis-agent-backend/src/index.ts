@@ -21,6 +21,7 @@ export {
   type AgentPromptDelivery,
   type AgentPromptInput,
   type AgentPromptReceipt,
+  type AgentRuntimeStatusListener,
   type AgentRuntimeStatus,
   type AgentSessionCatalog,
   type AgentSessionCreateInput,
@@ -50,6 +51,7 @@ export {
   type AgentBackendErrorOptions,
 } from "./errors";
 export type {
+  AgentAttachmentReadResult,
   AgentContentBlock,
   AgentContextEntry,
   AgentContextOrigin,
@@ -58,6 +60,9 @@ export type {
   AgentEntryAppendedEvent,
   AgentEventSource,
   AgentJsonValue,
+  AgentGoal,
+  AgentGoalBlockedReason,
+  AgentGoalPhase,
   AgentMessageEntry,
   AgentMessageRole,
   AgentModelSelection,
@@ -66,6 +71,14 @@ export type {
   AgentPermissionRequest,
   AgentPermissionResponseInput,
   AgentPermissionResponseResult,
+  AgentQuestionAnswerItem,
+  AgentQuestionItem,
+  AgentQuestionOption,
+  AgentQuestionPlanReviewIntent,
+  AgentQuestionRequest,
+  AgentQuestionResponse,
+  AgentQuestionResponseInput,
+  AgentQuestionResponseResult,
   AgentNoticeEntry,
   AgentPresenceChangedEvent,
   AgentPresenceDevice,
@@ -87,6 +100,8 @@ export type {
   AgentToolEntry,
   AgentTransientSessionEvent,
   AgentUsage,
+  AgentTodoItem,
+  AgentWorkState,
 } from "./events";
 export {
   agentBackendId,
@@ -124,7 +139,43 @@ export {
   type AgentRunSummary,
   type AgentSessionProjection,
 } from "./projection";
+export { validateAgentAttachmentReadResult, validateAgentPromptInput } from "./prompt";
+export type { AgentPromptContentBlock } from "./events";
+export {
+  AGENT_PROMPT_REFERENCE_MAX_CANDIDATES,
+  AGENT_PROMPT_REFERENCE_MAX_DETAIL_LENGTH,
+  AGENT_PROMPT_REFERENCE_MAX_INSERT_TEXT_LENGTH,
+  AGENT_PROMPT_REFERENCE_MAX_LABEL_LENGTH,
+  AGENT_PROMPT_REFERENCE_MAX_LIMIT,
+  AGENT_PROMPT_REFERENCE_MAX_TEXT_LENGTH,
+  validateAgentPromptReferenceCompletionInput,
+  validateAgentPromptReferenceCompletionResult,
+  type AgentPromptReferenceCandidate,
+  type AgentPromptReferenceCandidateKind,
+  type AgentPromptReferenceCompletionInput,
+  type AgentPromptReferenceCompletionResult,
+  type AgentPromptReferenceSource,
+} from "./references";
+export {
+  validateAgentQuestionRequest,
+  validateAgentQuestionResponseForRequest,
+  validateAgentQuestionResponseInput,
+} from "./questions";
 export {
   validateAgentPermissionRequest,
   validateAgentPermissionResponseInput,
 } from "./permissions";
+export { validateAgentGoal, validateAgentTodoItem, validateAgentWorkState } from "./work-state";
+export {
+  AGENT_SESSION_SUBAGENT_MAX_DEPTH,
+  AGENT_SESSION_SUBAGENT_MAX_ENTRIES,
+  AGENT_SESSION_SUBAGENT_MAX_LABEL_LENGTH,
+  validateAgentSessionSubagentEntry,
+  validateAgentSessionSubagentList,
+  type AgentSessionSubagentActivity,
+  type AgentSessionSubagentChild,
+  type AgentSessionSubagentDiagnostic,
+  type AgentSessionSubagentDiagnosticReason,
+  type AgentSessionSubagentEntry,
+  type AgentSessionSubagentMode,
+} from "./subagents";

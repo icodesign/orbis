@@ -20,6 +20,8 @@ import { expect, test } from "vitest";
 import type {
   DshAgent,
   DshAgentInboxEvent,
+  DshApiInteractionResponse,
+  DshApiMuxRequest,
   DshSession,
   DshSessionEvent,
   DshUserMessage,
@@ -286,6 +288,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
     );
 
     expect(result).toMatchObject({
+      capabilities: { presence: true },
       drivers: [{ displayName: "DeepSeek Harness", id: "dsh" }],
       version: 2,
     });
@@ -615,9 +618,72 @@ test("delivers DSH v2 live entries through the attached host transport", async (
   const sessions = new Map<string, DshSession>();
   const agents = new Map<string, DshAgent>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
+  const interactionResponses: DshApiInteractionResponse[] = [];
+  const interactionQueue: DshApiMuxRequest[] = [];
+  const interactionWaiters: Array<(request: DshApiMuxRequest | undefined) => void> = [];
+  const emitInteraction = (request: DshApiMuxRequest): void => {
+    const waiter = interactionWaiters.shift();
+    if (waiter === undefined) interactionQueue.push(request);
+    else waiter(request);
+  };
+  const interactionMux = async function* (signal: AbortSignal): AsyncIterable<DshApiMuxRequest> {
+    while (!signal.aborted) {
+      const request = await new Promise<DshApiMuxRequest | undefined>((resolve) => {
+        if (signal.aborted) {
+          resolve(undefined);
+          return;
+        }
+        const queued = interactionQueue.shift();
+        if (queued !== undefined) {
+          resolve(queued);
+          return;
+        }
+        const abort = () => {
+          signal.removeEventListener("abort", abort);
+          resolve(undefined);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        interactionWaiters.push((value) => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        });
+      });
+      if (request === undefined) return;
+      yield request;
+    }
+  };
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        apiProxy: {
+          llm: {
+            models: async ({ rpcId }) => ({
+              result: { ok: true as const, value: { failures: [], groups: [] } },
+              rpcId,
+            }),
+          },
+          sessions: {
+            models: async ({ rpcId }) => ({
+              result: {
+                ok: true as const,
+                value: { current: { model: "test-model", provider: "test-provider" } },
+              },
+              rpcId,
+            }),
+            selectModel: async ({ payload, rpcId }) => ({
+              result: {
+                ok: true as const,
+                value: { selected: { model: payload.model, provider: payload.provider } },
+              },
+              rpcId,
+            }),
+          },
+          events: { mux: (_request, signal) => interactionMux(signal) },
+          respond: async (message: DshApiInteractionResponse) => {
+            interactionResponses.push(message);
+            return { accepted: true };
+          },
+        },
         agents: {
           create: async ({ agentOptions, sessionId }) => {
             const id = String(sessionId);
@@ -748,6 +814,53 @@ test("delivers DSH v2 live entries through the attached host transport", async (
       type: "assistant/message",
     });
 
+    emitNative({
+      data: { active: true },
+      seq: 2,
+      time: Date.parse("2026-08-10T00:00:05.000Z"),
+      type: "plan/mode",
+    });
+    emitNative({
+      data: {
+        createdAt: Date.parse("2026-08-10T00:00:06.000Z"),
+        goal: {
+          id: "goal-host",
+          maxGoalRounds: 2,
+          objective: "Verify the DSH host bridge",
+          phase: "active",
+          revision: 1,
+        },
+        kind: "goal/change",
+        operation: "create",
+        roundsStarted: 0,
+        updatedAt: Date.parse("2026-08-10T00:00:06.000Z"),
+        version: 1,
+      },
+      seq: 3,
+      time: Date.parse("2026-08-10T00:00:06.000Z"),
+      type: "goal/change",
+    });
+    emitNative({
+      data: { todos: [{ content: "Inspect snapshot", status: "in_progress" }] },
+      seq: 4,
+      time: Date.parse("2026-08-10T00:00:07.000Z"),
+      type: "todo/write",
+    });
+    emitInteraction({
+      payload: {
+        questions: [
+          {
+            id: "host-question",
+            options: [{ label: "Yes" }, { label: "No" }],
+            question: "Continue the host bridge test?",
+          },
+        ],
+        sessionId: "native-transport",
+        type: "question/requested",
+      },
+      rpcId: "host-question",
+    });
+
     await eventually(() =>
       deliveries.some(
         (delivery) =>
@@ -756,6 +869,60 @@ test("delivers DSH v2 live entries through the attached host transport", async (
           delivery.event.entry.id === "message-1-1",
       ),
     );
+    await eventually(
+      () =>
+        deliveries.some(
+          (delivery) =>
+            delivery.ref?.sessionId === created.ref.sessionId &&
+            delivery.event.type === "session.state.changed" &&
+            delivery.event.patch.mode === "plan",
+        ) &&
+        deliveries.some(
+          (delivery) =>
+            delivery.ref?.sessionId === created.ref.sessionId &&
+            delivery.event.type === "session.state.changed" &&
+            delivery.event.patch.workState?.goal?.id === "goal-host" &&
+            delivery.event.patch.workState?.todos[0]?.content === "Inspect snapshot",
+        ) &&
+        deliveries.some(
+          (delivery) =>
+            delivery.ref?.sessionId === created.ref.sessionId &&
+            delivery.event.type === "session.state.changed" &&
+            delivery.event.patch.pendingQuestions?.[0]?.requestId === "host-question",
+        ),
+    );
+    const snapshot = await client.sync({ mode: "once", ref: created.ref });
+    expect(snapshot).toMatchObject({
+      state: {
+        mode: "plan",
+        pendingQuestions: [{ requestId: "host-question" }],
+        workState: {
+          goal: { id: "goal-host", objective: "Verify the DSH host bridge" },
+          todos: [{ content: "Inspect snapshot", status: "in_progress" }],
+        },
+      },
+    });
+    await expect(
+      client.respondQuestion({
+        idempotencyKey: "host-question-answer",
+        ref: created.ref,
+        requestId: "host-question",
+        response: {
+          answers: [{ optionIds: ["dsh-option-0-0"], questionId: "host-question" }],
+          kind: "answered",
+        },
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(interactionResponses.at(-1)).toMatchObject({
+      result: {
+        ok: true,
+        value: {
+          answer: { answers: [{ id: "host-question", selected: ["Yes"] }] },
+          sessionId: "native-transport",
+        },
+      },
+      rpcId: "host-question",
+    });
     expect(deliveries.some((delivery) => delivery.event.type === "host.session.added")).toBe(true);
   } finally {
     removeDeliveries();

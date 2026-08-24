@@ -55,7 +55,21 @@ export type AgentMessageRole = "assistant" | "system" | "user";
 
 export type AgentContentBlock =
   | { readonly text: string; readonly type: "text" }
-  | { readonly data: string; readonly mimeType: string; readonly type: "image" }
+  | {
+      readonly data: string;
+      readonly mimeType: string;
+      readonly name?: string;
+      readonly type: "image";
+    }
+  | {
+      readonly attachmentId: string;
+      readonly bytes?: number;
+      readonly height?: number;
+      readonly mimeType: string;
+      readonly name?: string;
+      readonly type: "image_reference";
+      readonly width?: number;
+    }
   | { readonly redacted?: boolean; readonly text: string; readonly type: "thinking" }
   | {
       readonly callId: string;
@@ -64,6 +78,27 @@ export type AgentContentBlock =
       readonly type: "tool_call";
     }
   | { readonly name: string; readonly type: "resource"; readonly uri: string };
+
+/** Prompt content accepted by a backend runtime after attachment admission. */
+export type AgentPromptContentBlock =
+  | { readonly text: string; readonly type: "text" }
+  | {
+      readonly data: string;
+      readonly mimeType: string;
+      readonly name?: string;
+      readonly type: "image";
+    };
+
+/** Canonical encoded payload returned by the backend attachment read seam. */
+export interface AgentAttachmentReadResult {
+  readonly attachmentId: string;
+  readonly bytes?: number;
+  readonly data: string;
+  readonly height?: number;
+  readonly mimeType: string;
+  readonly name?: string;
+  readonly width?: number;
+}
 
 interface AgentSessionEntryBase {
   readonly createdAt: AgentTimestamp;
@@ -147,6 +182,37 @@ export interface AgentQueuedInput {
   readonly queuedAt: AgentTimestamp;
 }
 
+export type AgentGoalPhase = "active" | "blocked" | "complete" | "paused";
+
+export interface AgentGoalBlockedReason {
+  readonly code: string;
+  readonly message: string;
+}
+
+/** Whole durable goal snapshot, independent of any one harness implementation. */
+export interface AgentGoal {
+  readonly blockedReason?: AgentGoalBlockedReason;
+  readonly createdAt: AgentTimestamp;
+  readonly id: string;
+  readonly maxGoalRounds: number;
+  readonly objective: string;
+  readonly phase: AgentGoalPhase;
+  readonly revision: number;
+  readonly roundsStarted: number;
+  readonly updatedAt: AgentTimestamp;
+}
+
+export interface AgentTodoItem {
+  readonly content: string;
+  readonly status: "completed" | "in_progress" | "pending";
+}
+
+/** Stable whole snapshot used by goal/todo-capable drivers. */
+export interface AgentWorkState {
+  readonly goal: AgentGoal | null;
+  readonly todos: readonly AgentTodoItem[];
+}
+
 export type AgentPermissionOptionKind =
   | "allow_always"
   | "allow_once"
@@ -175,6 +241,57 @@ export interface AgentPermissionResponseInput {
 }
 
 export interface AgentPermissionResponseResult {
+  readonly accepted: boolean;
+}
+
+/** A display-safe option in a driver-owned Ask User question. */
+export interface AgentQuestionOption {
+  readonly description?: string;
+  /** Opaque protocol identity; clients must not substitute the label here. */
+  readonly optionId: string;
+  readonly label: string;
+}
+
+export interface AgentQuestionPlanReviewIntent {
+  readonly approveOptionId: string;
+  readonly kind: "plan-review";
+}
+
+/** One item in a full-set Ask User request. */
+export interface AgentQuestionItem {
+  readonly detail?: string;
+  readonly header?: string;
+  readonly intent?: AgentQuestionPlanReviewIntent;
+  readonly multiSelect: boolean;
+  readonly options: readonly AgentQuestionOption[];
+  readonly question: string;
+  readonly questionId: string;
+}
+
+/** The complete set of questions owned by one paused driver interaction. */
+export interface AgentQuestionRequest {
+  readonly questions: readonly AgentQuestionItem[];
+  readonly requestedAt: AgentTimestamp;
+  readonly requestId: string;
+}
+
+export interface AgentQuestionAnswerItem {
+  readonly customText?: string;
+  readonly optionIds: readonly string[];
+  readonly questionId: string;
+}
+
+export type AgentQuestionResponse =
+  | { readonly answers: readonly AgentQuestionAnswerItem[]; readonly kind: "answered" }
+  | { readonly kind: "cancelled" };
+
+export interface AgentQuestionResponseInput {
+  readonly idempotencyKey?: string;
+  readonly requestId: string;
+  readonly response: AgentQuestionResponse;
+}
+
+export interface AgentQuestionResponseResult {
   readonly accepted: boolean;
 }
 
@@ -243,11 +360,15 @@ export interface AgentSessionStatePatch {
   readonly model?: AgentModelSelection | null;
   readonly pendingInputs?: readonly AgentQueuedInput[];
   readonly pendingPermissions?: readonly AgentPermissionRequest[];
+  /** Complete current Ask User request set; omitted only when unchanged. */
+  readonly pendingQuestions?: readonly AgentQuestionRequest[];
   readonly runState?: AgentSessionRunState;
   readonly title?: string | null;
   readonly updatedAt?: AgentTimestamp;
   readonly usageTotal?: AgentUsage | null;
   readonly workspaceRef?: string | null;
+  /** Complete harness-neutral goal/todo snapshot; omitted only when unchanged. */
+  readonly workState?: AgentWorkState;
 }
 
 export interface AgentSessionStateChangedEvent extends AgentTransientEventBase {

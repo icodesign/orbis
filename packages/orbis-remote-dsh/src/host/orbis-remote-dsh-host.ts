@@ -79,6 +79,20 @@ export class OrbisRemoteDshHost {
     this.agentHost = new OrbisRemoteAgentV2Host({
       backend: new DshRemoteV2Backend(this.nativeBackend, options.workspaceProvider),
       backendId: `remote:${options.hostId}`,
+      capabilities: {
+        attachments:
+          options.dsh.attachments === undefined
+            ? false
+            : {
+                downloadChunkBytes: 192 * 1024,
+                maxImageBytes: 5 * 1024 * 1024,
+                maxImagesPerMessage: 4,
+                maxMessageImageBytes: 20 * 1024 * 1024,
+                mimeTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+                uploadChunkBytes: 192 * 1024,
+              },
+        presence: true,
+      },
       onError: options.onError,
       store,
       transport: this.transport,
