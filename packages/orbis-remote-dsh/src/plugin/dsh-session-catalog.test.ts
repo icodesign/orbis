@@ -47,4 +47,31 @@ describe("DSH session catalog", () => {
       { createdAt: 10, id: "legacy", updatedAt: 10 },
     ]);
   });
+
+  test("hides only subagent-origin rows while retaining ordinary parent-session forks", async () => {
+    const cachedIds: unknown[] = [];
+    const persistence: DshCatalogPersistence = {
+      list: async () => [
+        { createdAt: 10, id: "child", origin: "subagent", parentSession: "root" },
+        { createdAt: 20, id: "fork", parentSession: "root" },
+      ],
+    };
+    const projectionCache: DshSessionProjectionCache = {
+      cachedSnapshot: (header) => {
+        cachedIds.push(header.id);
+        return { values: { title: "Fork title" } };
+      },
+    };
+
+    await expect(listDshSessionCatalog(persistence, projectionCache)).resolves.toEqual([
+      {
+        createdAt: 20,
+        id: "fork",
+        parentSession: "root",
+        title: "Fork title",
+        updatedAt: 20,
+      },
+    ]);
+    expect(cachedIds).toEqual(["fork"]);
+  });
 });

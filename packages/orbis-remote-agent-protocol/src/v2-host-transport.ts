@@ -15,18 +15,43 @@ import {
 import { ORBIS_REMOTE_AGENT_V2_METHOD_SCOPES } from "./v2-constants";
 import { OrbisRemoteAgentV2Host } from "./v2-host";
 
-type HostConnectionPort = Pick<OrbisRemoteHostConnection, "onClose" | "peers" | "sendEvent">;
+type HostConnectionPort = Pick<OrbisRemoteHostConnection, "onClose" | "peers" | "sendEvent"> &
+  Partial<Pick<OrbisRemoteHostConnection, "onPeer">>;
 
 /** Sends v2 envelopes through the existing authenticated encrypted transport. */
 export class OrbisRemoteAgentV2HostTransport implements RemoteAgentHostDeliveryTransport {
   private readonly connections = new Set<HostConnectionPort>();
+  private readonly peerDisconnectedListeners = new Set<(peer: RemoteAgentHostPeer) => void>();
+
+  onPeerDisconnected(listener: (peer: RemoteAgentHostPeer) => void): () => void {
+    this.peerDisconnectedListeners.add(listener);
+    return () => this.peerDisconnectedListeners.delete(listener);
+  }
 
   attach(connection: HostConnectionPort): () => void {
     this.connections.add(connection);
-    const detachClosed = connection.onClose(() => this.connections.delete(connection));
-    return () => {
-      detachClosed();
+    const knownPeers = new Map<string, RemoteAgentHostPeer>();
+    const rememberPeers = (peers: readonly RemoteHostPeer[]): void => {
+      for (const peer of peers) {
+        const mapped = createRemoteAgentHostPeer(peer);
+        knownPeers.set(mapped.transportId, mapped);
+      }
+    };
+    rememberPeers(connection.peers);
+    const notifyDisconnected = (): void => {
+      const peers = [...knownPeers.values()];
+      knownPeers.clear();
       this.connections.delete(connection);
+      for (const peer of peers) {
+        for (const listener of this.peerDisconnectedListeners) listener(peer);
+      }
+    };
+    const detachPeer = connection.onPeer?.((peer) => rememberPeers([peer]));
+    const detachClosed = connection.onClose(notifyDisconnected);
+    return () => {
+      notifyDisconnected();
+      detachPeer?.();
+      detachClosed();
     };
   }
 

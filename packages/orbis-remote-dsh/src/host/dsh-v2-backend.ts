@@ -8,6 +8,9 @@ import {
   type AgentJsonValue,
   type AgentQueuedInput,
   type AgentContentBlock,
+  type AgentPromptContentBlock,
+  type AgentPromptReferenceCompletionInput,
+  type AgentPromptReferenceCompletionResult,
   type AgentDriverDescriptor,
   type AgentModelMetadata,
   type AgentSessionEntry,
@@ -15,6 +18,7 @@ import {
   type AgentSessionProjection,
   type AgentSessionRef,
   type AgentSessionStatePatch,
+  type AgentSessionSubagentEntry,
   type AgentWorkspaceFolderDescriptor,
   type AgentWorkspaceFolderListing,
   type AgentWorkspaceRegisterResult,
@@ -146,16 +150,18 @@ function v2Snapshot(
     cwd: context.cwd ?? null,
     lastRun: projection.lastRun === undefined ? undefined : runSummary(projection.lastRun),
     leafEntryId: entries.at(-1)?.id ?? null,
-    mode: null,
+    mode: projection.mode ?? null,
     model: projection.metadata.model ?? null,
     pendingInputs: context.pendingInputs ?? [],
     pendingPermissions: projection.pendingPermissions ?? [],
+    pendingQuestions: projection.pendingQuestions,
     ref,
     revision: stateRevision,
     runState: runState(projection),
     title: projection.metadata.title ?? null,
     updatedAt: projection.metadata.updatedAt,
     workspaceRef: projection.workspaceRef ?? null,
+    workState: projection.workState,
   };
   return { ...(overlay === undefined ? {} : { overlay }), entries, state };
 }
@@ -196,16 +202,6 @@ function eventEntry(
       : { settlesEntryId: event.payload.settlesEntryId }),
     type: "entry.appended",
   };
-}
-
-function textFromContent(content: readonly RemoteAgentV2ContentBlock[]): string {
-  const text = content
-    .filter((block): block is Extract<AgentContentBlock, { type: "text" }> => block.type === "text")
-    .map((block) => block.text)
-    .join("");
-  if (!text.trim())
-    throw new AgentBackendError("invalid_argument", "A DSH prompt requires text content");
-  return text;
 }
 
 function transientDelta(
@@ -273,11 +269,13 @@ function statePatch(patch: AgentSessionStatePatch): RemoteAgentV2SessionStatePat
     ...(patch.pendingPermissions === undefined
       ? {}
       : { pendingPermissions: patch.pendingPermissions }),
+    ...(patch.pendingQuestions === undefined ? {} : { pendingQuestions: patch.pendingQuestions }),
     ...(patch.runState === undefined ? {} : { runState: patch.runState }),
     ...(patch.title === undefined ? {} : { title: patch.title }),
     ...(patch.updatedAt === undefined ? {} : { updatedAt: patch.updatedAt }),
     ...(patch.usageTotal === undefined ? {} : { usageTotal: patch.usageTotal }),
     ...(patch.workspaceRef === undefined ? {} : { workspaceRef: patch.workspaceRef }),
+    ...(patch.workState === undefined ? {} : { workState: patch.workState }),
   };
 }
 
@@ -338,7 +336,7 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
   }
 
   async prompt(input: {
-    readonly content: readonly RemoteAgentV2ContentBlock[];
+    readonly content: readonly AgentPromptContentBlock[];
     readonly delivery?: "steer" | "follow_up";
     readonly idempotencyKey?: string;
   }): Promise<{
@@ -350,7 +348,7 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     const receipt = await this.native.prompt({
       ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
-      text: textFromContent(input.content),
+      content: input.content,
     });
     return {
       acceptedAt: receipt.acceptedAt,
@@ -369,6 +367,19 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
       ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
       optionId: input.optionId,
       requestId: input.requestId,
+    });
+  }
+
+  async respondQuestion(input: {
+    readonly requestId: string;
+    readonly response: Parameters<DshLocalSessionRuntime["respondQuestion"]>[0]["response"];
+    readonly idempotencyKey?: string;
+  }): Promise<{ readonly accepted: boolean }> {
+    this.assertOpen();
+    return this.native.respondQuestion({
+      ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+      requestId: input.requestId,
+      response: input.response,
     });
   }
 
@@ -654,7 +665,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     readonly nativeSessionId?: string;
   }): Promise<RemoteAgentV2SessionRecord> {
     if (input.mode !== undefined) {
-      throw new AgentBackendError("unsupported", "DSH sessions do not support session modes");
+      throw new AgentBackendError("unsupported", "DSH session mode is selected after creation");
     }
     const record = await this.native.createSession({
       driverId: input.driverId,
@@ -740,6 +751,16 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     await this.native.updateSession(ref, { patch });
   }
 
+  async readAttachment(ref: AgentSessionRef, attachmentId: string, signal?: AbortSignal) {
+    return this.native.readAttachment(ref, attachmentId, signal);
+  }
+
+  async completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined> {
+    return this.native.completePromptReferences(input);
+  }
+
   async listSessions(input: {
     readonly driverId?: AgentSessionRef["driverId"];
   }): Promise<readonly RemoteAgentV2SessionSummary[]> {
@@ -751,6 +772,14 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
       title: session.title ?? null,
       updatedAt: session.updatedAt,
     }));
+  }
+
+  async listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly AgentSessionSubagentEntry[]> {
+    this.assertDshDriver(ref.driverId);
+    return this.native.listSessionSubagents(ref, signal);
   }
 
   observeCatalog(listener: () => void): () => void {

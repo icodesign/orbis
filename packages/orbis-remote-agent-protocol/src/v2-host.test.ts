@@ -1,4 +1,5 @@
 import {
+  AgentBackendError,
   agentBackendId,
   agentDeliveryCursor,
   agentDriverId,
@@ -6,6 +7,7 @@ import {
   agentEventId,
   agentRunId,
   agentTimestamp,
+  type AgentPromptContentBlock,
   createAgentDriverDescriptor,
   createAgentSessionRef,
   type AgentJsonValue,
@@ -16,11 +18,14 @@ import { expect, test } from "vitest";
 
 import {
   OrbisRemoteAgentV2Host,
+  type RemoteAgentHostDeliveryTransport,
+  type RemoteAgentHostPeer,
   type RemoteAgentV2Backend,
   type RemoteAgentV2HostEvent,
   type RemoteAgentV2HostStore,
   type RemoteAgentV2IdempotencyClaim,
   type RemoteAgentV2Runtime,
+  type RemoteAgentV2QuestionRequest,
   type RemoteAgentV2SessionEvent,
   type RemoteAgentV2SessionSnapshot,
   type RemoteAgentV2SessionSummary,
@@ -53,7 +58,12 @@ const otherPublicRef = createAgentSessionRef({
   nativeSessionId: "session-b",
   sessionId: "session-b",
 });
-const peer = { id: "peer-a", transportId: "transport-a" };
+const peer = {
+  deviceId: "device-a",
+  deviceName: "Test Device",
+  id: "peer-a",
+  transportId: "transport-a",
+};
 const now = agentTimestamp("2026-08-11T00:00:00.000Z");
 
 class MemoryStore implements RemoteAgentV2HostStore {
@@ -118,6 +128,7 @@ function entry(id: string): RemoteAgentV2SessionSnapshot["entries"][number] {
 function snapshot(
   entries: readonly RemoteAgentV2SessionSnapshot["entries"][number][],
   revision = entries.length,
+  statePatch: Partial<RemoteAgentV2SessionSnapshot["state"]> = {},
 ): RemoteAgentV2SessionSnapshot {
   return {
     entries,
@@ -130,12 +141,15 @@ function snapshot(
       model: null,
       pendingInputs: [],
       pendingPermissions: [],
+      pendingQuestions: [],
       ref: nativeRef,
       revision,
       runState: "idle",
       title: null,
       updatedAt: now,
       workspaceRef: "workspace-a",
+      workState: { goal: null, todos: [] },
+      ...statePatch,
     },
   };
 }
@@ -143,9 +157,73 @@ function snapshot(
 function context(transportId = peer.transportId, maxResponseBytes = 1024 * 1024) {
   return {
     maxResponseBytes,
-    peer: { id: peer.id, transportId },
+    peer: { ...peer, transportId },
     signal: new AbortController().signal,
   };
+}
+
+function presenceBackend(
+  listeners: Set<(event: RemoteAgentV2SessionEvent) => void>,
+  options: {
+    readonly onPrompt?: (content: readonly AgentPromptContentBlock[]) => void;
+    readonly readAttachment?: RemoteAgentV2Backend["readAttachment"];
+  } = {},
+): RemoteAgentV2Backend {
+  const runtime: RemoteAgentV2Runtime = {
+    cancel: async () => ({ cancelled: false }),
+    close: async () => undefined,
+    prompt: async (input) => {
+      options.onPrompt?.(input.content);
+      return { acceptedAt: now, queued: false, runId: agentRunId("run-1") };
+    },
+    respondPermission: async () => ({ accepted: true }),
+    respondQuestion: async () => ({ accepted: true }),
+    ref: nativeRef,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  return {
+    browseWorkspaceFolders: async () => ({
+      breadcrumbs: [],
+      current: null,
+      entries: [],
+      truncated: false,
+    }),
+    close: async () => undefined,
+    completePromptReferences: async () => undefined,
+    connectRuntime: async () => runtime,
+    createSession: async () => {
+      throw new Error("unused");
+    },
+    createWorkspaceFolder: async () => {
+      throw new Error("unused");
+    },
+    hostId: agentBackendId("native"),
+    listDrivers: async () => [],
+    listModels: async () => [],
+    listSessions: async () => [],
+    listSessionSubagents: async () => [],
+    listWorkspaces: async () => [],
+    readSession: async () => snapshot([]),
+    readAttachment:
+      options.readAttachment ??
+      (async () => {
+        throw new Error("unused");
+      }),
+    registerWorkspace: async () => {
+      throw new Error("unused");
+    },
+    updateSession: async () => undefined,
+  };
+}
+
+function sessionEventFromTransport(event: TransportEvent): RemoteAgentV2SessionEvent | undefined {
+  const payload = event.payload as { readonly event?: unknown };
+  return typeof payload.event === "object" && payload.event !== null
+    ? (payload.event as RemoteAgentV2SessionEvent)
+    : undefined;
 }
 
 function params(value: unknown): JsonValue {
@@ -171,6 +249,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       expect(input).toMatchObject({ optionId: "allow-once", requestId: "permission-1" });
       return { accepted: true };
     },
+    respondQuestion: async () => ({ accepted: true }),
     ref: nativeRef,
     subscribe: (listener) => {
       runtimeListeners.add(listener);
@@ -187,6 +266,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       truncated: false,
     }),
     close: async () => undefined,
+    completePromptReferences: async () => undefined,
     connectRuntime: async () => runtime,
     createSession: async () => ({
       createdAt: now,
@@ -205,7 +285,15 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     hostId: agentBackendId("native"),
     listDrivers: async () => [
       createAgentDriverDescriptor({
-        capabilities: ["model.select", "permission.respond", "session.list", "workspace.open"],
+        capabilities: [
+          "model.select",
+          "permission.respond",
+          "plan.select",
+          "question.respond",
+          "session.subagents.list",
+          "session.list",
+          "workspace.open",
+        ],
         displayName: "DSH",
         id: "dsh",
       }),
@@ -228,7 +316,43 @@ test("v2 host replays native entries from its cursor index without ACK state", a
         updatedAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
       },
     ],
+    listSessionSubagents: async (ref) => {
+      const childRef = createAgentSessionRef({
+        backendId: ref.backendId,
+        driverId: ref.driverId,
+        nativeSessionId: "session-a-child",
+        sessionId: "session-a-child",
+      });
+      const diagnosticRef = createAgentSessionRef({
+        backendId: ref.backendId,
+        driverId: ref.driverId,
+        nativeSessionId: "session-a-diagnostic",
+        sessionId: "session-a-diagnostic",
+      });
+      return [
+        {
+          activity: "running" as const,
+          depth: 1,
+          hasChildren: true,
+          kind: "child" as const,
+          label: "Worker",
+          mode: "continuable" as const,
+          parentRef: ref,
+          ref: childRef,
+        },
+        {
+          depth: 2,
+          kind: "diagnostic" as const,
+          parentRef: childRef,
+          reason: "unavailable" as const,
+          ref: diagnosticRef,
+        },
+      ];
+    },
     readSession: async () => current,
+    readAttachment: async () => {
+      throw new Error("unused");
+    },
     registerWorkspace: async () => ({
       created: true,
       workspace: { displayName: "Orbis", ref: "workspace-a" },
@@ -290,6 +414,19 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       context(),
     );
     expect(hello).toMatchObject({ hostId: "remote:host-a", version: 2 });
+
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList,
+        params({ ref: publicRef }),
+        context(),
+      ),
+    ).resolves.toEqual({
+      entries: [
+        expect.objectContaining({ depth: 1, kind: "child", parentRef: publicRef }),
+        expect.objectContaining({ depth: 2, kind: "diagnostic" }),
+      ],
+    });
 
     expect(
       await host.handleRequest(
@@ -500,6 +637,61 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     ).resolves.toEqual({ accepted: true });
     expect(permissionResponses).toBe(1);
 
+    const pendingQuestion: RemoteAgentV2QuestionRequest = {
+      questions: [
+        {
+          multiSelect: false,
+          options: [{ label: "Approve", optionId: "approve" }],
+          question: "Continue?",
+          questionId: "question-item-1",
+        },
+      ],
+      requestId: "question-1",
+      requestedAt: now,
+    };
+    current = snapshot([nextEntry, burstEntry], 2, { pendingQuestions: [pendingQuestion] });
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "once", ref: publicRef }),
+      context(),
+    );
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+        params({
+          idempotencyKey: "question-invalid-option",
+          ref: publicRef,
+          requestId: "question-1",
+          response: {
+            answers: [{ optionIds: ["unknown"], questionId: "question-item-1" }],
+            kind: "answered",
+          },
+        }),
+        context(),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+
+    const question = {
+      idempotencyKey: "question-cancel-1",
+      ref: publicRef,
+      requestId: "question-1",
+      response: { kind: "cancelled" },
+    };
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+        params(question),
+        context(),
+      ),
+    ).resolves.toEqual({ accepted: true });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+        params(question),
+        context(),
+      ),
+    ).resolves.toEqual({ accepted: true });
+
     const retryablePrompt = {
       ...prompt,
       expectedRevision: 2,
@@ -666,6 +858,7 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
       truncated: false,
     }),
     close: async () => undefined,
+    completePromptReferences: async () => undefined,
     connectRuntime: async () => {
       throw new Error("unused");
     },
@@ -683,6 +876,7 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
       listCalls += 1;
       return [...catalog.values()];
     },
+    listSessionSubagents: async () => [],
     observeCatalog: (listener) => {
       notifyCatalog = listener;
       return () => {
@@ -690,6 +884,9 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
       };
     },
     readSession: async () => snapshot([]),
+    readAttachment: async () => {
+      throw new Error("unused");
+    },
     registerWorkspace: async () => {
       throw new Error("unused");
     },
@@ -801,4 +998,471 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
     await host.close();
   }
   expect(detachedCatalog).toBe(true);
+});
+
+test("v2 host owns live presence membership and converges disconnects", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const received = new Map<string, RemoteAgentV2SessionEvent[]>();
+  let failedDeviceId: string | undefined;
+  let disconnectPeer: ((peer: RemoteAgentHostPeer) => void) | undefined;
+  let clockTick = 0;
+  const clock = () =>
+    agentTimestamp(`2026-08-11T00:00:${String(++clockTick).padStart(2, "0")}.000Z`);
+  const transport: RemoteAgentHostDeliveryTransport = {
+    onPeerDisconnected: (listener) => {
+      disconnectPeer = listener;
+      return () => {
+        if (disconnectPeer === listener) disconnectPeer = undefined;
+      };
+    },
+    send: async (target, frame) => {
+      const event = sessionEventFromTransport(frame);
+      if (event?.type === "presence.changed" && target.deviceId === failedDeviceId) {
+        throw new Error("peer send failed");
+      }
+      if (event === undefined) return;
+      const events = received.get(target.id) ?? [];
+      events.push(event);
+      received.set(target.id, events);
+    },
+  };
+  const backend = presenceBackend(runtimeListeners);
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    capabilities: { presence: true },
+    clock,
+    store: new MemoryStore(),
+    transport,
+  });
+  const peerA: RemoteAgentHostPeer = {
+    deviceId: "device-a",
+    deviceName: "Phone A",
+    id: "peer-a",
+    transportId: "transport-a",
+  };
+  const peerB: RemoteAgentHostPeer = {
+    deviceId: "device-b",
+    deviceName: "Phone B",
+    id: "peer-b",
+    transportId: "transport-b",
+  };
+  const requestContext = (target: RemoteAgentHostPeer) => ({
+    maxResponseBytes: 1024 * 1024,
+    peer: target,
+    signal: new AbortController().signal,
+  });
+  const hello = (target: RemoteAgentHostPeer) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      {
+        device: {
+          ...(target.deviceName === undefined ? {} : { name: target.deviceName }),
+          platform: "node",
+        },
+        supportedVersions: [2],
+      },
+      requestContext(target),
+    );
+  const sync = (target: RemoteAgentHostPeer, mode: "live" | "once") =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode, ref: publicRef }),
+      requestContext(target),
+    );
+  const latestPresence = (target: RemoteAgentHostPeer) => {
+    const events = received.get(target.id) ?? [];
+    const event = [...events].reverse().find((candidate) => candidate.type === "presence.changed");
+    if (event?.type !== "presence.changed") throw new Error("Missing presence event");
+    return event;
+  };
+
+  try {
+    await hello(peerA);
+    await hello(peerB);
+    await sync(peerA, "live");
+    const first = latestPresence(peerA);
+    expect(first.devices).toEqual([
+      { deviceId: "device-a", name: "Phone A", since: "2026-08-11T00:00:01.000Z", viewing: true },
+    ]);
+
+    await sync(peerA, "live");
+    expect(latestPresence(peerA).devices[0]?.since).toBe(first.devices[0]?.since);
+
+    await sync(peerB, "live");
+    expect(latestPresence(peerA).devices).toHaveLength(2);
+    expect(latestPresence(peerB).devices).toHaveLength(2);
+
+    const peerBEventCountBeforeDisconnect = (received.get(peerB.id) ?? []).length;
+    disconnectPeer?.(peerB);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(latestPresence(peerA).devices).toEqual([
+      { deviceId: "device-a", name: "Phone A", since: first.devices[0]?.since, viewing: true },
+    ]);
+    expect((received.get(peerB.id) ?? []).length).toBe(peerBEventCountBeforeDisconnect);
+    await hello(peerB);
+    await sync(peerB, "live");
+
+    const peerBEventCount = (received.get(peerB.id) ?? []).length;
+    await sync(peerB, "once");
+    expect(latestPresence(peerA).devices).toEqual([
+      { deviceId: "device-a", name: "Phone A", since: first.devices[0]?.since, viewing: true },
+    ]);
+    expect((received.get(peerB.id) ?? []).length).toBe(peerBEventCount);
+
+    const peerAReconnect: RemoteAgentHostPeer = { ...peerA, transportId: "transport-a-new" };
+    await hello(peerAReconnect);
+    await sync(peerAReconnect, "live");
+    expect(latestPresence(peerAReconnect).devices[0]?.since).toBe(first.devices[0]?.since);
+    disconnectPeer?.(peerA);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sync(peerAReconnect, "live");
+    expect(latestPresence(peerAReconnect).devices[0]?.deviceId).toBe("device-a");
+
+    await sync(peerB, "live");
+    failedDeviceId = "device-b";
+    await sync(peerAReconnect, "live");
+    expect(latestPresence(peerAReconnect).devices).toEqual([
+      { deviceId: "device-a", name: "Phone A", since: first.devices[0]?.since, viewing: true },
+    ]);
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host leaves presence disabled by default", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const presenceEvents: RemoteAgentV2SessionEvent[] = [];
+  const host = new OrbisRemoteAgentV2Host({
+    backend: presenceBackend(runtimeListeners),
+    backendId: "remote:host-a",
+    store: new MemoryStore(),
+    transport: {
+      send: async (_target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event?.type === "presence.changed") presenceEvents.push(event);
+      },
+    },
+  });
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+    expect(presenceEvents).toEqual([]);
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host validates staged uploads, consumes successful prompts, and bounds reads", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const prompted: AgentPromptContentBlock[][] = [];
+  let failPrompt = false;
+  let readData = "AQIDBAUG";
+  const peerB: RemoteAgentHostPeer = {
+    deviceId: "device-b",
+    deviceName: "Test Device B",
+    id: "peer-b",
+    transportId: "transport-b",
+  };
+  let disconnectPeer: ((peer: RemoteAgentHostPeer) => void) | undefined;
+  const backend = presenceBackend(runtimeListeners, {
+    onPrompt: (content) => {
+      if (failPrompt) {
+        failPrompt = false;
+        throw new AgentBackendError("unavailable", "test prompt failure");
+      }
+      prompted.push([...content]);
+    },
+    readAttachment: async (native, attachmentId) => {
+      expect(native.sessionId).toBe("session-a");
+      if (attachmentId !== "att-1" && attachmentId !== "att-too-large") {
+        throw new AgentBackendError("not_found", "attachment not found");
+      }
+      const bytes = attachmentId === "att-too-large" ? "AQIDBAUGBwgJCg==" : readData;
+      return {
+        attachmentId,
+        bytes: bytes === readData ? 6 : 10,
+        data: bytes,
+        mimeType: "image/png",
+      };
+    },
+  });
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    capabilities: {
+      attachments: {
+        downloadChunkBytes: 3,
+        maxImageBytes: 9,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 12,
+        mimeTypes: ["image/png"],
+        uploadChunkBytes: 3,
+      },
+    },
+    store: new MemoryStore(),
+    transport: {
+      onPeerDisconnected: (listener) => {
+        disconnectPeer = listener;
+        return () => {
+          if (disconnectPeer === listener) disconnectPeer = undefined;
+        };
+      },
+      send: async () => undefined,
+    },
+  });
+  const requestContext = (target: RemoteAgentHostPeer = peer) => ({
+    maxResponseBytes: 1024 * 1024,
+    peer: target,
+    signal: new AbortController().signal,
+  });
+  const begin = (target: RemoteAgentHostPeer, uploadId: string, totalBytes: number) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadBegin,
+      params({
+        idempotencyKey: `${uploadId}:begin`,
+        mimeType: "image/png",
+        ref: publicRef,
+        totalBytes,
+        uploadId,
+      }),
+      requestContext(target),
+    );
+  const chunk = (target: RemoteAgentHostPeer, uploadId: string, offset: number, data: string) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk,
+      params({
+        data,
+        idempotencyKey: `${uploadId}:chunk:${offset}:${data}`,
+        offset,
+        uploadId,
+      }),
+      requestContext(target),
+    );
+  const abort = (
+    target: RemoteAgentHostPeer,
+    uploadId: string,
+    idempotencyKey = `${uploadId}:abort`,
+  ) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadAbort,
+      params({ idempotencyKey, uploadId }),
+      requestContext(target),
+    );
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      requestContext(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test B", platform: "node" }, supportedVersions: [2] },
+      requestContext(peerB),
+    );
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsPrompt,
+        params({
+          content: [
+            { data: "AA==", mimeType: "image/png", type: "image_upload", uploadId: "raw-image" },
+          ],
+          idempotencyKey: "prompt-raw-image",
+          ref: publicRef,
+        }),
+        requestContext(),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+
+    await expect(begin(peer, "upload-1", 6)).resolves.toEqual({ uploadId: "upload-1" });
+    await expect(begin(peer, "upload-2", 6)).resolves.toEqual({ uploadId: "upload-2" });
+    await expect(begin(peer, "upload-3", 1)).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(chunk(peer, "upload-1", 0, "A===")).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    await expect(chunk(peer, "upload-1", 1, "AQID")).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    await expect(chunk(peer, "upload-1", 0, "AQID")).resolves.toMatchObject({ nextOffset: 3 });
+    await expect(chunk(peer, "upload-1", 3, "BAUG")).resolves.toMatchObject({ nextOffset: 6 });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadFinish,
+        params({ idempotencyKey: "upload-1:finish", uploadId: "upload-1" }),
+        requestContext(),
+      ),
+    ).resolves.toEqual({ uploadId: "upload-1" });
+    await expect(begin(peerB, "upload-2", 3)).resolves.toEqual({ uploadId: "upload-2" });
+    await expect(abort(peer, "upload-2")).resolves.toEqual({
+      aborted: true,
+      uploadId: "upload-2",
+    });
+    await expect(abort(peer, "upload-2")).resolves.toEqual({
+      aborted: true,
+      uploadId: "upload-2",
+    });
+    await expect(chunk(peer, "upload-2", 0, "AQID")).rejects.toMatchObject({
+      serverCode: "not_found",
+    });
+    await expect(chunk(peerB, "upload-2", 0, "AQID")).resolves.toMatchObject({ nextOffset: 3 });
+
+    const uploadPrompt = {
+      content: [{ mimeType: "image/png", type: "image_upload", uploadId: "upload-1" }],
+      idempotencyKey: "prompt-image-failed",
+      ref: publicRef,
+    };
+    failPrompt = true;
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsPrompt,
+        params(uploadPrompt),
+        requestContext(),
+      ),
+    ).rejects.toMatchObject({ serverCode: "unavailable" });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsPrompt,
+        params({ ...uploadPrompt, idempotencyKey: "prompt-image-success" }),
+        requestContext(),
+      ),
+    ).resolves.toMatchObject({ runId: "run-1" });
+    expect(prompted).toEqual([[{ data: "AQIDBAUG", mimeType: "image/png", type: "image" }]]);
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsPrompt,
+        params({ ...uploadPrompt, idempotencyKey: "prompt-image-success" }),
+        requestContext(),
+      ),
+    ).resolves.toMatchObject({ runId: "run-1" });
+    expect(prompted).toHaveLength(1);
+
+    await begin(peerB, "peer-upload", 3);
+    disconnectPeer?.(peerB);
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test B", platform: "node" }, supportedVersions: [2] },
+      requestContext(peerB),
+    );
+    await expect(chunk(peerB, "peer-upload", 0, "AQID")).rejects.toMatchObject({
+      serverCode: "not_found",
+    });
+
+    const firstRead = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
+      params({ attachmentId: "att-1", offset: 0, ref: publicRef }),
+      requestContext(),
+    );
+    expect(firstRead).toMatchObject({
+      attachmentId: "att-1",
+      bytes: 6,
+      data: "AQID",
+      eof: false,
+      nextOffset: 3,
+    });
+    const secondRead = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
+      params({ attachmentId: "att-1", offset: 3, ref: publicRef }),
+      requestContext(),
+    );
+    expect(secondRead).toMatchObject({ data: "BAUG", eof: true, nextOffset: 6 });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
+        params({ attachmentId: "missing", offset: 0, ref: publicRef }),
+        requestContext(),
+      ),
+    ).rejects.toMatchObject({ serverCode: "not_found" });
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
+        params({ attachmentId: "att-too-large", offset: 0, ref: publicRef }),
+        requestContext(),
+      ),
+    ).rejects.toMatchObject({ code: "protocol" });
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host keeps presence convergence finite across cascading send failures", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const received = new Map<string, RemoteAgentV2SessionEvent[]>();
+  let cFailed = false;
+  let bFailed = false;
+  const transport: RemoteAgentHostDeliveryTransport = {
+    send: async (target, frame) => {
+      const event = sessionEventFromTransport(frame);
+      if (event?.type !== "presence.changed") return;
+      if (target.deviceId === "device-c" && !cFailed) {
+        cFailed = true;
+        throw new Error("peer C send failed");
+      }
+      if (target.deviceId === "device-b" && cFailed && event.devices.length === 2 && !bFailed) {
+        bFailed = true;
+        throw new Error("peer B convergence send failed");
+      }
+      const events = received.get(target.id) ?? [];
+      events.push(event);
+      received.set(target.id, events);
+    },
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend: presenceBackend(runtimeListeners),
+    backendId: "remote:host-a",
+    capabilities: { presence: true },
+    clock: () => now,
+    store: new MemoryStore(),
+    transport,
+  });
+  const peers: readonly RemoteAgentHostPeer[] = [
+    { deviceId: "device-a", deviceName: "Phone A", id: "peer-a", transportId: "transport-a" },
+    { deviceId: "device-b", deviceName: "Phone B", id: "peer-b", transportId: "transport-b" },
+    { deviceId: "device-c", deviceName: "Phone C", id: "peer-c", transportId: "transport-c" },
+  ];
+  const requestContext = (target: RemoteAgentHostPeer) => ({
+    maxResponseBytes: 1024 * 1024,
+    peer: target,
+    signal: new AbortController().signal,
+  });
+  const hello = (target: RemoteAgentHostPeer) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      {
+        device: {
+          ...(target.deviceName === undefined ? {} : { name: target.deviceName }),
+          platform: "node",
+        },
+        supportedVersions: [2],
+      },
+      requestContext(target),
+    );
+  const sync = (target: RemoteAgentHostPeer) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      requestContext(target),
+    );
+
+  try {
+    for (const target of peers) await hello(target);
+    for (const target of peers) await sync(target);
+    const eventsForA = received.get("peer-a") ?? [];
+    const latest = [...eventsForA].reverse().find((event) => event.type === "presence.changed");
+    expect(cFailed).toBe(true);
+    expect(bFailed).toBe(true);
+    expect(latest).toMatchObject({
+      devices: [{ deviceId: "device-a", name: "Phone A", since: now, viewing: true }],
+      type: "presence.changed",
+    });
+  } finally {
+    await host.close();
+  }
 });

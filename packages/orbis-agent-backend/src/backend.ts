@@ -1,10 +1,14 @@
 import type { AgentDriverDescriptor } from "./capabilities";
 import { AgentBackendError } from "./errors";
 import type {
+  AgentAttachmentReadResult,
   AgentJsonValue,
   AgentModelSelection,
+  AgentPromptContentBlock,
   AgentPermissionResponseInput,
   AgentPermissionResponseResult,
+  AgentQuestionResponseInput,
+  AgentQuestionResponseResult,
   AgentSessionEventListener,
 } from "./events";
 import type {
@@ -18,6 +22,11 @@ import type {
 } from "./identifiers";
 import { agentBackendId } from "./identifiers";
 import type { AgentSessionProjection } from "./projection";
+import type {
+  AgentPromptReferenceCompletionInput,
+  AgentPromptReferenceCompletionResult,
+} from "./references";
+import type { AgentSessionSubagentEntry } from "./subagents";
 
 export type AgentBackendKind = "local" | "remote";
 
@@ -50,6 +59,9 @@ export type AgentRuntimeStatus =
   | "opening"
   | "ready"
   | "running";
+
+/** Observes lifecycle transitions for one session runtime façade. */
+export type AgentRuntimeStatusListener = (status: AgentRuntimeStatus) => void;
 
 export interface AgentSessionRecord {
   readonly createdAt: AgentTimestamp;
@@ -146,6 +158,7 @@ export interface AgentWorkspaceRegisterResult {
 /** Client-writable session state. Runtime and transcript fields are event-owned. */
 export interface AgentSessionUpdatePatch {
   readonly configOptions?: Readonly<Record<string, AgentJsonValue>>;
+  /** Driver-owned session mode; plan mode uses the canonical "plan" value. */
   readonly mode?: string | null;
   readonly model?: AgentModelSelection | null;
   readonly title?: string | null;
@@ -172,9 +185,9 @@ export type AgentPromptDelivery =
   | "steer";
 
 export interface AgentPromptInput {
+  readonly content: readonly AgentPromptContentBlock[];
   readonly delivery?: AgentPromptDelivery;
   readonly idempotencyKey?: string;
-  readonly text: string;
 }
 
 export interface AgentPromptReceipt {
@@ -196,8 +209,10 @@ export interface AgentSessionRuntime {
   cancel(input?: AgentCancelInput): Promise<AgentCancelResult>;
   close(): Promise<void>;
   getStatus(): AgentRuntimeStatus;
+  observeStatus(listener: AgentRuntimeStatusListener): () => void;
   prompt(input: AgentPromptInput): Promise<AgentPromptReceipt>;
   respondPermission(input: AgentPermissionResponseInput): Promise<AgentPermissionResponseResult>;
+  respondQuestion(input: AgentQuestionResponseInput): Promise<AgentQuestionResponseResult>;
   subscribe(listener: AgentSessionEventListener): () => void;
 }
 
@@ -210,13 +225,25 @@ export interface AgentHarnessDriver {
 
   close(): Promise<void>;
   connectRuntime(ref: AgentSessionRef): Promise<AgentSessionRuntime>;
+  completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined>;
   createSession(input?: Omit<AgentSessionCreateInput, "driverId">): Promise<AgentSessionRecord>;
   listModels(): Promise<readonly AgentModelMetadata[]>;
   listWorkspaces(): Promise<readonly AgentWorkspaceDescriptor[]>;
   listSessions(
     input?: Omit<AgentSessionListInput, "driverId">,
   ): Promise<readonly AgentSessionSummary[]>;
+  listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly AgentSessionSubagentEntry[]>;
   readSession(ref: AgentSessionRef): Promise<AgentSessionProjection>;
+  readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentAttachmentReadResult>;
   updateSession(
     ref: AgentSessionRef,
     input: AgentSessionUpdateInput,
@@ -241,7 +268,19 @@ export interface AgentBackend {
   listModels(input?: AgentModelListInput): Promise<readonly AgentModelMetadata[]>;
   listWorkspaces(input: AgentWorkspaceListInput): Promise<readonly AgentWorkspaceDescriptor[]>;
   listSessions(input?: AgentSessionListInput): Promise<readonly AgentSessionSummary[]>;
+  listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly AgentSessionSubagentEntry[]>;
   readSession(ref: AgentSessionRef): Promise<AgentSessionProjection>;
+  completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined>;
+  readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentAttachmentReadResult>;
   registerWorkspace(input: AgentWorkspaceRegisterInput): Promise<AgentWorkspaceRegisterResult>;
   updateSession(
     ref: AgentSessionRef,

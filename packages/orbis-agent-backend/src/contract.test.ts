@@ -12,8 +12,16 @@ import {
   createAgentDriverDescriptor,
   createAgentSessionProjection,
   createAgentSessionRef,
+  hasAgentDriverCapability,
   validateAgentPermissionRequest,
   validateAgentPermissionResponseInput,
+  validateAgentPromptInput,
+  validateAgentQuestionRequest,
+  validateAgentQuestionResponseForRequest,
+  validateAgentQuestionResponseInput,
+  validateAgentSessionSubagentEntry,
+  validateAgentSessionSubagentList,
+  validateAgentWorkState,
   type AgentEntryAppendedEvent,
   type AgentEntryDeltaEvent,
   type AgentSessionStateChangedEvent,
@@ -84,6 +92,192 @@ function projectionFixture() {
   return { metadata, ref };
 }
 
+function subagentRef(nativeSessionId: string) {
+  return createAgentSessionRef({
+    backendId: "dsh-host",
+    driverId: "dsh",
+    nativeSessionId,
+    sessionId: nativeSessionId,
+  });
+}
+
+test("validates subagent child/diagnostic rows and preserves pre-order", () => {
+  const root = subagentRef("root");
+  const child = subagentRef("child");
+  const diagnostic = subagentRef("broken");
+  const entries = validateAgentSessionSubagentList([
+    {
+      activity: "running",
+      depth: 1,
+      hasChildren: true,
+      kind: "child",
+      mode: "continuable",
+      parentRef: root,
+      ref: child,
+      label: "Build helper",
+    },
+    { depth: 2, kind: "diagnostic", parentRef: child, reason: "corrupt", ref: diagnostic },
+  ], root);
+
+  expect(entries.map((entry) => entry.ref.sessionId)).toEqual(["child", "broken"]);
+  expect(Object.isFrozen(entries)).toBe(true);
+  expect(() =>
+    validateAgentSessionSubagentEntry({
+      activity: "inactive",
+      depth: 1,
+      hasChildren: false,
+      kind: "child",
+      mode: "continuable",
+      parentRef: root,
+      ref: child,
+    }),
+  ).toThrow(/label/i);
+});
+
+test("rejects malformed subagent identities, duplicate rows, and invalid enums", () => {
+  const root = subagentRef("root");
+  const child = subagentRef("child");
+  expect(() =>
+    validateAgentSessionSubagentEntry({
+      activity: "running",
+      depth: 0,
+      hasChildren: false,
+      kind: "child",
+      mode: "one-shot",
+      parentRef: root,
+      ref: child,
+    }),
+  ).toThrow(/depth/i);
+  expect(() =>
+    validateAgentSessionSubagentList([
+      {
+        depth: 1,
+        kind: "diagnostic",
+        parentRef: root,
+        reason: "corrupt",
+        ref: child,
+      },
+      {
+        depth: 1,
+        kind: "diagnostic",
+        parentRef: root,
+        reason: "corrupt",
+        ref: child,
+      },
+    ], root),
+  ).toThrow(/duplicate/i);
+  expect(() =>
+    validateAgentSessionSubagentEntry({
+      depth: 1,
+      kind: "diagnostic",
+      parentRef: root,
+      reason: "unknown",
+      ref: child,
+    }),
+  ).toThrow(/reason/i);
+  const catalogChild = createAgentSessionRef({
+    backendId: root.backendId,
+    driverId: root.driverId,
+    nativeSessionId: "child-native",
+    sessionId: "catalog-child",
+  });
+  expect(() =>
+    validateAgentSessionSubagentList(
+      [
+        {
+          activity: "running",
+          depth: 1,
+          hasChildren: false,
+          kind: "child",
+          mode: "one-shot",
+          parentRef: root,
+          ref: catalogChild,
+        },
+      ],
+      root,
+    ),
+  ).not.toThrow();
+});
+
+test("root-aware subagent validation rejects foreign, orphaned, and misnested rows", () => {
+  const root = createAgentSessionRef({
+    backendId: "remote:host",
+    driverId: "dsh",
+    nativeSessionId: "native-root",
+    sessionId: "catalog-root",
+  });
+  const child = createAgentSessionRef({
+    backendId: root.backendId,
+    driverId: root.driverId,
+    nativeSessionId: "native-child",
+    sessionId: "catalog-child",
+  });
+  const grandchild = createAgentSessionRef({
+    backendId: root.backendId,
+    driverId: root.driverId,
+    nativeSessionId: "native-grandchild",
+    sessionId: "catalog-grandchild",
+  });
+  const foreign = createAgentSessionRef({
+    backendId: "other-host",
+    driverId: root.driverId,
+    nativeSessionId: "native-foreign",
+    sessionId: "catalog-foreign",
+  });
+  const orphan = createAgentSessionRef({
+    backendId: root.backendId,
+    driverId: root.driverId,
+    nativeSessionId: "native-orphan",
+    sessionId: "catalog-orphan",
+  });
+  const childRow = {
+    activity: "inactive" as const,
+    depth: 1,
+    hasChildren: true,
+    kind: "child" as const,
+    mode: "continuable" as const,
+    parentRef: root,
+    ref: child,
+    label: "Child",
+  };
+  expect(
+    validateAgentSessionSubagentList(
+      [childRow, { ...childRow, depth: 2, parentRef: child, ref: grandchild }],
+      root,
+    ),
+  ).toHaveLength(2);
+  expect(() =>
+    validateAgentSessionSubagentList([{ ...childRow, ref: foreign }], root),
+  ).toThrow(/foreign/i);
+  expect(() =>
+    validateAgentSessionSubagentList(
+      [{ ...childRow, depth: 2, parentRef: orphan, ref: grandchild }],
+      root,
+    ),
+  ).toThrow(/pre-order/i);
+  expect(() =>
+    validateAgentSessionSubagentList(
+      [{ ...childRow, depth: 3, parentRef: child, ref: grandchild }],
+      root,
+    ),
+  ).toThrow(/pre-order/i);
+  expect(() =>
+    validateAgentSessionSubagentList(
+      [
+        {
+          depth: 1,
+          kind: "diagnostic" as const,
+          parentRef: root,
+          reason: "unavailable" as const,
+          ref: orphan,
+        },
+        { ...childRow, depth: 2, parentRef: orphan, ref: grandchild },
+      ],
+      root,
+    ),
+  ).toThrow(/pre-order/i);
+});
+
 function durableEntryEvent(
   cursor: number,
   eventId: string,
@@ -145,6 +339,39 @@ async function expectUnavailable(operation: () => Promise<unknown>): Promise<voi
 }
 
 describe("agent backend contract", () => {
+  test("requires canonical base64 for inline image prompt blocks", () => {
+    expect(() =>
+      validateAgentPromptInput({
+        content: [{ data: "AB==", mimeType: "image/png", type: "image" }],
+      }),
+    ).toThrow(/canonical base64/u);
+    expect(
+      validateAgentPromptInput({
+        content: [{ data: "AA==", mimeType: "image/png", type: "image" }],
+      }),
+    ).toMatchObject({ content: [{ data: "AA==", type: "image" }] });
+  });
+
+  test("seeds runtime status observers, emits real transitions, and closes after publishing closed", async () => {
+    const backend = createBackend();
+    const record = await backend.getDriver("pi").createSession();
+    const runtime = await backend.connectRuntime(record.ref);
+    const statuses: string[] = [];
+
+    runtime.observeStatus((status) => statuses.push(status));
+    runtime.observeStatus(() => {
+      throw new Error("observer failure");
+    });
+    expect(statuses).toEqual(["ready"]);
+
+    await runtime.prompt({ content: [{ text: "Run", type: "text" }] });
+    await runtime.finish("completed");
+    await runtime.close();
+
+    expect(statuses).toEqual(["ready", "running", "ready", "closed"]);
+    expect(runtime.getStatus()).toBe("closed");
+  });
+
   test("allows a local backend to host Pi and DSH sessions concurrently without tying a run to a UI subscription", async () => {
     const backend = createBackend();
     const pi = backend.getDriver("pi");
@@ -156,9 +383,11 @@ describe("agent backend contract", () => {
     const piEvents: AgentSessionEvent[] = [];
     const unsubscribe = piRuntime.subscribe((event) => piEvents.push(event));
 
-    await piRuntime.prompt({ text: "Keep running while the UI switches away" });
+    await piRuntime.prompt({
+      content: [{ text: "Keep running while the UI switches away", type: "text" }],
+    });
     unsubscribe();
-    await dshRuntime.prompt({ text: "A separate DSH run" });
+    await dshRuntime.prompt({ content: [{ text: "A separate DSH run", type: "text" }] });
     await piRuntime.commitAssistantText("Pi completed a durable response after the switch");
 
     expect(piRuntime.getStatus()).toBe("running");
@@ -181,8 +410,8 @@ describe("agent backend contract", () => {
     const firstRuntime = await backend.connectRuntime(first.ref);
     const secondRuntime = await backend.connectRuntime(second.ref);
 
-    await firstRuntime.prompt({ text: "First run" });
-    await secondRuntime.prompt({ text: "Second run" });
+    await firstRuntime.prompt({ content: [{ text: "First run", type: "text" }] });
+    await secondRuntime.prompt({ content: [{ text: "Second run", type: "text" }] });
     await firstRuntime.close();
 
     expect(firstRuntime.getStatus()).toBe("closed");
@@ -409,5 +638,224 @@ describe("agent backend contract", () => {
         requestId: "request-1",
       }),
     ).toEqual({ optionId: "allow-once", requestId: "request-1" });
+  });
+
+  test("keeps Ask User separate from permission and validates full-set opaque answers", () => {
+    const request = validateAgentQuestionRequest({
+      questions: [
+        {
+          detail: "# Review\n\nChoose the deployment target.",
+          header: "Target",
+          intent: { approveOptionId: "yes", kind: "plan-review" },
+          multiSelect: false,
+          options: [
+            { label: "Approve", optionId: "yes" },
+            { description: "Do not continue", label: "Reject", optionId: "no" },
+          ],
+          question: "Continue with this plan?",
+          questionId: "deploy",
+        },
+        {
+          multiSelect: true,
+          options: [{ label: "Email", optionId: "email" }],
+          question: "Which notifications should be enabled?",
+          questionId: "notifications",
+        },
+      ],
+      requestId: "question-1",
+      requestedAt: FIXED_TIME,
+    });
+    expect(request.questions.map((question) => question.questionId)).toEqual([
+      "deploy",
+      "notifications",
+    ]);
+    expect(request.questions[0]?.detail).toContain("\n");
+
+    expect(
+      validateAgentQuestionResponseForRequest(
+        {
+          requestId: "question-1",
+          response: {
+            answers: [
+              { customText: "Looks good", optionIds: ["email"], questionId: "notifications" },
+              { optionIds: ["yes"], questionId: "deploy" },
+            ],
+            kind: "answered",
+          },
+        },
+        request,
+      ),
+    ).toMatchObject({
+      response: {
+        answers: [
+          { optionIds: ["yes"], questionId: "deploy" },
+          { optionIds: ["email"], questionId: "notifications" },
+        ],
+      },
+    });
+    expect(
+      validateAgentQuestionResponseInput({
+        requestId: "question-1",
+        response: { kind: "cancelled" },
+      }),
+    ).toMatchObject({ response: { kind: "cancelled" } });
+    expect(() =>
+      validateAgentQuestionRequest({
+        questions: [
+          {
+            intent: { approveOptionId: "missing", kind: "plan-review" },
+            multiSelect: false,
+            options: [{ label: "Approve", optionId: "yes" }],
+            question: "Invalid plan",
+            questionId: "plan",
+          },
+        ],
+        requestId: "question-bad-intent",
+        requestedAt: FIXED_TIME,
+      }),
+    ).toThrow(/reference an option/u);
+    expect(() =>
+      validateAgentQuestionResponseForRequest(
+        {
+          requestId: "question-1",
+          response: {
+            answers: [
+              { optionIds: ["yes"], questionId: "deploy" },
+              { optionIds: [], questionId: "deploy" },
+            ],
+            kind: "answered",
+          },
+        },
+        request,
+      ),
+    ).toThrow(/unique/u);
+    expect(() =>
+      validateAgentQuestionResponseForRequest(
+        {
+          requestId: "question-1",
+          response: {
+            answers: [
+              { customText: "Cannot combine", optionIds: ["yes"], questionId: "deploy" },
+              { optionIds: ["email"], questionId: "notifications" },
+            ],
+            kind: "answered",
+          },
+        },
+        request,
+      ),
+    ).toThrow(/combine/u);
+    expect(() =>
+      validateAgentQuestionRequest({
+        questions: [
+          {
+            intent: { approveOptionId: "yes", kind: "plan-review" },
+            multiSelect: false,
+            options: [{ label: "Approve", optionId: "yes" }],
+            question: "Missing detail",
+            questionId: "plan",
+          },
+        ],
+        requestId: "question-bad-detail",
+        requestedAt: FIXED_TIME,
+      }),
+    ).toThrow(/require detail/u);
+  });
+
+  test("replaces and clears pending questions and work state as whole snapshots", () => {
+    const { ref } = projectionFixture();
+    const request = validateAgentQuestionRequest({
+      questions: [
+        {
+          multiSelect: false,
+          options: [{ label: "Yes", optionId: "yes" }],
+          question: "Continue?",
+          questionId: "continue",
+        },
+      ],
+      requestId: "question-state",
+      requestedAt: FIXED_TIME,
+    });
+    const first = expectApplied({
+      durability: "transient",
+      eventId: agentEventId("state-questions"),
+      occurredAt: FIXED_TIME,
+      payload: {
+        patch: {
+          pendingQuestions: [request],
+          workState: validateAgentWorkState({
+            goal: {
+              createdAt: FIXED_TIME,
+              id: "goal-1",
+              maxGoalRounds: 4,
+              objective: "Ship the feature",
+              phase: "active",
+              revision: 1,
+              roundsStarted: 1,
+              updatedAt: FIXED_TIME,
+            },
+            todos: [{ content: "Review", status: "in_progress" }],
+          }),
+        },
+        revision: 1,
+      },
+      sessionId: ref.sessionId,
+      source: { backendId: ref.backendId, driverId: ref.driverId },
+      type: "session.state.changed",
+    });
+    expect(first.pendingQuestions).toEqual([request]);
+    expect(first.workState.goal?.id).toBe("goal-1");
+    expect(first.workState.todos).toEqual([{ content: "Review", status: "in_progress" }]);
+
+    const cleared = expectApplied(
+      {
+        durability: "transient",
+        eventId: agentEventId("state-clear"),
+        occurredAt: FIXED_TIME,
+        payload: {
+          patch: { pendingQuestions: [], workState: { goal: null, todos: [] } },
+          revision: 2,
+        },
+        sessionId: ref.sessionId,
+        source: { backendId: ref.backendId, driverId: ref.driverId },
+        type: "session.state.changed",
+      },
+      first,
+    );
+    expect(cleared.pendingQuestions).toEqual([]);
+    expect(cleared.workState).toEqual({ goal: null, todos: [] });
+    expect(() =>
+      validateAgentWorkState({
+        goal: {
+          createdAt: FIXED_TIME,
+          id: "goal-0",
+          maxGoalRounds: 0,
+          objective: "Invalid",
+          phase: "active",
+          revision: 0,
+          roundsStarted: 0,
+          updatedAt: FIXED_TIME,
+        },
+        todos: [],
+      }),
+    ).toThrow(/invalid/u);
+    expect(() =>
+      validateAgentWorkState({
+        goal: null,
+        todos: [
+          { content: "Same", status: "pending" },
+          { content: "Same", status: "completed" },
+        ],
+      }),
+    ).toThrow(/unique/u);
+  });
+
+  test("advertises independent plan and question capabilities", () => {
+    const driver = createAgentDriverDescriptor({
+      capabilities: ["plan.select", "question.respond"],
+      displayName: "Questions",
+      id: "questions",
+    });
+    expect(hasAgentDriverCapability(driver, "plan.select")).toBe(true);
+    expect(hasAgentDriverCapability(driver, "question.respond")).toBe(true);
   });
 });

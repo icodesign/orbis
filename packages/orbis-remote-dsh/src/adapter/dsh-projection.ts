@@ -5,12 +5,14 @@ import {
   agentRunId,
   agentTimestamp,
   createAgentSessionProjection,
+  validateAgentWorkState,
   type AgentContentBlock,
   type AgentContextEntry,
   type AgentContextOrigin,
   type AgentJsonValue,
   type AgentMessageEntry,
   type AgentModelSelection,
+  type AgentWorkState,
   type AgentPublicError,
   type AgentRunOutcome,
   type AgentRunSummary,
@@ -51,6 +53,35 @@ function requiredString(value: JsonRecord, key: string, label: string): string {
 function optionalString(value: JsonRecord, key: string): string | undefined {
   const candidate = value[key];
   return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined;
+}
+
+function imageReference(value: JsonRecord): AgentContentBlock {
+  const attachment = record(value.attachment, "image attachment");
+  const attachmentId = requiredString(attachment, "attachmentId", "image attachment id");
+  const mediaType = requiredString(attachment, "mediaType", "image attachment media type");
+  const bytes = attachment.bytes;
+  const width = attachment.width;
+  const height = attachment.height;
+  if (
+    !Number.isSafeInteger(bytes) ||
+    (bytes as number) < 1 ||
+    !Number.isSafeInteger(width) ||
+    (width as number) < 1 ||
+    !Number.isSafeInteger(height) ||
+    (height as number) < 1
+  ) {
+    throw new AgentBackendError("protocol", "DSH image attachment metadata is invalid");
+  }
+  const name = optionalString(attachment, "name");
+  return {
+    attachmentId,
+    bytes: bytes as number,
+    height: height as number,
+    mimeType: mediaType,
+    ...(name === undefined ? {} : { name }),
+    type: "image_reference",
+    width: width as number,
+  };
 }
 
 export function dshTimestamp(value: number, label = "event timestamp"): AgentTimestamp {
@@ -138,6 +169,9 @@ function contentBlocks(value: unknown, toolCalls: Map<string, DshToolCall>): Age
       case "reasoning":
         blocks.push({ text: requiredString(block, "text", "reasoning block"), type: "thinking" });
         break;
+      case "image":
+        blocks.push(imageReference(block));
+        break;
       case "tool-call": {
         const callId = requiredString(block, "id", "tool call id");
         const name = requiredString(block, "name", "tool call name");
@@ -189,6 +223,8 @@ function toolResultContentBlocks(value: unknown): readonly AgentContentBlock[] {
       blocks.push({ text: block.text, type: "text" });
     } else if (block.type === "reasoning" && typeof block.text === "string") {
       blocks.push({ text: block.text, type: "thinking" });
+    } else if (block.type === "image") {
+      blocks.push(imageReference(block));
     } else if (
       block.type === "resource" &&
       typeof block.name === "string" &&
@@ -305,6 +341,12 @@ function projectAssistantMessage(
   const provider = source === undefined ? undefined : optionalString(source, "provider");
   const modelId = source === undefined ? undefined : optionalString(source, "model");
   const usage = usageFromDsh(data.usage);
+  // DSH 0.1.1 marks an assistant message that was interrupted before a
+  // terminal turn event with its native interrupted flag. Keep that
+  // vocabulary inside the adapter and expose only the canonical protocol
+  // stop reason.
+  const stopReason: AgentMessageEntry["stopReason"] =
+    data.interrupted === true ? "aborted" : undefined;
   // DSH permits an empty assistant message to carry usage at a max-token
   // boundary. It is not a transcript entry.
   if (content.length === 0) return undefined;
@@ -317,6 +359,7 @@ function projectAssistantMessage(
     ...(modelId === undefined || provider === undefined ? {} : { model: { modelId, provider } }),
     parentId: null,
     role: "assistant",
+    ...(stopReason === undefined ? {} : { stopReason }),
     ...(usage === undefined ? {} : { usage }),
   };
 }
@@ -462,6 +505,120 @@ function metadataForInspection(inspection: DshSessionInspection): AgentSessionMe
   };
 }
 
+export interface DshNativeProjectionState {
+  readonly mode: "plan" | null;
+  readonly workState: AgentWorkState;
+}
+
+function protocolStateError(message: string, cause?: unknown): AgentBackendError {
+  if (cause instanceof AgentBackendError && cause.code === "protocol") return cause;
+  return new AgentBackendError("protocol", message);
+}
+
+function goalFromDshChange(data: JsonRecord): AgentWorkState["goal"] {
+  if (data.kind !== "goal/change" || data.version !== 1) {
+    throw new AgentBackendError("protocol", "DSH goal change is invalid");
+  }
+  const operation = data.operation;
+  if (operation === "clear") {
+    const cleared = record(data.cleared, "goal clear tombstone");
+    if (
+      typeof cleared.id !== "string" ||
+      !cleared.id.trim() ||
+      !Number.isSafeInteger(cleared.revision) ||
+      (cleared.revision as number) < 1 ||
+      !Number.isSafeInteger(data.clearedAt) ||
+      (data.clearedAt as number) < 0
+    ) {
+      throw new AgentBackendError("protocol", "DSH goal clear tombstone is invalid");
+    }
+    return null;
+  }
+  if (
+    operation !== "create" &&
+    operation !== "edit" &&
+    operation !== "pause" &&
+    operation !== "resume" &&
+    operation !== "complete" &&
+    operation !== "block"
+  ) {
+    throw new AgentBackendError("protocol", "DSH goal change operation is invalid");
+  }
+  const nativeGoal = record(data.goal, "goal change goal");
+  if (
+    !Number.isSafeInteger(data.roundsStarted) ||
+    (data.roundsStarted as number) < 0 ||
+    !Number.isSafeInteger(data.createdAt) ||
+    (data.createdAt as number) < 0 ||
+    !Number.isSafeInteger(data.updatedAt) ||
+    (data.updatedAt as number) < 0
+  ) {
+    throw new AgentBackendError("protocol", "DSH goal change counters are invalid");
+  }
+  const blocked = nativeGoal.blockedReason;
+  const goal = {
+    ...(blocked === undefined ? {} : { blockedReason: blocked }),
+    createdAt: dshTimestamp(data.createdAt as number, "goal created timestamp"),
+    id: nativeGoal.id,
+    maxGoalRounds: nativeGoal.maxGoalRounds,
+    objective: nativeGoal.objective,
+    phase: nativeGoal.phase,
+    revision: nativeGoal.revision,
+    roundsStarted: data.roundsStarted,
+    updatedAt: dshTimestamp(data.updatedAt as number, "goal updated timestamp"),
+  };
+  try {
+    return validateAgentWorkState({ goal, todos: [] }).goal;
+  } catch (error) {
+    throw protocolStateError("DSH goal change snapshot is invalid", error);
+  }
+}
+
+export function reduceDshProjectionState(
+  state: DshNativeProjectionState,
+  event: DshSessionEvent,
+): DshNativeProjectionState {
+  try {
+    if (event.type === "plan/mode") {
+      const data = record(event.data, "plan mode");
+      if (typeof data.active !== "boolean") {
+        throw new AgentBackendError("protocol", "DSH plan mode state is invalid");
+      }
+      return { ...state, mode: data.active ? "plan" : null };
+    }
+    if (event.type === "goal/change") {
+      return {
+        ...state,
+        workState: {
+          goal: goalFromDshChange(record(event.data, "goal change")),
+          todos: state.workState.todos,
+        },
+      };
+    }
+    if (event.type === "todo/write") {
+      const data = record(event.data, "todo write");
+      const workState = validateAgentWorkState({ goal: state.workState.goal, todos: data.todos });
+      return { ...state, workState };
+    }
+    if (event.type === "turn/start") {
+      return { ...state, workState: { ...state.workState, todos: [] } };
+    }
+    return state;
+  } catch (error) {
+    throw protocolStateError(`DSH ${event.type} state is invalid`, error);
+  }
+}
+
+function foldDshProjectionState(events: readonly DshSessionEvent[]): DshNativeProjectionState {
+  let state: DshNativeProjectionState = { mode: null, workState: { goal: null, todos: [] } };
+  for (const event of events) state = reduceDshProjectionState(state, event);
+  return state;
+}
+
+export function dshProjectionState(events: readonly DshSessionEvent[]): DshNativeProjectionState {
+  return foldDshProjectionState(events);
+}
+
 function turnNumber(event: DshSessionEvent, label: string): number {
   const turn = record(event.data, label).turn;
   if (!Number.isSafeInteger(turn) || (turn as number) < 1) {
@@ -579,6 +736,7 @@ export function readDshSessionProjection(
   const projector = new DshSessionEntryProjector();
   const snapshot = createAgentSessionProjection(ref, metadataForInspection(inspection));
   const run = runStateForInspection(inspection.events);
+  const state = foldDshProjectionState(inspection.events);
   return {
     ...snapshot,
     ...(run.activeRun === undefined ? {} : { activeRun: run.activeRun }),
@@ -587,7 +745,9 @@ export function readDshSessionProjection(
       return entry === undefined ? [] : [entry];
     }),
     ...(run.lastRun === undefined ? {} : { lastRun: run.lastRun }),
+    mode: state.mode,
     revision: inspection.events.length,
     state: run.state,
+    workState: state.workState,
   };
 }

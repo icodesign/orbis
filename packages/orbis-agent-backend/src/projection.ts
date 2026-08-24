@@ -1,6 +1,7 @@
 import { AgentBackendError } from "./errors";
 import type {
   AgentPermissionRequest,
+  AgentQuestionRequest,
   AgentQueuedInput,
   AgentDurableSessionEvent,
   AgentPublicError,
@@ -10,6 +11,7 @@ import type {
   AgentSessionConfigOption,
   AgentSessionStateChangedEvent,
   AgentUsage,
+  AgentWorkState,
 } from "./events";
 import {
   agentDeliveryCursor,
@@ -59,11 +61,13 @@ export interface AgentSessionProjection {
   readonly metadata: AgentSessionMetadata;
   readonly pendingInputs?: readonly AgentQueuedInput[];
   readonly pendingPermissions?: readonly AgentPermissionRequest[];
+  readonly pendingQuestions: readonly AgentQuestionRequest[];
   readonly ref: AgentSessionRef;
   readonly revision: number;
   readonly state: AgentProjectionState;
   readonly usageTotal?: AgentUsage;
   readonly workspaceRef?: string | null;
+  readonly workState: AgentWorkState;
 }
 
 export type AgentProjectionApplyResult =
@@ -96,9 +100,11 @@ export function createAgentSessionProjection(
     cursor: agentDeliveryCursor(0),
     entries: [],
     metadata,
+    pendingQuestions: [],
     ref,
     revision: 0,
     state: "idle",
+    workState: { goal: null, todos: [] },
   };
 }
 
@@ -219,12 +225,14 @@ function applyStateChanged(
       ...(patch.pendingPermissions === undefined
         ? {}
         : { pendingPermissions: patch.pendingPermissions }),
+      ...(patch.pendingQuestions === undefined ? {} : { pendingQuestions: patch.pendingQuestions }),
       revision,
       ...(runState === undefined ? {} : { state: runState }),
       ...(patch.usageTotal === undefined
         ? {}
         : { usageTotal: patch.usageTotal === null ? undefined : patch.usageTotal }),
       ...(patch.workspaceRef === undefined ? {} : { workspaceRef: patch.workspaceRef }),
+      ...(patch.workState === undefined ? {} : { workState: patch.workState }),
     },
   };
 }

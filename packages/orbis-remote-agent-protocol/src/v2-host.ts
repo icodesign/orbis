@@ -10,11 +10,21 @@ import {
   createAgentSessionRef,
   hasAgentDriverCapability,
   isSameAgentSessionRef,
+  validateAgentQuestionResponseForRequest,
+  validateAgentQuestionResponseInput,
+  validateAgentPromptInput,
+  validateAgentPromptReferenceCompletionInput,
+  validateAgentPromptReferenceCompletionResult,
+  validateAgentSessionSubagentList,
   type AgentBackendId,
+  type AgentPromptContentBlock,
   type AgentDeliveryCursor,
   type AgentEntryId,
   type AgentJsonValue,
   type AgentSessionRef,
+  type AgentTimestamp,
+  type AgentAttachmentReadResult,
+  type AgentPromptReferenceCompletionInput,
 } from "@orbisapp/orbis-agent-backend";
 import {
   jsonValueSchema,
@@ -36,6 +46,7 @@ import {
 import {
   v2CancelInputSchema,
   v2ContentBlockSchema,
+  v2PromptContentBlockSchema,
   v2CreateInputSchema,
   v2DeviceSchema,
   v2EntriesInputSchema,
@@ -49,9 +60,18 @@ import {
   v2WorkspacesRegisterInputSchema,
   v2PromptInputSchema,
   v2PermissionResponseInputSchema,
+  v2QuestionResponseInputSchema,
   v2RefSchema,
   v2SyncInputSchema,
   v2UpdateInputSchema,
+  v2AttachmentUploadBeginInputSchema,
+  v2AttachmentUploadChunkInputSchema,
+  v2AttachmentUploadFinishInputSchema,
+  v2AttachmentUploadAbortInputSchema,
+  v2AttachmentReadInputSchema,
+  v2PromptReferenceCompletionInputSchema,
+  v2SubagentListInputSchema,
+  v2SubagentListResponseSchema,
 } from "./v2-schemas";
 import type {
   RemoteAgentV2Backend,
@@ -66,7 +86,9 @@ import type {
   RemoteAgentV2Limits,
   RemoteAgentV2ModelSelection,
   RemoteAgentV2PromptInput,
+  RemoteAgentV2PromptContentBlock,
   RemoteAgentV2PermissionResponseInput,
+  RemoteAgentV2QuestionResponseInput,
   RemoteAgentV2SessionEvent,
   RemoteAgentV2SessionRecord,
   RemoteAgentV2SessionSnapshot,
@@ -129,6 +151,8 @@ export interface RemoteAgentV2HostOptions {
    * row has distinct states.
    */
   readonly catalogCoalesceMs?: number;
+  /** Clock used for in-memory presence membership timestamps. */
+  readonly clock?: () => AgentTimestamp;
   readonly limits?: Partial<RemoteAgentV2Limits>;
   readonly onError?: (error: AgentBackendError) => void;
   readonly scheduler?: RemoteAgentV2HostScheduler;
@@ -136,10 +160,15 @@ export interface RemoteAgentV2HostOptions {
   readonly transport: RemoteAgentHostDeliveryTransport;
 }
 
+interface RemoteAgentV2Subscriber {
+  readonly peer: RemoteAgentHostPeer;
+  readonly since: AgentTimestamp;
+}
+
 interface Owner {
   readonly nativeRef: AgentSessionRef;
   readonly ref: AgentSessionRef;
-  readonly subscribers: Map<string, RemoteAgentHostPeer>;
+  readonly subscribers: Map<string, RemoteAgentV2Subscriber>;
   initializing: Promise<void>;
   index?: RemoteAgentV2StoredSessionIndex;
   runtime?: RemoteAgentV2Runtime;
@@ -147,6 +176,27 @@ interface Owner {
   tail: Promise<void>;
   unsubscribe?: () => void;
   transientSeq: number;
+  presenceSeq: number;
+}
+
+interface AttachmentUpload {
+  readonly peerId: string;
+  readonly transportId: string;
+  readonly ref: AgentSessionRef;
+  readonly uploadId: string;
+  readonly totalBytes: number;
+  readonly mimeType: string;
+  readonly name?: string;
+  readonly chunks: Uint8Array[];
+  nextOffset: number;
+  complete: boolean;
+}
+
+interface AttachmentReadCache {
+  readonly peerId: string;
+  readonly transportId: string;
+  readonly ref: AgentSessionRef;
+  readonly value: AgentAttachmentReadResult;
 }
 
 function invalid(message: string): never {
@@ -179,6 +229,47 @@ function json(value: unknown): JsonValue {
 
 function jsonByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+function base64Bytes(value: string, label: string): Uint8Array {
+  try {
+    const binary = atob(value);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    if (btoa(binary) !== value) protocol(`${label} is not canonical base64`);
+    return bytes;
+  } catch {
+    protocol(`${label} is not canonical base64`);
+  }
+}
+
+function uploadBase64Bytes(value: string): Uint8Array {
+  try {
+    const binary = atob(value);
+    if (btoa(binary) !== value) throw new Error("non-canonical");
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    throw new AgentBackendError("invalid_argument", "Attachment chunk is not canonical base64");
+  }
+}
+
+function encodedBytes(value: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < value.length; offset += chunkSize) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }
 
 function responseTooLarge(code: "entry_too_large" | "response_too_large", message: string): never {
@@ -318,6 +409,10 @@ function parseContent(value: unknown): RemoteAgentV2ContentBlock {
   return parseSchema(v2ContentBlockSchema, value, "Content block");
 }
 
+function parsePromptContent(value: unknown): RemoteAgentV2PromptContentBlock {
+  return parseSchema(v2PromptContentBlockSchema, value, "Prompt content block");
+}
+
 function parseDevice(value: unknown): RemoteAgentV2DeviceDescriptor {
   return parseSchema(v2DeviceSchema, value, "Device descriptor");
 }
@@ -353,6 +448,11 @@ function parseListInput(value: JsonValue): {
   };
 }
 
+function parseSubagentListInput(value: JsonValue): { readonly ref: AgentSessionRef } {
+  const input = parseSchema(v2SubagentListInputSchema, value, "Subagent list input");
+  return { ref: parseRef(input.ref) };
+}
+
 function parseSyncInput(value: JsonValue): {
   readonly afterCursor?: number;
   readonly afterEntryId?: string | null;
@@ -373,12 +473,29 @@ function parseSyncInput(value: JsonValue): {
 function parsePromptInput(value: JsonValue): RemoteAgentV2PromptInput {
   const input = parseSchema(v2PromptInputSchema, value, "Prompt input");
   return {
-    content: input.content.map((item) => parseContent(item)),
+    content: input.content.map((item) => parsePromptContent(item)),
     ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
     ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }),
     idempotencyKey: input.idempotencyKey,
     ref: parseRef(input.ref),
   };
+}
+
+function parsePromptReferenceCompletionInput(
+  value: JsonValue,
+): AgentPromptReferenceCompletionInput {
+  const input = parseSchema(
+    v2PromptReferenceCompletionInputSchema,
+    value,
+    "Prompt reference completion input",
+  );
+  return validateAgentPromptReferenceCompletionInput({
+    cursor: input.cursor,
+    limit: input.limit,
+    ref: parseRef(input.ref),
+    source: input.source,
+    text: input.text,
+  });
 }
 
 function parseCancelInput(value: JsonValue): RemoteAgentV2CancelInput {
@@ -420,6 +537,21 @@ function parsePermissionResponseInput(value: JsonValue): RemoteAgentV2Permission
     ref: parseRef(input.ref),
     requestId: input.requestId,
   };
+}
+
+function parseQuestionResponseInput(value: JsonValue): RemoteAgentV2QuestionResponseInput {
+  const input = parseSchema(v2QuestionResponseInputSchema, value, "Question response input");
+  try {
+    const validated = validateAgentQuestionResponseInput(input);
+    return {
+      idempotencyKey: validated.idempotencyKey ?? input.idempotencyKey,
+      ref: parseRef(input.ref),
+      requestId: validated.requestId,
+      response: validated.response,
+    };
+  } catch {
+    invalid("Question response input is invalid");
+  }
 }
 
 function publicRef(backendId: AgentBackendId, nativeRef: AgentSessionRef): AgentSessionRef {
@@ -698,11 +830,15 @@ const defaultScheduler: RemoteAgentV2HostScheduler = {
   schedule: (callback, delayMs) => setTimeout(callback, delayMs),
 };
 
+const defaultPresenceClock = (): AgentTimestamp => agentTimestamp(new Date().toISOString());
+
 /** Host-side v2 owner: native transcript plus a small cursor/index store. */
 export class OrbisRemoteAgentV2Host {
   private readonly backend: RemoteAgentV2Backend;
   private readonly backendId: AgentBackendId;
   private readonly owners = new Map<string, Owner>();
+  private readonly uploadsByPeer = new Map<string, Map<string, AttachmentUpload>>();
+  private readonly attachmentReads = new Map<string, AttachmentReadCache>();
   private readonly helloPeers = new Map<string, RemoteAgentHostPeer>();
   private readonly store: RemoteAgentV2HostStore;
   private readonly transport: RemoteAgentHostDeliveryTransport;
@@ -710,8 +846,10 @@ export class OrbisRemoteAgentV2Host {
   private readonly limits: RemoteAgentV2Limits;
   private readonly onError: ((error: AgentBackendError) => void) | undefined;
   private readonly scheduler: RemoteAgentV2HostScheduler;
+  private readonly clock: () => AgentTimestamp;
   private readonly catalogCoalesceMs: number;
   private readonly detachCatalog: (() => void) | undefined;
+  private readonly detachPeerDisconnected: (() => void) | undefined;
   /** Last catalog the host published, keyed by public session id. */
   private catalogBaseline: Map<string, RemoteAgentV2SessionSummary> | undefined;
   private catalogHandle: unknown;
@@ -745,8 +883,12 @@ export class OrbisRemoteAgentV2Host {
       ...options.limits,
     };
     this.scheduler = options.scheduler ?? defaultScheduler;
+    this.clock = options.clock ?? defaultPresenceClock;
     this.catalogCoalesceMs = options.catalogCoalesceMs ?? DEFAULT_CATALOG_COALESCE_MS;
     this.detachCatalog = this.backend.observeCatalog?.(() => this.scheduleCatalogSweep());
+    this.detachPeerDisconnected = this.transport.onPeerDisconnected?.((peer) => {
+      this.handlePeerDisconnected(peer);
+    });
   }
 
   async handleRequest(
@@ -806,8 +948,14 @@ export class OrbisRemoteAgentV2Host {
           return await this.registerWorkspace(params, context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsList:
           return toJsonResult(await this.listSessions(parseListInput(params)));
+        case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList:
+          return await this.listSessionSubagents(parseSubagentListInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsCreate:
           return await this.createSession(params, context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles:
+          return await this.completePromptReferences(params, context, "files");
+        case ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesSessions:
+          return await this.completePromptReferences(params, context, "sessions");
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync:
           return await this.sync(parseSyncInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsEntries:
@@ -818,6 +966,18 @@ export class OrbisRemoteAgentV2Host {
           return await this.cancel(parseCancelInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission:
           return await this.respondPermission(parsePermissionResponseInput(params), context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion:
+          return await this.respondQuestion(parseQuestionResponseInput(params), context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadBegin:
+          return await this.attachmentUploadBegin(params, context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk:
+          return await this.attachmentUploadChunk(params, context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadFinish:
+          return await this.attachmentUploadFinish(params, context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadAbort:
+          return await this.attachmentUploadAbort(params, context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead:
+          return await this.attachmentRead(params, context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsUpdate:
           return await this.update(parseUpdateInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsFork:
@@ -840,6 +1000,7 @@ export class OrbisRemoteAgentV2Host {
     if (this.closed) return;
     this.closed = true;
     this.detachCatalog?.();
+    this.detachPeerDisconnected?.();
     if (this.catalogHandle !== undefined) {
       this.scheduler.cancel(this.catalogHandle);
       this.catalogHandle = undefined;
@@ -847,6 +1008,8 @@ export class OrbisRemoteAgentV2Host {
     const owners = [...this.owners.values()];
     this.owners.clear();
     this.helloPeers.clear();
+    this.uploadsByPeer.clear();
+    this.attachmentReads.clear();
     await Promise.all(
       owners.map(async (owner) => {
         owner.unsubscribe?.();
@@ -900,6 +1063,40 @@ export class OrbisRemoteAgentV2Host {
       ...(offset + page.length < publicSessions.length && page.at(-1) !== undefined
         ? { nextCursor: encodeSessionCursor(page.at(-1) as RemoteAgentV2SessionSummary) }
         : {}),
+    });
+  }
+
+  private async listSessionSubagents(
+    input: { readonly ref: AgentSessionRef },
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      await this.assertDriverCapability(owner.nativeRef.driverId, "session.subagents.list");
+      const entries = validateAgentSessionSubagentList(
+        await this.backend.listSessionSubagents(owner.nativeRef, context.signal),
+        owner.nativeRef,
+      );
+      this.assertRequestActive(context);
+      const publicEntries = entries.map((entry) => ({
+        ...entry,
+        parentRef: publicRef(this.backendId, entry.parentRef),
+        ref: publicRef(this.backendId, entry.ref),
+      }));
+      const validatedPublicEntries = validateAgentSessionSubagentList(publicEntries, owner.ref);
+      const result = parseSchema(
+        v2SubagentListResponseSchema,
+        { entries: validatedPublicEntries },
+        "Subagent list result",
+      );
+      if (jsonByteLength(result) > context.maxResponseBytes) {
+        responseTooLarge(
+          "response_too_large",
+          "The subagent list cannot fit in one encrypted transport frame",
+        );
+      }
+      return toJsonResult(result);
     });
   }
 
@@ -1030,9 +1227,19 @@ export class OrbisRemoteAgentV2Host {
     const owner = await this.ownerFor(input.ref);
     return this.enqueue(owner, async () => {
       this.assertRequestActive(context);
-      if (input.mode === "live") owner.subscribers.set(context.peer.id, context.peer);
-      else owner.subscribers.delete(context.peer.id);
+      if (input.mode === "live") {
+        const existing = owner.subscribers.get(context.peer.id);
+        owner.subscribers.set(context.peer.id, {
+          peer: context.peer,
+          since: existing?.since ?? this.clock(),
+        });
+      } else {
+        this.removePeer(owner, context.peer);
+      }
       await this.refreshOwner(owner);
+      if (this.capabilities.presence) {
+        await this.broadcastPresence(owner);
+      }
       const snapshot = this.requiredSnapshot(owner);
       const hostRevision = await this.store.readHostRevision();
       const limit = Math.min(input.limit ?? this.limits.maxReplayBatch, this.limits.maxReplayBatch);
@@ -1103,6 +1310,39 @@ export class OrbisRemoteAgentV2Host {
     });
   }
 
+  private async completePromptReferences(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+    expectedSource: "files" | "sessions",
+  ): Promise<JsonValue> {
+    const input = parsePromptReferenceCompletionInput(params);
+    if (input.source !== expectedSource) {
+      invalid("Prompt reference completion source does not match the method");
+    }
+    await this.assertDriverCapability(
+      input.ref.driverId,
+      expectedSource === "files" ? "prompt.references.files" : "prompt.references.sessions",
+    );
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      const result = await this.backend.completePromptReferences({
+        ...input,
+        ref: owner.nativeRef,
+        signal: context.signal,
+      });
+      const validated = validateAgentPromptReferenceCompletionResult(result, input);
+      const wire = validated === undefined ? null : validated;
+      if (jsonByteLength(wire) > context.maxResponseBytes) {
+        responseTooLarge(
+          "response_too_large",
+          "Prompt reference completion exceeds the response budget",
+        );
+      }
+      return json(wire);
+    });
+  }
+
   private async prompt(
     input: RemoteAgentV2PromptInput,
     context: RemoteAgentHostRequestContext,
@@ -1127,15 +1367,372 @@ export class OrbisRemoteAgentV2Host {
         });
       this.assertExpectedRevision(owner, input.expectedRevision);
       const runtime = this.requiredRuntime(owner);
-      const receipt = await runtime.prompt({
-        content: input.content,
+      const resolvedContent = this.resolvePromptContent(owner, context.peer, input.content);
+      const canonicalInput = validateAgentPromptInput({
+        content: resolvedContent,
         ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
-        idempotencyKey: input.idempotencyKey,
+        ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
+      });
+      const receipt = await runtime.prompt({
+        content: canonicalInput.content,
+        ...(canonicalInput.delivery === undefined ? {} : { delivery: canonicalInput.delivery }),
+        ...(canonicalInput.idempotencyKey === undefined
+          ? {}
+          : { idempotencyKey: canonicalInput.idempotencyKey }),
       });
       const result = toJsonResult(receipt);
       await this.store.completeIdempotency(key, result as AgentJsonValue);
+      this.consumePromptUploads(context.peer, input.ref, input.content);
       return result;
     });
+  }
+
+  private async attachmentUploadBegin(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const input = parseSchema(
+      v2AttachmentUploadBeginInputSchema,
+      params,
+      "Attachment upload begin input",
+    );
+    const capability = this.requireAttachmentCapability();
+    const ref = parseRef(input.ref);
+    const owner = await this.ownerFor(ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      if (!capability.mimeTypes.includes(input.mimeType)) {
+        throw new AgentBackendError("invalid_argument", "Attachment MIME type is not supported");
+      }
+      if (input.totalBytes > capability.maxImageBytes) {
+        throw new AgentBackendError("invalid_argument", "Attachment exceeds the image byte limit");
+      }
+      const key = this.idempotencyKey(
+        context.peer,
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadBegin,
+        input.idempotencyKey,
+        input.uploadId,
+      );
+      const claim = await this.store.claimIdempotency(key);
+      if (claim.kind === "accepted") return toJsonResult(claim.result);
+      if (claim.kind === "pending") {
+        throw new AgentBackendError("unavailable", "The attachment upload is still reconciling", {
+          retryable: true,
+        });
+      }
+      const uploads = this.uploadsFor(context.peer);
+      const existing = uploads.get(input.uploadId);
+      if (existing !== undefined) {
+        if (
+          existing.transportId !== context.peer.transportId ||
+          !isSameAgentSessionRef(existing.ref, ref) ||
+          existing.totalBytes !== input.totalBytes ||
+          existing.mimeType !== input.mimeType ||
+          existing.name !== input.name
+        ) {
+          throw new AgentBackendError("protocol", "Attachment upload identity was reused");
+        }
+      } else {
+        const stagedCount = uploads.size;
+        const stagedBytes = [...uploads.values()].reduce(
+          (total, upload) => total + upload.totalBytes,
+          0,
+        );
+        if (stagedCount >= capability.maxImagesPerMessage) {
+          throw new AgentBackendError(
+            "invalid_argument",
+            "The peer has reached the staged image count limit",
+          );
+        }
+        if (stagedBytes + input.totalBytes > capability.maxMessageImageBytes) {
+          throw new AgentBackendError(
+            "invalid_argument",
+            "The peer has reached the staged image byte limit",
+          );
+        }
+        uploads.set(input.uploadId, {
+          chunks: [],
+          complete: false,
+          mimeType: input.mimeType,
+          name: input.name,
+          nextOffset: 0,
+          peerId: context.peer.id,
+          ref,
+          totalBytes: input.totalBytes,
+          transportId: context.peer.transportId,
+          uploadId: input.uploadId,
+        });
+      }
+      const result = toJsonResult({ uploadId: input.uploadId });
+      await this.store.completeIdempotency(key, result as AgentJsonValue);
+      return result;
+    });
+  }
+
+  private async attachmentUploadChunk(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const input = parseSchema(
+      v2AttachmentUploadChunkInputSchema,
+      params,
+      "Attachment upload chunk input",
+    );
+    const capability = this.requireAttachmentCapability();
+    const upload = this.uploadsFor(context.peer).get(input.uploadId);
+    if (upload === undefined || upload.transportId !== context.peer.transportId) {
+      throw new AgentBackendError("not_found", "The attachment upload was not found");
+    }
+    const owner = await this.ownerFor(upload.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      if (upload.complete)
+        throw new AgentBackendError("conflict", "The attachment upload is complete");
+      const key = this.idempotencyKey(
+        context.peer,
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk,
+        input.idempotencyKey,
+        `${input.uploadId}:${input.offset}`,
+      );
+      const claim = await this.store.claimIdempotency(key);
+      if (claim.kind === "accepted") return toJsonResult(claim.result);
+      if (claim.kind === "pending") {
+        throw new AgentBackendError("unavailable", "The attachment chunk is still reconciling", {
+          retryable: true,
+        });
+      }
+      if (input.offset !== upload.nextOffset) {
+        throw new AgentBackendError("invalid_argument", "Attachment chunks must be ordered");
+      }
+      const bytes = uploadBase64Bytes(input.data);
+      if (bytes.byteLength === 0 || bytes.byteLength > capability.uploadChunkBytes) {
+        throw new AgentBackendError("invalid_argument", "Attachment chunk size is invalid");
+      }
+      if (upload.nextOffset + bytes.byteLength > upload.totalBytes) {
+        throw new AgentBackendError("invalid_argument", "Attachment chunks exceed declared size");
+      }
+      upload.chunks.push(bytes);
+      upload.nextOffset += bytes.byteLength;
+      const result = toJsonResult({ nextOffset: upload.nextOffset, uploadId: upload.uploadId });
+      await this.store.completeIdempotency(key, result as AgentJsonValue);
+      return result;
+    });
+  }
+
+  private async attachmentUploadFinish(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    this.requireAttachmentCapability();
+    const input = parseSchema(
+      v2AttachmentUploadFinishInputSchema,
+      params,
+      "Attachment upload finish input",
+    );
+    const upload = this.uploadsFor(context.peer).get(input.uploadId);
+    if (upload === undefined || upload.transportId !== context.peer.transportId) {
+      throw new AgentBackendError("not_found", "The attachment upload was not found");
+    }
+    const owner = await this.ownerFor(upload.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      const key = this.idempotencyKey(
+        context.peer,
+        ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadFinish,
+        input.idempotencyKey,
+        input.uploadId,
+      );
+      const claim = await this.store.claimIdempotency(key);
+      if (claim.kind === "accepted") return toJsonResult(claim.result);
+      if (claim.kind === "pending") {
+        throw new AgentBackendError("unavailable", "The attachment upload is still reconciling", {
+          retryable: true,
+        });
+      }
+      if (upload.nextOffset !== upload.totalBytes) {
+        throw new AgentBackendError("invalid_argument", "The attachment upload is incomplete");
+      }
+      upload.complete = true;
+      const result = toJsonResult({ uploadId: upload.uploadId });
+      await this.store.completeIdempotency(key, result as AgentJsonValue);
+      return result;
+    });
+  }
+
+  private async attachmentUploadAbort(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    this.requireAttachmentCapability();
+    const input = parseSchema(
+      v2AttachmentUploadAbortInputSchema,
+      params,
+      "Attachment upload abort input",
+    );
+    this.assertRequestActive(context);
+    const key = this.idempotencyKey(
+      context.peer,
+      ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadAbort,
+      input.idempotencyKey,
+      input.uploadId,
+    );
+    const claim = await this.store.claimIdempotency(key);
+    if (claim.kind === "accepted") return toJsonResult(claim.result);
+    if (claim.kind === "pending") {
+      throw new AgentBackendError("unavailable", "The attachment abort is still reconciling", {
+        retryable: true,
+      });
+    }
+    const uploads = this.uploadsFor(context.peer);
+    const upload = uploads.get(input.uploadId);
+    const aborted = upload !== undefined && upload.transportId === context.peer.transportId;
+    if (aborted) uploads.delete(input.uploadId);
+    if (uploads.size === 0) this.uploadsByPeer.delete(context.peer.id);
+    const result = toJsonResult({ aborted, uploadId: input.uploadId });
+    await this.store.completeIdempotency(key, result as AgentJsonValue);
+    return result;
+  }
+
+  private async attachmentRead(
+    params: JsonValue,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const capability = this.requireAttachmentCapability();
+    const input = parseSchema(v2AttachmentReadInputSchema, params, "Attachment read input");
+    const ref = parseRef(input.ref);
+    const owner = await this.ownerFor(ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      const cacheKey = `${context.peer.id}\u0000${ref.sessionId}\u0000${input.attachmentId}`;
+      let cached = this.attachmentReads.get(cacheKey);
+      if (cached !== undefined && cached.transportId !== context.peer.transportId)
+        cached = undefined;
+      if (cached === undefined) {
+        const value = await this.backend.readAttachment(
+          owner.nativeRef,
+          input.attachmentId,
+          context.signal,
+        );
+        cached = {
+          peerId: context.peer.id,
+          ref,
+          transportId: context.peer.transportId,
+          value,
+        };
+        this.attachmentReads.set(cacheKey, cached);
+      }
+      const bytes = base64Bytes(cached.value.data, "Attachment data");
+      if (!capability.mimeTypes.includes(cached.value.mimeType)) {
+        throw new AgentBackendError("protocol", "Attachment MIME type is not advertised");
+      }
+      if (bytes.byteLength > capability.maxImageBytes) {
+        throw new AgentBackendError("protocol", "Attachment exceeds the advertised image limit");
+      }
+      if (cached.value.bytes !== undefined && cached.value.bytes !== bytes.byteLength) {
+        throw new AgentBackendError("protocol", "Attachment metadata byte count is invalid");
+      }
+      const rawChunkBytes = Math.max(3, Math.floor(capability.downloadChunkBytes / 3) * 3);
+      if (input.offset > bytes.byteLength) {
+        throw new AgentBackendError("invalid_argument", "Attachment read offset is out of range");
+      }
+      const remaining = bytes.byteLength - input.offset;
+      const length = Math.min(remaining, rawChunkBytes);
+      const chunk = bytes.slice(input.offset, input.offset + length);
+      const eof = input.offset + length === bytes.byteLength;
+      if (!eof && chunk.byteLength % 3 !== 0) {
+        throw new AgentBackendError("protocol", "Attachment download chunk alignment is invalid");
+      }
+      if (eof) this.attachmentReads.delete(cacheKey);
+      return toJsonResult({
+        attachmentId: cached.value.attachmentId,
+        data: encodedBytes(chunk),
+        eof,
+        mimeType: cached.value.mimeType,
+        nextOffset: input.offset + chunk.byteLength,
+        ...(cached.value.name === undefined ? {} : { name: cached.value.name }),
+        ...(cached.value.bytes === undefined ? {} : { bytes: cached.value.bytes }),
+        ...(cached.value.width === undefined ? {} : { width: cached.value.width }),
+        ...(cached.value.height === undefined ? {} : { height: cached.value.height }),
+      });
+    });
+  }
+
+  private requireAttachmentCapability(): Exclude<
+    RemoteAgentV2HostCapabilities["attachments"],
+    false
+  > {
+    if (this.capabilities.attachments === false) {
+      throw new AgentBackendError("unsupported", "This host does not support attachments");
+    }
+    return this.capabilities.attachments;
+  }
+
+  private uploadsFor(peer: RemoteAgentHostPeer): Map<string, AttachmentUpload> {
+    let uploads = this.uploadsByPeer.get(peer.id);
+    if (uploads === undefined) {
+      uploads = new Map();
+      this.uploadsByPeer.set(peer.id, uploads);
+    }
+    return uploads;
+  }
+
+  private resolvePromptContent(
+    owner: Owner,
+    peer: RemoteAgentHostPeer,
+    content: readonly RemoteAgentV2PromptContentBlock[],
+  ): readonly AgentPromptContentBlock[] {
+    const uploads = this.uploadsFor(peer);
+    const imageUploads = content.filter((block) => block.type === "image_upload");
+    const capability = imageUploads.length === 0 ? undefined : this.requireAttachmentCapability();
+    if (capability !== undefined && imageUploads.length > capability.maxImagesPerMessage) {
+      throw new AgentBackendError("invalid_argument", "Prompt contains too many images");
+    }
+    let imageBytes = 0;
+    const resolved = content.map((block) => {
+      if (block.type === "text") return block;
+      const upload = uploads.get(block.uploadId);
+      if (
+        upload === undefined ||
+        !upload.complete ||
+        upload.transportId !== peer.transportId ||
+        !isSameAgentSessionRef(upload.ref, owner.ref) ||
+        upload.mimeType !== block.mimeType ||
+        upload.name !== block.name
+      ) {
+        throw new AgentBackendError("invalid_argument", "Prompt image upload is not available");
+      }
+      imageBytes += upload.totalBytes;
+      return {
+        data: encodedBytes(concatBytes(upload.chunks)),
+        ...(upload.name === undefined ? {} : { name: upload.name }),
+        mimeType: upload.mimeType,
+        type: "image" as const,
+      };
+    });
+    if (capability !== undefined && imageBytes > capability.maxMessageImageBytes) {
+      throw new AgentBackendError(
+        "invalid_argument",
+        "Prompt images exceed the aggregate byte limit",
+      );
+    }
+    return resolved;
+  }
+
+  private consumePromptUploads(
+    peer: RemoteAgentHostPeer,
+    ref: AgentSessionRef,
+    content: readonly RemoteAgentV2PromptContentBlock[],
+  ): void {
+    const uploads = this.uploadsByPeer.get(peer.id);
+    if (uploads === undefined) return;
+    for (const block of content) {
+      if (block.type !== "image_upload") continue;
+      const upload = uploads.get(block.uploadId);
+      if (upload !== undefined && upload.complete && isSameAgentSessionRef(upload.ref, ref)) {
+        uploads.delete(block.uploadId);
+      }
+    }
+    if (uploads.size === 0) this.uploadsByPeer.delete(peer.id);
   }
 
   private async cancel(
@@ -1204,6 +1801,57 @@ export class OrbisRemoteAgentV2Host {
     });
   }
 
+  private async respondQuestion(
+    input: RemoteAgentV2QuestionResponseInput,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      await this.assertDriverCapability(owner.nativeRef.driverId, "question.respond");
+      const key = this.idempotencyKey(
+        context.peer,
+        ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+        input.idempotencyKey,
+        input.ref.sessionId,
+      );
+      const claim = await this.store.claimIdempotency(key);
+      if (claim.kind === "accepted") return toJsonResult(claim.result);
+      if (claim.kind === "pending") {
+        throw new AgentBackendError(
+          "unavailable",
+          "The prior question response is still reconciling",
+          { retryable: true },
+        );
+      }
+      const request = this.requiredSnapshot(owner).state.pendingQuestions.find(
+        (candidate) => candidate.requestId === input.requestId,
+      );
+      if (request !== undefined) {
+        // Enforce full-set/question-option membership at the host boundary while
+        // allowing the runtime to return accepted:false for an already-resolved
+        // request that is no longer present in the snapshot.
+        validateAgentQuestionResponseForRequest(
+          {
+            idempotencyKey: input.idempotencyKey,
+            requestId: input.requestId,
+            response: input.response,
+          },
+          request,
+        );
+      }
+      const result = toJsonResult(
+        await this.requiredRuntime(owner).respondQuestion({
+          requestId: input.requestId,
+          response: input.response,
+          idempotencyKey: input.idempotencyKey,
+        }),
+      );
+      await this.store.completeIdempotency(key, result as AgentJsonValue);
+      return result;
+    });
+  }
+
   private async update(
     input: RemoteAgentV2UpdateInput,
     context: RemoteAgentHostRequestContext,
@@ -1224,6 +1872,9 @@ export class OrbisRemoteAgentV2Host {
         if (!hasAgentDriverCapability(driver, "model.select")) {
           throw new AgentBackendError("unsupported", "The session driver cannot select models");
         }
+      }
+      if (input.patch.mode === "plan" || input.patch.mode === null) {
+        await this.assertDriverCapability(owner.nativeRef.driverId, "plan.select");
       }
       const key = this.idempotencyKey(
         context.peer,
@@ -1268,6 +1919,7 @@ export class OrbisRemoteAgentV2Host {
         ref,
         subscribers: new Map(),
         tail: Promise.resolve(),
+        presenceSeq: 0,
         transientSeq: 0,
       };
       this.owners.set(key, owner);
@@ -1410,15 +2062,60 @@ export class OrbisRemoteAgentV2Host {
 
   private async deliverLive(owner: Owner, event: RemoteAgentV2SessionEvent): Promise<void> {
     const frame = transportEvent(owner.ref, event, ++owner.transientSeq);
+    let removedPeer = false;
     await Promise.all(
-      [...owner.subscribers.values()].map(async (peer) => {
+      [...owner.subscribers.values()].map(async (subscriber) => {
         try {
-          await this.transport.send(peer, frame);
+          await this.transport.send(subscriber.peer, frame);
         } catch {
-          this.removePeer(owner, peer);
+          removedPeer = this.removePeer(owner, subscriber.peer) || removedPeer;
         }
       }),
     );
+    if (removedPeer && this.capabilities.presence) await this.broadcastPresence(owner);
+  }
+
+  private async broadcastPresence(owner: Owner): Promise<void> {
+    if (!this.capabilities.presence) return;
+
+    // A failed send removes a subscriber. Keep publishing the newly reduced
+    // snapshot until one complete round succeeds, so a second failure during
+    // convergence cannot leave the remaining peers with stale viewers.
+    while (owner.subscribers.size > 0) {
+      const devices = [...owner.subscribers.values()]
+        .map(({ peer, since }) => ({
+          deviceId: peer.deviceId,
+          ...(peer.deviceName === undefined ? {} : { name: peer.deviceName }),
+          since,
+          viewing: true as const,
+        }))
+        .sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+      const event: RemoteAgentV2SessionEvent = {
+        channel: "transient",
+        devices,
+        eventId: agentEventId(`presence:${owner.ref.sessionId}:${++owner.presenceSeq}`),
+        occurredAt: this.clock(),
+        sessionId: owner.ref.sessionId,
+        source: {
+          backendId: owner.ref.backendId,
+          driverId: owner.ref.driverId,
+          nativeType: "orbis/presence",
+        },
+        type: "presence.changed",
+      };
+      const frame = transportEvent(owner.ref, event, ++owner.transientSeq);
+      let removedPeer = false;
+      await Promise.all(
+        [...owner.subscribers.values()].map(async (subscriber) => {
+          try {
+            await this.transport.send(subscriber.peer, frame);
+          } catch {
+            removedPeer = this.removePeer(owner, subscriber.peer) || removedPeer;
+          }
+        }),
+      );
+      if (!removedPeer) return;
+    }
   }
 
   /**
@@ -1514,7 +2211,8 @@ export class OrbisRemoteAgentV2Host {
     try {
       await this.transport.send(peer, transportEvent(owner.ref, event, ++owner.transientSeq));
     } catch (error) {
-      this.removePeer(owner, peer);
+      const removed = this.removePeer(owner, peer);
+      if (removed && this.capabilities.presence) await this.broadcastPresence(owner);
       if (error instanceof OrbisTransportError && error.serverCode === "frame_too_large") {
         responseTooLarge(
           "entry_too_large",
@@ -1545,7 +2243,14 @@ export class OrbisRemoteAgentV2Host {
 
   private async assertDriverCapability(
     driverId: AgentSessionRef["driverId"],
-    capability: "permission.respond" | "workspace.open",
+    capability:
+      | "permission.respond"
+      | "plan.select"
+      | "prompt.references.files"
+      | "prompt.references.sessions"
+      | "question.respond"
+      | "session.subagents.list"
+      | "workspace.open",
   ): Promise<void> {
     const driver = (await this.backend.listDrivers()).find(
       (candidate) => candidate.id === driverId,
@@ -1556,7 +2261,17 @@ export class OrbisRemoteAgentV2Host {
         "unsupported",
         capability === "permission.respond"
           ? "The driver cannot respond to permission requests"
-          : "The driver cannot open server workspaces",
+          : capability === "question.respond"
+            ? "The driver cannot respond to questions"
+            : capability === "plan.select"
+              ? "The driver cannot select plan mode"
+              : capability === "prompt.references.files"
+                ? "The driver cannot complete file references"
+                : capability === "prompt.references.sessions"
+                  ? "The driver cannot complete session references"
+                  : capability === "session.subagents.list"
+                    ? "The driver cannot list session subagents"
+                    : "The driver cannot open server workspaces",
       );
     }
   }
@@ -1593,9 +2308,38 @@ export class OrbisRemoteAgentV2Host {
     return task;
   }
 
-  private removePeer(owner: Owner, peer: RemoteAgentHostPeer): void {
+  private removePeer(owner: Owner, peer: RemoteAgentHostPeer): boolean {
     const current = owner.subscribers.get(peer.id);
-    if (current?.transportId === peer.transportId) owner.subscribers.delete(peer.id);
+    if (current?.peer.transportId !== peer.transportId) return false;
+    return owner.subscribers.delete(peer.id);
+  }
+
+  private handlePeerDisconnected(peer: RemoteAgentHostPeer): void {
+    const known = this.helloPeers.get(peer.transportId);
+    if (known?.id === peer.id) this.helloPeers.delete(peer.transportId);
+    const uploads = this.uploadsByPeer.get(peer.id);
+    if (uploads !== undefined) {
+      const hasCurrentTransport = [...uploads.values()].some(
+        (upload) => upload.transportId !== peer.transportId,
+      );
+      if (!hasCurrentTransport) this.uploadsByPeer.delete(peer.id);
+      else {
+        for (const [uploadId, upload] of uploads) {
+          if (upload.transportId === peer.transportId) uploads.delete(uploadId);
+        }
+      }
+    }
+    for (const [key, cache] of this.attachmentReads) {
+      if (cache.peerId === peer.id && cache.transportId === peer.transportId) {
+        this.attachmentReads.delete(key);
+      }
+    }
+    for (const owner of this.owners.values()) {
+      void this.enqueue(owner, async () => {
+        if (!this.removePeer(owner, peer) || !this.capabilities.presence) return;
+        await this.broadcastPresence(owner);
+      }).catch((error) => this.report(error));
+    }
   }
 
   private assertRequestActive(context: RemoteAgentHostRequestContext): void {

@@ -13,13 +13,17 @@ import type {
   DshAgentHandle,
   DshAgentInboxEvent,
   DshAgentOptions,
-  DshApiApprovalResponse,
+  DshApiInteractionResponse,
   DshApiMuxRequest,
   DshContext,
+  DshImageAttachmentReference,
   DshSession,
   DshSessionCatalogEntry,
+  DshSessionAttachmentPort,
   DshSessionEvent,
   DshSessionHeader,
+  DshSessionModeProvider,
+  DshSessionSubagentProvider,
   DshUserMessage,
 } from "./dsh-types";
 
@@ -94,7 +98,7 @@ class TestDsh {
     string,
     { readonly model: string; readonly provider: string }
   >();
-  readonly approvalResponses: DshApiApprovalResponse[] = [];
+  readonly approvalResponses: DshApiInteractionResponse[] = [];
   approvalResponse: {
     readonly accepted: boolean;
     readonly reason?: "not-pending" | "bad-response";
@@ -192,7 +196,7 @@ class TestDsh {
               events: {
                 mux: (_request: unknown, signal: AbortSignal) => this.approvalMux(signal),
               },
-              respond: async (message: DshApiApprovalResponse) => {
+              respond: async (message: DshApiInteractionResponse) => {
                 this.approvalResponses.push(message);
                 return this.approvalResponse;
               },
@@ -367,11 +371,19 @@ function createBackend(
   testDsh: TestDsh,
   listSessionCatalog?: () => Promise<readonly DshSessionCatalogEntry[]>,
   now: () => AgentTimestamp = () => FIXED_TIME,
+  planMode?: DshSessionModeProvider,
+  onError?: (error: { readonly code: string }) => void,
+  attachments?: DshSessionAttachmentPort,
+  subagents?: DshSessionSubagentProvider,
 ): DshLocalBackend {
   return new DshLocalBackend({
     context: testDsh.context,
     createSessionId: () => "created-session",
-    createUserMessage: ({ content }) => asUserMessage(content[0].text),
+    createUserMessage: ({ content }) => {
+      const first = content[0];
+      if (first?.type === "text" && content.length === 1) return asUserMessage(first.text);
+      return { content, id: "user-image" };
+    },
     listSessionCatalog:
       listSessionCatalog ??
       (async () =>
@@ -381,6 +393,10 @@ function createBackend(
           updatedAt: header.createdAt,
         }))),
     now,
+    ...(planMode === undefined ? {} : { planMode }),
+    ...(onError === undefined ? {} : { onError }),
+    ...(attachments === undefined ? {} : { attachments }),
+    ...(subagents === undefined ? {} : { subagents }),
     toSessionId: (id) => id,
   });
 }
@@ -416,6 +432,36 @@ function approvalRequested(approvalId: string, toolName: string): DshApiMuxReque
   };
 }
 
+function questionRequested(rpcId: string): DshApiMuxRequest {
+  return {
+    payload: {
+      questions: [
+        {
+          detail: "# Plan\n\nDo these steps?",
+          header: "Review",
+          id: "plan-review",
+          intent: { approve: "Approve", kind: "plan-review" },
+          multiSelect: false,
+          options: [
+            { description: "Continue with the plan", label: "Approve" },
+            { label: "Keep planning" },
+          ],
+          question: "Approve this plan?",
+        },
+        {
+          id: "format",
+          multiSelect: true,
+          options: [{ label: "JSON" }, { label: "Markdown" }],
+          question: "Which formats?",
+        },
+      ],
+      sessionId: "created-session",
+      type: "question/requested",
+    },
+    rpcId,
+  };
+}
+
 function pendingPermissionIds(events: readonly AgentSessionEvent[]): string[] {
   const state = [...events]
     .reverse()
@@ -427,7 +473,345 @@ function pendingPermissionIds(events: readonly AgentSessionEvent[]): string[] {
   return state?.payload.patch.pendingPermissions?.map((request) => request.requestId) ?? [];
 }
 
+function pendingQuestions(events: readonly AgentSessionEvent[]) {
+  const state = [...events]
+    .reverse()
+    .find(
+      (native): native is Extract<AgentSessionEvent, { type: "session.state.changed" }> =>
+        native.type === "session.state.changed" &&
+        native.payload.patch.pendingQuestions !== undefined,
+    );
+  return state?.payload.patch.pendingQuestions ?? [];
+}
+
 describe("DSH local backend", () => {
+  test("advertises input.attachments only when the composition port is mounted", async () => {
+    const withoutAttachments = createBackend(new TestDsh());
+    expect(withoutAttachments.driverDescriptor.capabilities).not.toContain("input.attachments");
+
+    const attachments: DshSessionAttachmentPort = {
+      admitEncodedImages: async () => [],
+      readImage: async (reference) => ({ data: new Uint8Array(), reference }),
+    };
+    const withAttachments = createBackend(
+      new TestDsh(),
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      attachments,
+    );
+    expect(withAttachments.driverDescriptor.capabilities).toContain("input.attachments");
+    await withoutAttachments.close();
+    await withAttachments.close();
+  });
+
+  test("advertises and maps authoritative subagent descendants only when mounted", async () => {
+    const signal = new AbortController().signal;
+    let receivedId: string | undefined;
+    let receivedSignal: AbortSignal | undefined;
+    const subagents: DshSessionSubagentProvider = {
+      listDescendants: async (nativeSessionId, requestSignal) => {
+        receivedId = nativeSessionId;
+        receivedSignal = requestSignal;
+        return [
+          {
+            activity: "running",
+            depth: 1,
+            hasChildren: true,
+            id: "child-1",
+            kind: "child",
+            mode: "continuable",
+            parentId: "root",
+            label: "Research",
+          },
+          {
+            activity: "inactive",
+            depth: 2,
+            hasChildren: false,
+            id: "child-2",
+            kind: "child",
+            mode: "one-shot",
+            parentId: "child-1",
+          },
+          {
+            depth: 1,
+            id: "diagnostic-1",
+            kind: "diagnostic",
+            parentId: "root",
+            reason: "corrupt",
+          },
+        ];
+      },
+    };
+    const withoutProvider = createBackend(new TestDsh());
+    expect(withoutProvider.driverDescriptor.capabilities).not.toContain("session.subagents.list");
+    const rootRef = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "root",
+      sessionId: "root",
+    });
+    await expect(withoutProvider.listSessionSubagents(rootRef)).rejects.toMatchObject({
+      code: "unsupported",
+    });
+
+    const backend = createBackend(
+      new TestDsh(),
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      subagents,
+    );
+    expect(backend.driverDescriptor.capabilities).toContain("session.subagents.list");
+    await expect(backend.listSessionSubagents(rootRef, signal)).resolves.toEqual([
+      {
+        activity: "running",
+        depth: 1,
+        hasChildren: true,
+        kind: "child",
+        label: "Research",
+        mode: "continuable",
+        parentRef: rootRef,
+        ref: createAgentSessionRef({
+          backendId: "local",
+          driverId: "dsh",
+          nativeSessionId: "child-1",
+          sessionId: "child-1",
+        }),
+      },
+      {
+        activity: "inactive",
+        depth: 2,
+        hasChildren: false,
+        kind: "child",
+        mode: "one-shot",
+        parentRef: createAgentSessionRef({
+          backendId: "local",
+          driverId: "dsh",
+          nativeSessionId: "child-1",
+          sessionId: "child-1",
+        }),
+        ref: createAgentSessionRef({
+          backendId: "local",
+          driverId: "dsh",
+          nativeSessionId: "child-2",
+          sessionId: "child-2",
+        }),
+      },
+      {
+        depth: 1,
+        kind: "diagnostic",
+        parentRef: rootRef,
+        reason: "corrupt",
+        ref: createAgentSessionRef({
+          backendId: "local",
+          driverId: "dsh",
+          nativeSessionId: "diagnostic-1",
+          sessionId: "diagnostic-1",
+        }),
+      },
+    ]);
+    expect(receivedId).toBe("root");
+    expect(receivedSignal).toBe(signal);
+    await withoutProvider.close();
+    await backend.close();
+  });
+
+  test("rejects malformed native subagent identities as protocol errors", async () => {
+    const backend = createBackend(
+      new TestDsh(),
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      {
+        listDescendants: async () => [
+          {
+            activity: "running",
+            depth: 1,
+            hasChildren: false,
+            id: {} as never,
+            kind: "child",
+            mode: "one-shot",
+            parentId: undefined,
+          },
+        ],
+      },
+    );
+    const rootRef = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "root",
+      sessionId: "root",
+    });
+    await expect(backend.listSessionSubagents(rootRef)).rejects.toMatchObject({ code: "protocol" });
+    await backend.close();
+  });
+
+  test("rejects continuable descendants without a label as protocol errors", async () => {
+    const backend = createBackend(
+      new TestDsh(),
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      {
+        listDescendants: async () => [
+          {
+            activity: "running",
+            depth: 1,
+            hasChildren: false,
+            id: "child-1",
+            kind: "child",
+            mode: "continuable",
+            parentId: "root",
+          },
+        ],
+      },
+    );
+    const rootRef = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "root",
+      sessionId: "root",
+    });
+    await expect(backend.listSessionSubagents(rootRef)).rejects.toMatchObject({ code: "protocol" });
+    await backend.close();
+  });
+
+  test("admits image-only and mixed prompts as durable DSH attachment refs", async () => {
+    const testDsh = new TestDsh();
+    const admitted: string[][] = [];
+    const attachmentPort: DshSessionAttachmentPort = {
+      admitEncodedImages: async (images) => {
+        admitted.push(images.map((image) => image.data));
+        return images.map(
+          (image, index): DshImageAttachmentReference => ({
+            attachmentId: `attachment-${admitted.length}-${index}`,
+            bytes: (image.data.length / 4) * 3,
+            height: 10,
+            mediaType: image.mediaType,
+            width: 10,
+          }),
+        );
+      },
+      readImage: async (reference) => ({ data: new Uint8Array([1, 2, 3]), reference }),
+    };
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      attachmentPort,
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+
+    await runtime.prompt({
+      content: [{ data: "AQID", mimeType: "image/png", type: "image" }],
+    });
+    expect(admitted).toEqual([["AQID"]]);
+    expect(testDsh.agent("created-session").followups[0]?.content).toEqual([
+      {
+        attachment: {
+          attachmentId: "attachment-1-0",
+          bytes: 3,
+          height: 10,
+          mediaType: "image/png",
+          width: 10,
+        },
+        type: "image",
+      },
+    ]);
+
+    await runtime.cancel();
+    await runtime.prompt({
+      content: [
+        { text: "Describe these", type: "text" },
+        { data: "BAUG", mimeType: "image/png", type: "image" },
+        { data: "BwgJ", mimeType: "image/jpeg", type: "image" },
+      ],
+    });
+    expect(admitted).toEqual([["AQID"], ["BAUG", "BwgJ"]]);
+    expect(testDsh.agent("created-session").followups.at(-1)?.content).toMatchObject([
+      { text: "Describe these", type: "text" },
+      { type: "image", attachment: { attachmentId: "attachment-2-0" } },
+      { type: "image", attachment: { attachmentId: "attachment-2-1" } },
+    ]);
+  });
+
+  test("projects image references and authorizes DSH attachment reads by session log", async () => {
+    const testDsh = new TestDsh();
+    const reference: DshImageAttachmentReference = {
+      attachmentId: "history-image",
+      bytes: 3,
+      height: 2,
+      mediaType: "image/png",
+      name: "diagram.png",
+      width: 3,
+    };
+    testDsh.addPersistedSession("image-history", [
+      event("user/message", 0, {
+        content: [{ attachment: reference, type: "image" }],
+        id: "user-image",
+        role: "user",
+        source: { kind: "user" },
+      }),
+    ]);
+    testDsh.addPersistedSession("other-history", []);
+    const reads: string[] = [];
+    const backend = createBackend(testDsh, undefined, () => FIXED_TIME, undefined, undefined, {
+      admitEncodedImages: async () => [],
+      readImage: async (readReference) => {
+        reads.push(readReference.attachmentId);
+        return { data: new Uint8Array([1, 2, 3]), reference: readReference };
+      },
+    });
+    const ref = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "image-history",
+      sessionId: "image-history",
+    });
+    const projection = await backend.readSession(ref);
+    expect(projection.entries[0]).toMatchObject({
+      content: [
+        {
+          attachmentId: "history-image",
+          bytes: 3,
+          height: 2,
+          mimeType: "image/png",
+          name: "diagram.png",
+          type: "image_reference",
+          width: 3,
+        },
+      ],
+    });
+    await expect(backend.readAttachment(ref, "history-image")).resolves.toMatchObject({
+      attachmentId: "history-image",
+      data: "AQID",
+      mimeType: "image/png",
+    });
+    await expectCode(() => backend.readAttachment(ref, "missing"), "not_found");
+    const otherRef = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "other-history",
+      sessionId: "other-history",
+    });
+    await expectCode(() => backend.readAttachment(otherRef, "history-image"), "not_found");
+    expect(reads).toEqual(["history-image"]);
+  });
+
   test("projects the DSH provider catalog into v2 model metadata", async () => {
     const backend = createBackend(new TestDsh());
 
@@ -683,8 +1067,66 @@ describe("DSH local backend", () => {
         status: "success",
       },
     ]);
+    expect(projection.entries[1]).not.toHaveProperty("stopReason");
     expect(projection.lastRun).toMatchObject({ id: "turn-1", state: "completed" });
     expect(projection.state).toBe("idle");
+  });
+
+  test("projects DSH interrupted assistant messages as canonical aborted entries", async () => {
+    const interruptedMessage = {
+      message: {
+        content: [{ text: "The response was interrupted.", type: "text" }],
+        role: "assistant",
+      },
+      interrupted: true,
+      step: 1,
+      turn: 1,
+    };
+    const testDsh = new TestDsh();
+    testDsh.addPersistedSession("interrupted", [
+      event("turn/start", 0, { turn: 1 }),
+      event("assistant/message", 1, interruptedMessage),
+      event("turn/end", 2, { reason: { kind: "aborted" }, turn: 1 }),
+    ]);
+    const backend = createBackend(testDsh);
+    const ref = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "interrupted",
+      sessionId: "interrupted",
+    });
+
+    const projection = await backend.readSession(ref);
+
+    expect(projection.entries).toMatchObject([
+      {
+        content: [{ text: "The response was interrupted.", type: "text" }],
+        kind: "message",
+        role: "assistant",
+        stopReason: "aborted",
+      },
+    ]);
+    expect(projection.entries[0]).not.toHaveProperty("interrupted");
+
+    const liveRecord = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(liveRecord.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emit("created-session", event("assistant/message", 1, interruptedMessage));
+
+    expect(events.find((native) => native.type === "entry.appended")).toMatchObject({
+      payload: {
+        entry: {
+          kind: "message",
+          role: "assistant",
+          stopReason: "aborted",
+        },
+      },
+    });
   });
 
   test("emits DSH tool input and execution state as distinct transient events", async () => {
@@ -783,7 +1225,96 @@ describe("DSH local backend", () => {
     });
   });
 
-  test("bridges approval mux requests, responses, resolution, and reconnect state", async () => {
+  test("maps active DSH lifecycle records to canonical run activity", async () => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
+    testDsh.emit("created-session", event("step/start", 1, { step: 1, turn: 1 }));
+    testDsh.emit("created-session", event("assistant/chunk", 2, { step: 1, turn: 1 }));
+    testDsh.emit("created-session", event("llm/retry-started", 3, { retry: 1, step: 1, turn: 1 }));
+    testDsh.emit(
+      "created-session",
+      event("llm/retry", 4, { delayMs: 250, maxRetries: 3, retry: 2, step: 1, turn: 1 }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("compaction/start", 5, { compactionId: "compact-1", turn: 1 }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("compaction/start", 6, { compactionId: "compact-standalone", turn: null }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("compaction/start", 7, { compactionId: "compact-other-turn", turn: 2 }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("turn/end", 8, { reason: { kind: "completed" }, turn: 1 }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("compaction/start", 9, { compactionId: "compact-after-end", turn: 1 }),
+    );
+
+    expect(events.filter((native) => native.type === "run.activity")).toMatchObject([
+      { payload: { kind: "thinking", runId: "turn-1" } },
+      { payload: { kind: "thinking", runId: "turn-1" } },
+      {
+        payload: {
+          detail: "Retry 2/3 · waiting 250ms",
+          kind: "retry",
+          runId: "turn-1",
+        },
+      },
+      { payload: { kind: "summarizing", runId: "turn-1" } },
+    ]);
+    expect(events.filter((native) => native.type === "run.activity")).toHaveLength(4);
+    expect(
+      events.some(
+        (native) =>
+          native.type === "run.activity" && native.source.nativeType === "assistant/chunk",
+      ),
+    ).toBe(false);
+
+    await backend.close();
+  });
+
+  test("reports malformed DSH activity payloads without publishing activity", async () => {
+    const errors: string[] = [];
+    const testDsh = new TestDsh();
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      (error) => errors.push(error.code),
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
+    testDsh.emit("created-session", event("step/start", 1, { step: 0, turn: 1 }));
+
+    expect(errors).toContain("protocol");
+    expect(events.filter((native) => native.type === "run.activity")).toEqual([]);
+    await backend.close();
+  });
+
+  test("bridges permission interactions, responses, resolution, and reconnect state", async () => {
     const testDsh = new TestDsh(true);
     const backend = createBackend(testDsh);
     const record = await backend.createSession({
@@ -872,6 +1403,379 @@ describe("DSH local backend", () => {
     await backend.close();
   });
 
+  test("bridges a full Ask User batch with opaque option ids and reconnect replay", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emitApproval(questionRequested("question-rpc-1"));
+    await waitFor(() => pendingQuestions(events).length === 1);
+    const request = pendingQuestions(events)[0];
+    expect(request?.requestId).toBe("question-rpc-1");
+    expect(request?.questions[0]?.questionId).toBe("plan-review");
+    expect(request?.questions[0]?.intent?.approveOptionId).toBe("dsh-option-0-0");
+    expect(request?.questions[0]?.options.map((option) => option.label)).toEqual([
+      "Approve",
+      "Keep planning",
+    ]);
+    expect(request?.questions[0]?.options.map((option) => option.optionId)).not.toEqual([
+      "Approve",
+      "Keep planning",
+    ]);
+    const requestedAt = request?.requestedAt;
+
+    await expect(
+      runtime.respondQuestion({
+        requestId: "question-rpc-1",
+        response: {
+          answers: [
+            { optionIds: ["dsh-option-1-0", "dsh-option-1-1"], questionId: "format" },
+            { optionIds: ["dsh-option-0-0"], questionId: "plan-review" },
+          ],
+          kind: "answered",
+        },
+      }),
+    ).resolves.toEqual({ accepted: true });
+    expect(testDsh.approvalResponses.at(-1)).toMatchObject({
+      result: {
+        ok: true,
+        value: {
+          answer: {
+            answers: [
+              { id: "plan-review", selected: ["Approve"] },
+              { id: "format", selected: ["JSON", "Markdown"] },
+            ],
+          },
+          sessionId: "created-session",
+        },
+      },
+      rpcId: "question-rpc-1",
+    });
+    await waitFor(() => pendingQuestions(events).length === 0);
+
+    testDsh.emitApproval(questionRequested("question-rpc-2"));
+    await waitFor(() => pendingQuestions(events).length === 1);
+    const beforeReconnect = pendingQuestions(events)[0]?.requestedAt;
+    expect(beforeReconnect).toBe(requestedAt);
+    await runtime.close();
+    const reconnected = await backend.connectRuntime(record.ref);
+    const reconnectEvents: AgentSessionEvent[] = [];
+    reconnected.subscribe((native) => reconnectEvents.push(native));
+    expect(pendingQuestions(reconnectEvents)[0]?.requestedAt).toBe(beforeReconnect);
+
+    await expect(
+      reconnected.respondQuestion({ requestId: "question-rpc-2", response: { kind: "cancelled" } }),
+    ).resolves.toEqual({ accepted: true });
+    expect(testDsh.approvalResponses.at(-1)).toMatchObject({
+      result: { error: { code: "cancelled" }, ok: false },
+      rpcId: "question-rpc-2",
+    });
+    await backend.close();
+  });
+
+  test("keeps a pending question after a bad native response receipt", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+    testDsh.emitApproval(questionRequested("question-bad"));
+    await waitFor(() => pendingQuestions(events).length === 1);
+    testDsh.approvalResponse = { accepted: false, reason: "bad-response" };
+    await expectCode(
+      () =>
+        runtime.respondQuestion({
+          requestId: "question-bad",
+          response: { kind: "cancelled" },
+        }),
+      "protocol",
+    );
+    expect(pendingQuestions(events)).toHaveLength(1);
+    expect(pendingQuestions(events)[0]?.requestId).toBe("question-bad");
+    await backend.close();
+  });
+
+  test("resolves a pending question from the shared interaction mux", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emitApproval(questionRequested("question-resolved"));
+    await waitFor(() => pendingQuestions(events).length === 1);
+    testDsh.emitApproval({
+      payload: {
+        questionRpcId: "question-resolved",
+        sessionId: "created-session",
+        type: "question/resolved",
+      },
+      rpcId: "question-resolution-receipt",
+    });
+    await waitFor(() => pendingQuestions(events).length === 0);
+    await backend.close();
+  });
+
+  test("rejects interaction replays that change the native request payload", async () => {
+    const errors: string[] = [];
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      (error) => {
+        errors.push(error.code);
+      },
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    const request = approvalRequested("approval-replay", "read");
+    testDsh.emitApproval(request);
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-replay");
+    testDsh.emitApproval({
+      payload: { ...request.payload, reason: "changed" },
+      rpcId: request.rpcId,
+    });
+    await waitFor(() => errors.includes("protocol"));
+    expect(pendingPermissionIds(events)).toEqual(["approval-replay"]);
+    await backend.close();
+  });
+
+  test("rejects a permission replay when its rpc id changes", async () => {
+    const errors: string[] = [];
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      (error) => {
+        errors.push(error.code);
+      },
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    const request = approvalRequested("approval-rpc-replay", "read");
+    testDsh.emitApproval(request);
+    await waitFor(() => pendingPermissionIds(events).join(",") === "approval-rpc-replay");
+    testDsh.emitApproval({ ...request, rpcId: "different-rpc-id" });
+    await waitFor(() => errors.includes("protocol"));
+    expect(pendingPermissionIds(events)).toEqual(["approval-rpc-replay"]);
+    await backend.close();
+  });
+
+  test("rejects a question replay when its payload changes under one rpc id", async () => {
+    const errors: string[] = [];
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      (error) => {
+        errors.push(error.code);
+      },
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    const request = questionRequested("question-payload-replay");
+    testDsh.emitApproval(request);
+    await waitFor(() => pendingQuestions(events).length === 1);
+    testDsh.emitApproval({
+      payload: {
+        ...request.payload,
+        questions: request.payload.questions?.map((question, index) =>
+          index === 0 ? { ...question, question: "Changed after replay" } : question,
+        ),
+      },
+      rpcId: request.rpcId,
+    });
+    await waitFor(() => errors.includes("protocol"));
+    expect(pendingQuestions(events)[0]?.requestId).toBe("question-payload-replay");
+    await backend.close();
+  });
+
+  test("rejects duplicate native option labels before exposing a question", async () => {
+    const testDsh = new TestDsh(true);
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+    testDsh.emitApproval({
+      payload: {
+        questions: [
+          {
+            id: "duplicate",
+            options: [{ label: "same" }, { label: "same" }],
+            question: "Invalid?",
+          },
+        ],
+        sessionId: "created-session",
+        type: "question/requested",
+      },
+      rpcId: "question-duplicate",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pendingQuestions(events)).toEqual([]);
+    await backend.close();
+  });
+
+  test("folds DSH mode, goal tombstones, and whole todo snapshots", async () => {
+    const testDsh = new TestDsh();
+    testDsh.addPersistedSession("work-state", [
+      event("plan/mode", 0, { active: true }),
+      event("goal/change", 1, {
+        createdAt: EPOCH,
+        goal: {
+          id: "goal-1",
+          maxGoalRounds: 3,
+          objective: "Ship the public bridge",
+          phase: "active",
+          revision: 1,
+        },
+        kind: "goal/change",
+        operation: "create",
+        roundsStarted: 0,
+        updatedAt: EPOCH,
+        version: 1,
+      }),
+      event("todo/write", 2, {
+        todos: [
+          { content: "Implement adapter", status: "in_progress" },
+          { content: "Add tests", status: "pending" },
+        ],
+      }),
+      event("turn/start", 3, { turn: 1 }),
+      event("turn/end", 4, { reason: { kind: "completed" }, turn: 1 }),
+      event("todo/write", 5, { todos: [{ content: "Implement adapter", status: "completed" }] }),
+      event("turn/start", 6, { turn: 2 }),
+      event("goal/change", 7, {
+        createdAt: EPOCH,
+        goal: {
+          id: "goal-1",
+          maxGoalRounds: 3,
+          objective: "Ship the public bridge",
+          phase: "complete",
+          revision: 2,
+        },
+        kind: "goal/change",
+        operation: "complete",
+        roundsStarted: 1,
+        updatedAt: EPOCH + 1_000,
+        version: 1,
+      }),
+      event("goal/change", 8, {
+        cleared: { id: "goal-1", revision: 3 },
+        clearedAt: EPOCH + 2_000,
+        kind: "goal/change",
+        operation: "clear",
+        version: 1,
+      }),
+      event("plan/mode", 9, { active: false }),
+    ]);
+    const backend = createBackend(testDsh);
+    const projection = await backend.readSession(
+      createAgentSessionRef({
+        backendId: "local",
+        driverId: "dsh",
+        nativeSessionId: "work-state",
+        sessionId: "work-state",
+      }),
+    );
+    expect(projection.mode).toBeNull();
+    expect(projection.workState).toEqual({ goal: null, todos: [] });
+    await backend.close();
+  });
+
+  test("publishes committed plan mode and leaves queued selection authoritative", async () => {
+    const testDsh = new TestDsh();
+    const planMode: DshSessionModeProvider = {
+      get: (agent) => ({
+        active:
+          agent.session.events.at(-1)?.type === "plan/mode" &&
+          (agent.session.events.at(-1)?.data as { readonly active?: boolean }).active === true,
+      }),
+      set: (agent, active) => {
+        if (agent.status === "running") return "queued";
+        testDsh.emit(
+          "created-session",
+          event("plan/mode", agent.session.events.length + 1, { active }),
+        );
+        return "committed";
+      },
+    };
+    const backend = createBackend(testDsh, undefined, () => FIXED_TIME, planMode);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    expect((await backend.listDrivers())[0]?.capabilities).toContain("plan.select");
+    const runtime = await backend.connectRuntime(record.ref);
+    const before = await backend.readStateRevision(record.ref);
+    await expect(
+      backend.updateSession(record.ref, { patch: { mode: "plan" }, expectedRevision: before }),
+    ).resolves.toEqual({ revision: before + 1 });
+    await expect(backend.readSession(record.ref)).resolves.toMatchObject({ mode: "plan" });
+
+    await runtime.prompt({ content: [{ text: "Start the run", type: "text" }] });
+    const queuedRevision = await backend.readStateRevision(record.ref);
+    await expect(
+      backend.updateSession(record.ref, {
+        patch: { mode: null },
+        expectedRevision: queuedRevision,
+      }),
+    ).resolves.toEqual({ revision: queuedRevision });
+    await expect(backend.readSession(record.ref)).resolves.toMatchObject({ mode: "plan" });
+    await expectCode(
+      () => backend.updateSession(record.ref, { patch: { mode: "interactive" } }),
+      "invalid_argument",
+    );
+    await backend.close();
+  });
+
+  test("does not advertise plan.select without the plan-mode seam", async () => {
+    const backend = createBackend(new TestDsh());
+    await expect((await backend.listDrivers())[0]?.capabilities).not.toContain("plan.select");
+    await backend.close();
+  });
+
   test("keeps a pending approval visible when native DSH cancel fails", async () => {
     const testDsh = new TestDsh(true);
     const backend = createBackend(testDsh);
@@ -883,7 +1787,7 @@ describe("DSH local backend", () => {
     const events: AgentSessionEvent[] = [];
     runtime.subscribe((native) => events.push(native));
 
-    await runtime.prompt({ text: "Start a run" });
+    await runtime.prompt({ content: [{ text: "Start a run", type: "text" }] });
     testDsh.emitApproval(approvalRequested("approval-cancel", "delete"));
     await waitFor(() => pendingPermissionIds(events).join(",") === "approval-cancel");
     testDsh.agent("created-session").cancelFailure = true;
@@ -991,7 +1895,9 @@ describe("DSH local backend", () => {
     const firstEvents: AgentSessionEvent[] = [];
     firstRuntime.subscribe((native) => firstEvents.push(native));
 
-    const receipt = await firstRuntime.prompt({ text: "Keep running" });
+    const receipt = await firstRuntime.prompt({
+      content: [{ text: "Keep running", type: "text" }],
+    });
     expect(receipt).toMatchObject({ acceptedAt: FIXED_TIME, runId: "turn-1" });
     expect(testDsh.agent("created-session").followups).toHaveLength(1);
     testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
@@ -1123,13 +2029,20 @@ describe("DSH local backend", () => {
 
     const runtime = await backend.connectRuntime(record.ref);
     await expectCode(
-      () => runtime.prompt({ delivery: "follow_up", text: "Queued before a run" }),
+      () =>
+        runtime.prompt({
+          content: [{ text: "Queued before a run", type: "text" }],
+          delivery: "follow_up",
+        }),
       "conflict",
     );
     expect(testDsh.agent("created-session").followups).toHaveLength(0);
 
-    await runtime.prompt({ text: "Start" });
-    const queued = await runtime.prompt({ delivery: "steer", text: "Change direction" });
+    await runtime.prompt({ content: [{ text: "Start", type: "text" }] });
+    const queued = await runtime.prompt({
+      content: [{ text: "Change direction", type: "text" }],
+      delivery: "steer",
+    });
     expect(String(queued.runId)).toBe("turn-1");
     expect(testDsh.agent("created-session").steers).toHaveLength(1);
     expect(await runtime.cancel({ keepInbox: true })).toEqual({ cancelled: true });

@@ -29,13 +29,23 @@ async function rejected(operation: () => Promise<unknown>): Promise<unknown> {
   throw new Error("Expected the operation to reject");
 }
 
+function params(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
 class FakeV2Transport {
-  readonly methods = ORBIS_REMOTE_AGENT_V2_METHOD_LIST;
+  readonly methods: readonly string[];
   readonly requests: Array<{ readonly method: string; readonly params: JsonValue }> = [];
+  readonly requestSignals: Array<AbortSignal | undefined> = [];
   private readonly closeListeners = new Set<() => void>();
   private readonly eventListeners = new Set<(event: TransportEvent) => void>();
   private readonly errors = new Map<string, unknown>();
   private readonly responses = new Map<string, JsonValue>();
+  private readonly responders = new Map<string, (params: JsonValue) => JsonValue>();
+
+  constructor(methods: readonly string[] = ORBIS_REMOTE_AGENT_V2_METHOD_LIST) {
+    this.methods = methods;
+  }
 
   close(): void {
     for (const listener of this.closeListeners) listener();
@@ -55,10 +65,17 @@ class FakeV2Transport {
     return () => this.eventListeners.delete(listener);
   }
 
-  async request(method: string, params: JsonValue): Promise<JsonValue> {
+  async request(
+    method: string,
+    params: JsonValue,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<JsonValue> {
     this.requests.push({ method, params });
+    this.requestSignals.push(options?.signal);
     const error = this.errors.get(method);
     if (error !== undefined) throw error;
+    const responder = this.responders.get(method);
+    if (responder !== undefined) return responder(params);
     const response = this.responses.get(method);
     if (response === undefined) throw new Error(`Missing response for ${method}`);
     return response;
@@ -71,6 +88,25 @@ class FakeV2Transport {
   respond(method: string, value: JsonValue): void {
     this.responses.set(method, value);
   }
+
+  respondWith(method: string, responder: (params: JsonValue) => JsonValue): void {
+    this.responders.set(method, responder);
+  }
+}
+
+function subagentHelloResult(): JsonValue {
+  const result = helloResult() as unknown as {
+    readonly drivers: readonly Record<string, JsonValue>[];
+  };
+  return {
+    ...result,
+    drivers: [
+      {
+        ...result.drivers[0],
+        capabilities: ["session.subagents.list"],
+      },
+    ],
+  };
 }
 
 function helloResult(): JsonValue {
@@ -92,6 +128,50 @@ function helloResult(): JsonValue {
     hostRevision: "revision-a",
     limits: { maxPromptBytes: 1024, maxReplayBatch: 16, maxSnapshotWindow: 16 },
     version: 2,
+  };
+}
+
+function attachmentHelloResult(
+  input: {
+    readonly maxImageBytes?: number;
+    readonly downloadChunkBytes?: number;
+    readonly uploadChunkBytes?: number;
+  } = {},
+): JsonValue {
+  return {
+    capabilities: {
+      attachments: {
+        downloadChunkBytes: input.downloadChunkBytes ?? 3,
+        maxImageBytes: input.maxImageBytes ?? 6,
+        maxImagesPerMessage: 4,
+        maxMessageImageBytes: 12,
+        mimeTypes: ["image/png"],
+        uploadChunkBytes: input.uploadChunkBytes ?? 3,
+      },
+      dispose: false,
+      fork: false,
+      presence: false,
+    },
+    drivers: [{ capabilities: [], displayName: "DeepSeek Harness", id: "dsh" }],
+    hostId: "remote:host-a",
+    hostRevision: "revision-a",
+    limits: { maxPromptBytes: 1024, maxReplayBatch: 16, maxSnapshotWindow: 16 },
+    version: 2,
+  };
+}
+
+function referenceHelloResult(): JsonValue {
+  const result = helloResult() as unknown as {
+    readonly drivers: readonly Record<string, JsonValue>[];
+  };
+  return {
+    ...result,
+    drivers: [
+      {
+        ...result.drivers[0],
+        capabilities: ["prompt.references.files", "prompt.references.sessions"],
+      },
+    ],
   };
 }
 
@@ -392,6 +472,216 @@ test("v2 connection decodes tool state and tool input events", async () => {
   ]);
 });
 
+test("v2 connection round-trips canonical question responses and whole work state", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion, { accepted: true });
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync, {
+    entries: [],
+    hasOlder: false,
+    hostRevision: "revision-question",
+    kind: "snapshot",
+    oldestCursor: 0,
+    state: {
+      configOptions: [],
+      createdAt: "2026-08-11T00:00:00.000Z",
+      cwd: null,
+      leafEntryId: null,
+      mode: "plan",
+      model: null,
+      pendingInputs: [],
+      pendingPermissions: [],
+      pendingQuestions: [
+        {
+          questions: [
+            {
+              multiSelect: false,
+              options: [{ label: "Approve", optionId: "approve" }],
+              question: "Continue?",
+              questionId: "plan-review",
+            },
+          ],
+          requestId: "question-1",
+          requestedAt: "2026-08-11T00:00:00.000Z",
+        },
+      ],
+      ref: {
+        backendId: ref.backendId,
+        driverId: ref.driverId,
+        nativeSessionId: ref.nativeSessionId,
+        sessionId: ref.sessionId,
+      },
+      revision: 1,
+      runState: "idle",
+      title: null,
+      updatedAt: "2026-08-11T00:00:00.000Z",
+      workState: {
+        goal: null,
+        todos: [{ content: "Review", status: "pending" }],
+      },
+      workspaceRef: null,
+    },
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  await expect(
+    connection.respondQuestion({
+      idempotencyKey: "question-response-1",
+      ref,
+      requestId: "question-1",
+      response: { kind: "cancelled" },
+    }),
+  ).resolves.toEqual({ accepted: true });
+  const sync = await connection.sync({ mode: "once", ref });
+
+  expect(sync).toMatchObject({
+    state: {
+      mode: "plan",
+      pendingQuestions: [{ requestId: "question-1" }],
+      workState: { goal: null, todos: [{ content: "Review", status: "pending" }] },
+    },
+  });
+  expect(transport.requests.at(-2)).toEqual({
+    method: ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion,
+    params: {
+      idempotencyKey: "question-response-1",
+      ref: {
+        backendId: ref.backendId,
+        driverId: ref.driverId,
+        nativeSessionId: ref.nativeSessionId,
+        sessionId: ref.sessionId,
+      },
+      requestId: "question-1",
+      response: { kind: "cancelled" },
+    },
+  });
+});
+
+test("v2 connection uploads canonical chunks with raw-byte offsets", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, attachmentHelloResult());
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadBegin, { uploadId: "upload-1" });
+  transport.respondWith(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk, (params) => {
+    const input = params as { readonly data: string; readonly offset: number };
+    const chunkBytes = input.data === "AQID" || input.data === "BAUG" ? 3 : 0;
+    return { nextOffset: input.offset + chunkBytes, uploadId: "upload-1" };
+  });
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadFinish, {
+    uploadId: "upload-1",
+  });
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadAbort, {
+    aborted: true,
+    uploadId: "upload-1",
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  await expect(
+    connection.uploadAttachment({
+      data: "AQIDBAUG",
+      mimeType: "image/png",
+      ref,
+      totalBytes: 6,
+      uploadId: "upload-1",
+    }),
+  ).resolves.toEqual({ uploadId: "upload-1" });
+  expect(
+    transport.requests
+      .filter(({ method }) => method === ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsUploadChunk)
+      .map(({ params }) => params as { readonly data: string; readonly offset: number }),
+  ).toEqual([
+    expect.objectContaining({ data: "AQID", offset: 0 }),
+    expect.objectContaining({ data: "BAUG", offset: 3 }),
+  ]);
+  await expect(connection.abortAttachment("upload-1")).resolves.toEqual({
+    aborted: true,
+    uploadId: "upload-1",
+  });
+});
+
+test("v2 connection reconstructs bounded attachment reads and rejects unstable metadata", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, attachmentHelloResult());
+  transport.respondWith(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead, (params) => {
+    const input = params as { readonly offset: number };
+    return input.offset === 0
+      ? {
+          attachmentId: "attachment-1",
+          bytes: 6,
+          data: "AQID",
+          eof: false,
+          height: 2,
+          mimeType: "image/png",
+          name: "image.png",
+          nextOffset: 3,
+          width: 3,
+        }
+      : {
+          attachmentId: "attachment-1",
+          bytes: 6,
+          data: "BAUG",
+          eof: true,
+          height: 2,
+          mimeType: "image/png",
+          name: "image.png",
+          nextOffset: 6,
+          width: 3,
+        };
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  await expect(connection.readAttachment(ref, "attachment-1")).resolves.toEqual({
+    attachmentId: "attachment-1",
+    bytes: 6,
+    data: "AQIDBAUG",
+    height: 2,
+    mimeType: "image/png",
+    name: "image.png",
+    width: 3,
+  });
+
+  const oversized = new FakeV2Transport();
+  oversized.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, attachmentHelloResult());
+  oversized.respond(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead, {
+    attachmentId: "attachment-oversized",
+    bytes: 7,
+    data: "AQID",
+    eof: false,
+    mimeType: "image/png",
+    nextOffset: 3,
+  });
+  const oversizedConnection = new OrbisRemoteAgentV2Connection(oversized);
+  await oversizedConnection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  expect(
+    await rejected(() => oversizedConnection.readAttachment(ref, "attachment-oversized")),
+  ).toMatchObject({
+    code: "protocol",
+  });
+
+  const unstable = new FakeV2Transport();
+  unstable.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, attachmentHelloResult());
+  unstable.respondWith(ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead, (params) => {
+    const input = params as { readonly offset: number };
+    return {
+      attachmentId: "attachment-unstable",
+      bytes: 6,
+      data: input.offset === 0 ? "AQID" : "BAUG",
+      eof: input.offset !== 0,
+      mimeType: "image/png",
+      name: input.offset === 0 ? "first.png" : "changed.png",
+      nextOffset: input.offset + 3,
+    };
+  });
+  const unstableConnection = new OrbisRemoteAgentV2Connection(unstable);
+  await unstableConnection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  expect(
+    await rejected(() => unstableConnection.readAttachment(ref, "attachment-unstable")),
+  ).toMatchObject({
+    code: "protocol",
+  });
+});
+
 test("v2 connection preserves protocol failures returned by the host", async () => {
   const transport = new FakeV2Transport();
   transport.reject(
@@ -430,6 +720,146 @@ test("ignores unknown state/transient events but rejects unknown replayable even
   transport.emit(unknownSessionEvent("replayable", "entry.future"));
   expect(errors).toMatchObject([{ code: "protocol" }]);
   expect(deliveries).toHaveLength(0);
+});
+
+test("v2 prompt reference completion selects the source method and forwards cancellation", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, referenceHelloResult());
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles, {
+    candidates: [{ insertText: "@src/", kind: "directory", label: "src" }],
+    end: 8,
+    start: 4,
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  const signal = new AbortController().signal;
+  await expect(
+    connection.completePromptReferences({
+      cursor: 8,
+      limit: 4,
+      ref,
+      signal,
+      source: "files",
+      text: "See @src",
+    }),
+  ).resolves.toMatchObject({ start: 4, end: 8 });
+  expect(transport.requests.at(-1)).toEqual({
+    method: ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles,
+    params: {
+      cursor: 8,
+      limit: 4,
+      ref: {
+        backendId: ref.backendId,
+        driverId: ref.driverId,
+        nativeSessionId: ref.nativeSessionId,
+        sessionId: ref.sessionId,
+      },
+      source: "files",
+      text: "See @src",
+    },
+  });
+});
+
+test("v2 subagent listing gates the driver and validates nested stable order", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, subagentHelloResult());
+  transport.respond(
+    ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList,
+    params({
+      entries: [
+        {
+          activity: "running",
+          depth: 1,
+          hasChildren: true,
+          kind: "child",
+          label: "Worker",
+          mode: "continuable",
+          parentRef: ref,
+          ref: { ...ref, nativeSessionId: "native-child", sessionId: "child" },
+        },
+        {
+          depth: 2,
+          kind: "diagnostic",
+          parentRef: { ...ref, nativeSessionId: "native-child", sessionId: "child" },
+          reason: "unavailable",
+          ref: { ...ref, nativeSessionId: "native-diagnostic", sessionId: "diagnostic" },
+        },
+      ],
+    }),
+  );
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  const controller = new AbortController();
+  const entries = await connection.listSessionSubagents(ref, controller.signal);
+
+  expect(entries.map((entry) => entry.ref.sessionId)).toEqual(["child", "diagnostic"]);
+  expect(transport.requests.at(-1)).toMatchObject({
+    method: ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList,
+    params: { ref },
+  });
+  expect(transport.requestSignals.at(-1)).toBe(controller.signal);
+});
+
+test("v2 subagent listing rejects an unadvertised driver capability", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  expect(await rejected(() => connection.listSessionSubagents(ref))).toMatchObject({
+    code: "unsupported",
+  });
+  expect(transport.requests).toHaveLength(1);
+});
+
+test("v2 subagent listing rejects a host that does not advertise the method", async () => {
+  const transport = new FakeV2Transport(
+    ORBIS_REMOTE_AGENT_V2_METHOD_LIST.filter(
+      (method) => method !== ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSubagentsList,
+    ),
+  );
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, subagentHelloResult());
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  expect(await rejected(() => connection.listSessionSubagents(ref))).toMatchObject({
+    code: "unsupported",
+  });
+  expect(transport.requests).toHaveLength(1);
+});
+
+test("v2 prompt reference completion rejects unsupported drivers and mixed source candidates", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, referenceHelloResult());
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesSessions, {
+    candidates: [{ insertText: "@path", kind: "file", label: "path" }],
+    end: 8,
+    start: 4,
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+  expect(
+    await rejected(() =>
+      connection.completePromptReferences({
+        cursor: 8,
+        limit: 4,
+        ref: { ...ref, driverId: "other" as typeof ref.driverId },
+        source: "files",
+        text: "See @src",
+      }),
+    ),
+  ).toMatchObject({ code: "unsupported" });
+  expect(
+    await rejected(() =>
+      connection.completePromptReferences({
+        cursor: 8,
+        limit: 4,
+        ref,
+        source: "sessions",
+        text: "See @src",
+      }),
+    ),
+  ).toMatchObject({ code: "protocol" });
 });
 
 test("v2 sync validates the cursor and entry identity pair", async () => {
@@ -491,6 +921,7 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
       model: null,
       pendingInputs: [],
       pendingPermissions: [],
+      pendingQuestions: [],
       ref: {
         backendId: ref.backendId,
         driverId: ref.driverId,
@@ -502,6 +933,7 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
       title: null,
       updatedAt: "2026-08-11T00:00:00.000Z",
       workspaceRef: null,
+      workState: { goal: null, todos: [] },
     },
   });
   const connection = new OrbisRemoteAgentV2Connection(transport);

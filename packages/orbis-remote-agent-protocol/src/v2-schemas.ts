@@ -22,11 +22,75 @@ const boundedPermissionDetail = z
     }
     return true;
   });
+const boundedQuestionText = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .refine((value) => value.trim().length > 0)
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code === 0x7f || (code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d)) {
+        return false;
+      }
+    }
+    return true;
+  });
+const boundedQuestionDetail = z
+  .string()
+  .min(1)
+  .max(65_536)
+  .refine((value) => value.trim().length > 0)
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code === 0x7f || (code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d)) {
+        return false;
+      }
+    }
+    return true;
+  });
+const boundedQuestionSingleLine = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .refine((value) => value.trim().length > 0)
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code <= 0x1f || code === 0x7f) return false;
+    }
+    return true;
+  });
 const safeInteger = z.number().int().refine(Number.isSafeInteger);
 const nonNegativeInteger = safeInteger.min(0);
 const positiveInteger = safeInteger.min(1);
 const timestamp = nonEmptyString;
 const jsonObject = z.record(z.string(), jsonValueSchema);
+const boundedReferenceText = z
+  .string()
+  .max(65_536)
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code === 0x7f || (code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d)) {
+        return false;
+      }
+    }
+    return true;
+  });
+const boundedReferenceDisplay = z
+  .string()
+  .min(1)
+  .max(4_096)
+  .refine((value) => value === value.trim())
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code <= 0x1f || code === 0x7f) return false;
+    }
+    return true;
+  });
 
 export const v2RefSchema = z
   .object({
@@ -101,7 +165,23 @@ export const v2SessionConfigOptionSchema = z
 export const v2ContentBlockSchema = z.discriminatedUnion("type", [
   z.object({ text: z.string(), type: z.literal("text") }).passthrough(),
   z
-    .object({ data: nonEmptyString, mimeType: nonEmptyString, type: z.literal("image") })
+    .object({
+      data: nonEmptyString,
+      mimeType: nonEmptyString,
+      name: nonEmptyString.optional(),
+      type: z.literal("image"),
+    })
+    .passthrough(),
+  z
+    .object({
+      attachmentId: nonEmptyString,
+      bytes: positiveInteger.optional(),
+      height: positiveInteger.optional(),
+      mimeType: nonEmptyString,
+      name: nonEmptyString.optional(),
+      type: z.literal("image_reference"),
+      width: positiveInteger.optional(),
+    })
     .passthrough(),
   z
     .object({ redacted: z.boolean().optional(), text: z.string(), type: z.literal("thinking") })
@@ -117,6 +197,19 @@ export const v2ContentBlockSchema = z.discriminatedUnion("type", [
   z
     .object({ name: nonEmptyString, type: z.literal("resource"), uri: nonEmptyString })
     .passthrough(),
+]);
+
+/** Prompt transport deliberately accepts only text and completed-upload refs. */
+export const v2PromptContentBlockSchema = z.discriminatedUnion("type", [
+  z.object({ text: z.string(), type: z.literal("text") }).strict(),
+  z
+    .object({
+      uploadId: nonEmptyString,
+      mimeType: nonEmptyString,
+      name: nonEmptyString.optional(),
+      type: z.literal("image_upload"),
+    })
+    .strict(),
 ]);
 
 export const v2StreamingContentBlockSchema = z.discriminatedUnion("type", [
@@ -256,6 +349,135 @@ export const v2PermissionSchema = z
     }
   });
 
+const v2QuestionOptionSchema = z
+  .object({
+    description: boundedQuestionText.optional(),
+    label: boundedQuestionSingleLine,
+    optionId: boundedPermissionId,
+  })
+  .passthrough();
+
+const v2QuestionItemSchema = z
+  .object({
+    detail: boundedQuestionDetail.optional(),
+    header: boundedQuestionSingleLine.optional(),
+    intent: z
+      .object({ kind: z.literal("plan-review"), approveOptionId: boundedPermissionId })
+      .passthrough()
+      .optional(),
+    multiSelect: z.boolean(),
+    options: z.array(v2QuestionOptionSchema).max(32),
+    question: boundedQuestionText,
+    questionId: boundedPermissionId,
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const optionIds = new Set(value.options.map((option) => option.optionId));
+    if (optionIds.size !== value.options.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Question option ids must be unique",
+      });
+    }
+    if (value.intent !== undefined && value.detail === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Plan-review questions require detail",
+      });
+    }
+    if (value.intent !== undefined && !optionIds.has(value.intent.approveOptionId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Question approve option id must reference an option",
+      });
+    }
+  });
+
+export const v2QuestionRequestSchema = z
+  .object({
+    questions: z.array(v2QuestionItemSchema).min(1).max(32),
+    requestedAt: timestamp,
+    requestId: boundedPermissionId,
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const questionIds = new Set(value.questions.map((question) => question.questionId));
+    if (questionIds.size !== value.questions.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Question ids must be unique" });
+    }
+  });
+
+const v2QuestionAnswerItemSchema = z
+  .object({
+    customText: boundedQuestionDetail.optional(),
+    optionIds: z.array(boundedPermissionId),
+    questionId: boundedPermissionId,
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    if (new Set(value.optionIds).size !== value.optionIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Question answer option ids must be unique",
+      });
+    }
+  });
+
+export const v2QuestionResponseSchema = z.discriminatedUnion("kind", [
+  z
+    .object({ answers: z.array(v2QuestionAnswerItemSchema), kind: z.literal("answered") })
+    .passthrough(),
+  z.object({ kind: z.literal("cancelled") }).passthrough(),
+]);
+
+const v2WorkStateGoalSchema = z
+  .object({
+    blockedReason: z
+      .object({ code: boundedPermissionId, message: boundedQuestionDetail })
+      .passthrough()
+      .optional(),
+    createdAt: timestamp,
+    id: boundedPermissionId,
+    maxGoalRounds: positiveInteger,
+    objective: boundedQuestionDetail,
+    phase: z.enum(["active", "blocked", "complete", "paused"]),
+    revision: positiveInteger,
+    roundsStarted: nonNegativeInteger,
+    updatedAt: timestamp,
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    if (value.phase === "blocked" && value.blockedReason === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Blocked goals require a reason" });
+    }
+    if (value.phase !== "blocked" && value.blockedReason !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Only blocked goals may have a reason",
+      });
+    }
+  });
+
+const v2TodoSchema = z
+  .object({
+    content: boundedQuestionSingleLine,
+    status: z.enum(["pending", "in_progress", "completed"]),
+  })
+  .passthrough();
+
+const v2WorkStateSchema = z
+  .object({
+    goal: v2WorkStateGoalSchema.nullable(),
+    todos: z.array(v2TodoSchema).max(256),
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const contents = new Set(value.todos.map((todo) => todo.content));
+    if (contents.size !== value.todos.length) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Todo contents must be unique" });
+    }
+  });
+
 export const v2StateSchema = z
   .object({
     activeRun: v2RunSummarySchema.nullable().optional(),
@@ -268,6 +490,7 @@ export const v2StateSchema = z
     model: v2ModelSchema.nullable(),
     pendingInputs: z.array(v2QueuedInputSchema),
     pendingPermissions: z.array(v2PermissionSchema),
+    pendingQuestions: z.array(v2QuestionRequestSchema),
     ref: v2RefSchema,
     revision: nonNegativeInteger,
     runState: z.enum(["idle", "running", "suspended", "error"]),
@@ -275,6 +498,7 @@ export const v2StateSchema = z
     updatedAt: timestamp,
     usageTotal: v2UsageSchema.nullable().optional(),
     workspaceRef: z.string().nullable(),
+    workState: v2WorkStateSchema,
   })
   .passthrough();
 
@@ -289,11 +513,13 @@ export const v2StatePatchSchema = z
     model: v2ModelSchema.nullable().optional(),
     pendingInputs: z.array(v2QueuedInputSchema).optional(),
     pendingPermissions: z.array(v2PermissionSchema).optional(),
+    pendingQuestions: z.array(v2QuestionRequestSchema).optional(),
     runState: z.enum(["idle", "running", "suspended", "error"]).optional(),
     title: z.string().nullable().optional(),
     updatedAt: timestamp.optional(),
     usageTotal: v2UsageSchema.nullable().optional(),
     workspaceRef: z.string().nullable().optional(),
+    workState: v2WorkStateSchema.optional(),
   })
   .passthrough();
 
@@ -377,7 +603,16 @@ export const v2HelloResultSchema = z
       .object({
         attachments: z.union([
           z.literal(false),
-          z.object({ maxBytes: positiveInteger, mimeTypes: z.array(nonEmptyString) }).passthrough(),
+          z
+            .object({
+              downloadChunkBytes: positiveInteger,
+              maxImageBytes: positiveInteger,
+              maxImagesPerMessage: positiveInteger,
+              maxMessageImageBytes: positiveInteger,
+              mimeTypes: z.array(nonEmptyString).min(1),
+              uploadChunkBytes: positiveInteger,
+            })
+            .passthrough(),
         ]),
         dispose: z.boolean(),
         fork: z.boolean(),
@@ -403,6 +638,83 @@ export const v2ListInputSchema = z
     limit: positiveInteger.max(1_000).optional(),
   })
   .passthrough();
+
+const boundedSubagentId = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => value === value.trim())
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code <= 0x1f || code === 0x7f) return false;
+    }
+    return true;
+  });
+
+const boundedSubagentLabel = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine((value) => value === value.trim())
+  .refine((value) => {
+    for (const character of value) {
+      const code = character.charCodeAt(0);
+      if (code <= 0x1f || code === 0x7f) return false;
+    }
+    return true;
+  });
+
+const v2SubagentRefSchema = z
+  .object({
+    backendId: boundedSubagentId,
+    driverId: boundedSubagentId,
+    nativeSessionId: boundedSubagentId,
+    sessionId: boundedSubagentId,
+  })
+  .strict();
+
+const v2SubagentChildSchema = z
+  .object({
+    activity: z.enum(["inactive", "running"]),
+    depth: positiveInteger.max(1024),
+    hasChildren: z.boolean(),
+    kind: z.literal("child"),
+    label: boundedSubagentLabel.optional(),
+    mode: z.enum(["continuable", "one-shot"]),
+    parentRef: v2SubagentRefSchema,
+    ref: v2SubagentRefSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.mode === "continuable" && value.label === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Continuable subagents require label",
+      });
+    }
+  });
+
+const v2SubagentDiagnosticSchema = z
+  .object({
+    depth: positiveInteger.max(1024),
+    kind: z.literal("diagnostic"),
+    parentRef: v2SubagentRefSchema,
+    reason: z.enum(["corrupt", "unavailable", "unsupported"]),
+    ref: v2SubagentRefSchema,
+  })
+  .strict();
+
+export const v2SubagentEntrySchema = z.discriminatedUnion("kind", [
+  v2SubagentChildSchema,
+  v2SubagentDiagnosticSchema,
+]);
+
+export const v2SubagentListInputSchema = z.object({ ref: v2SubagentRefSchema }).strict();
+
+export const v2SubagentListResponseSchema = z
+  .object({ entries: z.array(v2SubagentEntrySchema).max(1024) })
+  .strict();
 
 export const v2ModelsListInputSchema = z
   .object({ driverId: nonEmptyString.optional() })
@@ -479,10 +791,84 @@ export const v2CreateInputSchema = z
 
 export const v2PromptInputSchema = z
   .object({
-    content: z.array(v2ContentBlockSchema),
+    content: z.array(v2PromptContentBlockSchema).min(1),
     delivery: z.enum(["steer", "follow_up"]).optional(),
     expectedRevision: nonNegativeInteger.optional(),
     idempotencyKey: nonEmptyString,
+    ref: v2RefSchema,
+  })
+  .passthrough();
+
+export const v2PromptReferenceCompletionInputSchema = z
+  .object({
+    cursor: nonNegativeInteger,
+    limit: positiveInteger.max(64),
+    ref: v2RefSchema,
+    source: z.enum(["files", "sessions"]),
+    text: boundedReferenceText,
+  })
+  .passthrough();
+
+export const v2PromptReferenceCompletionResultSchema = z
+  .object({
+    candidates: z
+      .array(
+        z
+          .object({
+            detail: boundedReferenceDisplay.max(2_048).optional(),
+            insertText: boundedReferenceDisplay,
+            kind: z.enum(["directory", "file", "session"]),
+            label: boundedReferenceDisplay.max(512),
+          })
+          .strict(),
+      )
+      .max(64),
+    end: nonNegativeInteger,
+    start: nonNegativeInteger,
+  })
+  .strict();
+
+export const v2PromptReferenceCompletionResponseSchema =
+  v2PromptReferenceCompletionResultSchema.nullable();
+
+export const v2AttachmentUploadBeginInputSchema = z
+  .object({
+    idempotencyKey: nonEmptyString,
+    mimeType: nonEmptyString,
+    name: nonEmptyString.optional(),
+    ref: v2RefSchema,
+    totalBytes: positiveInteger,
+    uploadId: boundedPermissionId,
+  })
+  .passthrough();
+
+export const v2AttachmentUploadChunkInputSchema = z
+  .object({
+    data: nonEmptyString,
+    idempotencyKey: nonEmptyString,
+    offset: nonNegativeInteger,
+    uploadId: boundedPermissionId,
+  })
+  .passthrough();
+
+export const v2AttachmentUploadFinishInputSchema = z
+  .object({
+    idempotencyKey: nonEmptyString,
+    uploadId: boundedPermissionId,
+  })
+  .passthrough();
+
+export const v2AttachmentUploadAbortInputSchema = z
+  .object({
+    idempotencyKey: nonEmptyString,
+    uploadId: boundedPermissionId,
+  })
+  .passthrough();
+
+export const v2AttachmentReadInputSchema = z
+  .object({
+    attachmentId: boundedPermissionId,
+    offset: nonNegativeInteger,
     ref: v2RefSchema,
   })
   .passthrough();
@@ -526,6 +912,15 @@ export const v2PermissionResponseInputSchema = z
     optionId: boundedPermissionId,
     ref: v2RefSchema,
     requestId: boundedPermissionId,
+  })
+  .passthrough();
+
+export const v2QuestionResponseInputSchema = z
+  .object({
+    idempotencyKey: boundedPermissionId,
+    ref: v2RefSchema,
+    requestId: boundedPermissionId,
+    response: v2QuestionResponseSchema,
   })
   .passthrough();
 

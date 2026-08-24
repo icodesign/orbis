@@ -4,6 +4,8 @@ import { stat } from "node:fs/promises";
 export interface DshCatalogHeader {
   readonly createdAt: number;
   readonly id: unknown;
+  readonly origin?: "subagent";
+  readonly parentSession?: unknown;
 }
 
 export interface DshCatalogPersistence {
@@ -15,6 +17,8 @@ export interface DshCatalogPersistence {
 export interface DshSessionCatalogEntry {
   readonly createdAt: number;
   readonly id: unknown;
+  readonly origin?: "subagent";
+  readonly parentSession?: unknown;
   readonly title?: string;
   readonly updatedAt: number;
 }
@@ -39,7 +43,7 @@ export async function listDshSessionCatalog(
   persistence: DshCatalogPersistence,
   projectionCache: DshSessionProjectionCache,
 ): Promise<readonly DshSessionCatalogEntry[]> {
-  const headers = await persistence.list();
+  const headers = (await persistence.list()).filter((header) => header.origin !== "subagent");
   return await Promise.all(
     headers.map(async (header) => {
       let updatedAt = header.createdAt;
@@ -56,6 +60,8 @@ export async function listDshSessionCatalog(
       return {
         createdAt: header.createdAt,
         id: header.id,
+        ...(header.origin === undefined ? {} : { origin: header.origin }),
+        ...(header.parentSession === undefined ? {} : { parentSession: header.parentSession }),
         ...(title === undefined ? {} : { title }),
         updatedAt,
       };

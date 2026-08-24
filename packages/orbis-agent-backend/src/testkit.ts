@@ -16,6 +16,7 @@ import type {
   AgentWorkspaceRegisterResult,
   AgentPromptInput,
   AgentPromptReceipt,
+  AgentRuntimeStatusListener,
   AgentRuntimeStatus,
   AgentSessionCreateInput,
   AgentSessionListInput,
@@ -25,9 +26,15 @@ import type {
   AgentSessionUpdateInput,
   AgentSessionUpdateResult,
 } from "./backend";
+import type { AgentSessionSubagentEntry } from "./subagents";
+import type {
+  AgentPromptReferenceCompletionInput,
+  AgentPromptReferenceCompletionResult,
+} from "./references";
 import type { AgentDriverDescriptor } from "./capabilities";
 import { AgentBackendError } from "./errors";
 import type {
+  AgentAttachmentReadResult,
   AgentEntryAppendedEvent,
   AgentEntryDeltaEvent,
   AgentRunOutcome,
@@ -37,6 +44,8 @@ import type {
   AgentSessionStateChangedEvent,
   AgentPermissionResponseInput,
   AgentPermissionResponseResult,
+  AgentQuestionResponseInput,
+  AgentQuestionResponseResult,
 } from "./events";
 import {
   agentDeliveryCursor,
@@ -248,6 +257,13 @@ export class FakeAgentBackend implements AgentBackend, FakeRuntimeHost {
     return input.limit === undefined ? sessions : sessions.slice(0, input.limit);
   }
 
+  async listSessionSubagents(
+    _ref: AgentSessionRef,
+    _signal?: AbortSignal,
+  ): Promise<readonly AgentSessionSubagentEntry[]> {
+    throw new AgentBackendError("unsupported", "The fake backend cannot list session subagents");
+  }
+
   async readSession(ref: AgentSessionRef): Promise<AgentSessionProjection> {
     this.assertOpen();
     this.recordFor(ref);
@@ -258,6 +274,20 @@ export class FakeAgentBackend implements AgentBackend, FakeRuntimeHost {
       });
     }
     return projection;
+  }
+
+  async completePromptReferences(
+    _input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined> {
+    throw new AgentBackendError("unsupported", "The fake backend cannot complete prompt references");
+  }
+
+  async readAttachment(
+    _ref: AgentSessionRef,
+    _attachmentId: string,
+    _signal?: AbortSignal,
+  ): Promise<AgentAttachmentReadResult> {
+    throw new AgentBackendError("unsupported", "The fake backend cannot read attachments");
   }
 
   async updateSession(
@@ -413,6 +443,14 @@ export class FakeAgentHarnessDriver implements AgentHarnessDriver {
     return this.backend.listSessions({ ...input, driverId: this.descriptor.id });
   }
 
+  async listSessionSubagents(
+    ref: AgentSessionRef,
+    signal?: AbortSignal,
+  ): Promise<readonly AgentSessionSubagentEntry[]> {
+    this.assertRef(ref);
+    return this.backend.listSessionSubagents(ref, signal);
+  }
+
   async listModels(): Promise<readonly AgentModelMetadata[]> {
     return this.backend.listModels({ driverId: this.descriptor.id });
   }
@@ -424,6 +462,22 @@ export class FakeAgentHarnessDriver implements AgentHarnessDriver {
   async readSession(ref: AgentSessionRef): Promise<AgentSessionProjection> {
     this.assertRef(ref);
     return this.backend.readSession(ref);
+  }
+
+  async completePromptReferences(
+    input: AgentPromptReferenceCompletionInput,
+  ): Promise<AgentPromptReferenceCompletionResult | undefined> {
+    this.assertRef(input.ref);
+    return this.backend.completePromptReferences(input);
+  }
+
+  async readAttachment(
+    ref: AgentSessionRef,
+    attachmentId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentAttachmentReadResult> {
+    this.assertRef(ref);
+    return this.backend.readAttachment(ref, attachmentId, signal);
   }
 
   async updateSession(
@@ -451,6 +505,7 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
   private stateRevision = 0;
   private readonly deltaSequence = new Map<string, number>();
   private readonly listeners = new Set<AgentSessionEventListener>();
+  private readonly statusListeners = new Set<AgentRuntimeStatusListener>();
   private status: AgentRuntimeStatus;
 
   constructor(
@@ -480,12 +535,18 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     return { accepted: false };
   }
 
+  async respondQuestion(_input: AgentQuestionResponseInput): Promise<AgentQuestionResponseResult> {
+    this.assertOpen();
+    return { accepted: false };
+  }
+
   async close(): Promise<void> {
     if (this.status === "closed") return;
-    this.status = "closed";
+    this.setStatus("closed");
     this.activeRunId = undefined;
     this.activeRunStartedAt = undefined;
     this.listeners.clear();
+    this.statusListeners.clear();
   }
 
   async commitAssistantText(text: string): Promise<AgentEntryAppendedEvent> {
@@ -570,13 +631,13 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     const previousStatus = this.status;
     this.activeRunId = undefined;
     this.activeRunStartedAt = undefined;
-    this.status = outcome === "failed" ? "error" : "ready";
+    this.setStatus(outcome === "failed" ? "error" : "ready");
     try {
       this.host.commit(this, event);
     } catch (error) {
       this.activeRunId = runId;
       this.activeRunStartedAt = event.payload.patch.lastRun?.startedAt;
-      this.status = previousStatus;
+      this.setStatus(previousStatus);
       throw error;
     }
     return event;
@@ -586,9 +647,23 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     return this.status;
   }
 
+  /** Allows mobile/runtime tests to model a transport lifecycle transition. */
+  setStatusForTest(status: AgentRuntimeStatus): void {
+    this.setStatus(status);
+  }
+
+  observeStatus(listener: AgentRuntimeStatusListener): () => void {
+    this.statusListeners.add(listener);
+    this.notifyStatus(listener, this.status);
+    return () => this.statusListeners.delete(listener);
+  }
+
   async prompt(input: AgentPromptInput): Promise<AgentPromptReceipt> {
     this.assertOpen();
-    if (!input.text.trim()) {
+    if (
+      input.content.length === 0 ||
+      !input.content.some((block) => block.type === "image" || block.text.trim().length > 0)
+    ) {
       throw new AgentBackendError("invalid_argument", "A prompt must not be empty");
     }
     if (this.status === "running") {
@@ -612,12 +687,12 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     const previousStatus = this.status;
     this.activeRunId = runId;
     this.activeRunStartedAt = acceptedAt;
-    this.status = "running";
+    this.setStatus("running");
     try {
       this.host.commit(this, event);
     } catch (error) {
       this.activeRunId = undefined;
-      this.status = previousStatus;
+      this.setStatus(previousStatus);
       throw error;
     }
     return { acceptedAt, runId };
@@ -642,6 +717,20 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
   private assertOpen(): void {
     if (this.status === "closed") {
       throw new AgentBackendError("closed", "The fake runtime is closed");
+    }
+  }
+
+  private setStatus(status: AgentRuntimeStatus): void {
+    if (this.status === status) return;
+    this.status = status;
+    for (const listener of this.statusListeners) this.notifyStatus(listener, status);
+  }
+
+  private notifyStatus(listener: AgentRuntimeStatusListener, status: AgentRuntimeStatus): void {
+    try {
+      listener(status);
+    } catch {
+      // Runtime status observers are passive and cannot own the fake lifecycle.
     }
   }
 }
