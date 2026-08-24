@@ -56,20 +56,11 @@ CI 在每次 push、每个 PR 以及发布前都会运行 `check:core`。`check:
 pnpm changeset
 ```
 
-仓库中的五个包组成一个固定版本组（fixed group），因为 `@orbisapp/remote-dsh` 在构建时会把另外四个
-包打进产物。因此任意一个包的 changeset 都会让五个包一起升版本、一起发布。其中只有
-`@orbisapp/remote-dsh` 会发布到 npm，其余四个是私有包，只升版本不发布。
+## 社群
 
-每次推送到 `main` 都会先跑测试，然后创建或更新一个 **Version packages** PR，其中应用了待发布的
-changeset 并生成 changelog。合并该 PR 即会构建产物，并把 `@orbisapp/remote-dsh` 发布到 npm。
+微信交流群
 
-如果需要手动发布，在干净的 `main` 检出上执行：
-
-```sh
-pnpm install
-pnpm run version:packages   # 应用 changeset，然后提交结果
-pnpm run release            # 构建产物并发布到 npm
-```
+![Wechat group](./assets/wechat-group.webp)
 
 ## 许可证
 

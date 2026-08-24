@@ -58,21 +58,11 @@ user-visible change with a changeset and commit it alongside the change:
 pnpm changeset
 ```
 
-The five workspace packages form one fixed version group, because `@orbisapp/remote-dsh` inlines the
-other four at build time. A changeset for any of them versions and releases all five together.
-Only `@orbisapp/remote-dsh` is published to npm; the rest are private and are versioned only.
+## Community
 
-Every push to `main` runs the tests and then opens or updates a **Version packages** pull request
-that applies the pending changesets and writes the changelogs. Merging that pull request builds the
-bundle and publishes `@orbisapp/remote-dsh` to npm.
+Wechat Group
 
-To release by hand from a clean checkout of `main`:
-
-```sh
-pnpm install
-pnpm run version:packages   # apply changesets, then commit the result
-pnpm run release            # build the bundle and publish to npm
-```
+![Wechat group](./assets/wechat-group.webp)
 
 ## License
 
