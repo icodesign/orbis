@@ -35,6 +35,7 @@ export {
 } from "./backend";
 export {
   AGENT_DRIVER_CAPABILITIES,
+  AGENT_PROMPT_REFERENCE_SYNTAXES,
   createAgentDriverDescriptor,
   hasAgentDriverCapability,
   type AgentDriverAvailability,
@@ -42,6 +43,7 @@ export {
   type AgentDriverCapability,
   type AgentDriverDescriptor,
   type AgentDriverDescriptorInput,
+  type AgentPromptReferenceSyntax,
 } from "./capabilities";
 export {
   AgentBackendError,
@@ -148,6 +150,7 @@ export {
   AGENT_PROMPT_REFERENCE_MAX_LABEL_LENGTH,
   AGENT_PROMPT_REFERENCE_MAX_LIMIT,
   AGENT_PROMPT_REFERENCE_MAX_TEXT_LENGTH,
+  isAgentPromptReferenceActive,
   validateAgentPromptReferenceCompletionInput,
   validateAgentPromptReferenceCompletionResult,
   type AgentPromptReferenceCandidate,

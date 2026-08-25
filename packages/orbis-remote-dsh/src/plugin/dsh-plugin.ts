@@ -21,6 +21,7 @@ import type {} from "@deepseek-ai/dsh-plan-mode";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
+import type {} from "@deepseek-ai/dsh-session-query";
 import type {} from "@deepseek-ai/dsh-session-reference";
 import type { SubagentDescendantListEntry, SubagentRuntime } from "@deepseek-ai/dsh-subagent";
 import type {} from "@deepseek-ai/dsh-subagent";
@@ -59,6 +60,7 @@ export const inject = [
   "sessionPersistence",
   "sessionProjectionCache",
   "sessionReferenceResolver",
+  "sessionQuery",
   "sessions",
   "permissionPresets",
   "workspaceRegistry",

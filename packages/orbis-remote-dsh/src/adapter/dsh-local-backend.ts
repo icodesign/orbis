@@ -872,6 +872,9 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       capabilities,
       displayName: options.driver?.displayName ?? "DeepSeek Harness",
       id: DSH_LOCAL_DRIVER_ID,
+      ...(options.promptReferences === undefined
+        ? {}
+        : { promptReferenceSyntax: "at-token" as const }),
       ...(options.driver?.version === undefined ? {} : { version: options.driver.version }),
     });
     this.clock = options.now ?? defaultNow;
@@ -1179,22 +1182,31 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     input: AgentPromptReferenceCompletionInput,
   ): Promise<AgentPromptReferenceCompletionResult | undefined> {
     this.assertOpen();
-    this.assertDshRef(input.ref);
     const validated = validateAgentPromptReferenceCompletionInput(input);
     const provider = this.options.promptReferences;
     if (provider === undefined) {
       throw new AgentBackendError("unsupported", "DSH prompt reference completion is unavailable");
     }
-    const controller = await this.controllerFor(validated.ref);
     return this.withPublicErrors(async () => {
-      const result = await provider.complete({
-        agent: controller.agentForMode(),
+      const request = {
         cursor: validated.cursor,
         limit: validated.limit,
         ...(validated.signal === undefined ? {} : { signal: validated.signal }),
         source: validated.source,
         text: validated.text,
-      });
+      };
+      const result = await (async () => {
+        if ("ref" in validated) {
+          this.assertDshRef(validated.ref);
+          const controller = await this.controllerFor(validated.ref);
+          return provider.complete({ ...request, agent: controller.agentForMode() });
+        }
+        if (validated.driverId !== this.driverDescriptor.id) {
+          throw new AgentBackendError("invalid_argument", "Reference completion driver is invalid");
+        }
+        const workspace = this.requireWorkspace(validated.workspaceRef);
+        return provider.complete({ ...request, workspacePath: workspace.path });
+      })();
       return validateAgentPromptReferenceCompletionResult(result, validated);
     });
   }

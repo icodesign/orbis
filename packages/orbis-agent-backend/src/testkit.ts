@@ -26,11 +26,6 @@ import type {
   AgentSessionUpdateInput,
   AgentSessionUpdateResult,
 } from "./backend";
-import type { AgentSessionSubagentEntry } from "./subagents";
-import type {
-  AgentPromptReferenceCompletionInput,
-  AgentPromptReferenceCompletionResult,
-} from "./references";
 import type { AgentDriverDescriptor } from "./capabilities";
 import { AgentBackendError } from "./errors";
 import type {
@@ -67,6 +62,11 @@ import {
   createAgentSessionProjection,
   type AgentSessionProjection,
 } from "./projection";
+import type {
+  AgentPromptReferenceCompletionInput,
+  AgentPromptReferenceCompletionResult,
+} from "./references";
+import type { AgentSessionSubagentEntry } from "./subagents";
 
 export interface FakeAgentBackendOptions {
   readonly createEntryId?: () => string;
@@ -279,7 +279,10 @@ export class FakeAgentBackend implements AgentBackend, FakeRuntimeHost {
   async completePromptReferences(
     _input: AgentPromptReferenceCompletionInput,
   ): Promise<AgentPromptReferenceCompletionResult | undefined> {
-    throw new AgentBackendError("unsupported", "The fake backend cannot complete prompt references");
+    throw new AgentBackendError(
+      "unsupported",
+      "The fake backend cannot complete prompt references",
+    );
   }
 
   async readAttachment(
@@ -467,7 +470,10 @@ export class FakeAgentHarnessDriver implements AgentHarnessDriver {
   async completePromptReferences(
     input: AgentPromptReferenceCompletionInput,
   ): Promise<AgentPromptReferenceCompletionResult | undefined> {
-    this.assertRef(input.ref);
+    if ("ref" in input) this.assertRef(input.ref);
+    else if (input.driverId !== this.descriptor.id) {
+      throw new AgentBackendError("invalid_argument", "Reference completion driver is invalid");
+    }
     return this.backend.completePromptReferences(input);
   }
 

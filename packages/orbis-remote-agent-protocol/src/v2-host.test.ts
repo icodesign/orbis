@@ -8,6 +8,7 @@ import {
   agentRunId,
   agentTimestamp,
   type AgentPromptContentBlock,
+  type AgentPromptReferenceCompletionInput,
   createAgentDriverDescriptor,
   createAgentSessionRef,
   type AgentJsonValue,
@@ -229,6 +230,61 @@ function sessionEventFromTransport(event: TransportEvent): RemoteAgentV2SessionE
 function params(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
+
+test("v2 host completes draft workspace references without a session owner", async () => {
+  const listeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  let received: AgentPromptReferenceCompletionInput | undefined;
+  const backend: RemoteAgentV2Backend = {
+    ...presenceBackend(listeners),
+    completePromptReferences: async (input) => {
+      received = input;
+      return { candidates: [], end: 1, start: 0 };
+    },
+    listDrivers: async () => [
+      createAgentDriverDescriptor({
+        capabilities: ["prompt.references.files"],
+        displayName: "DSH",
+        id: "dsh",
+        promptReferenceSyntax: "at-token",
+      }),
+    ],
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    store: new MemoryStore(),
+    transport: { send: async () => undefined },
+  });
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await expect(
+      host.handleRequest(
+        ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles,
+        {
+          cursor: 1,
+          driverId: "dsh",
+          limit: 4,
+          source: "files",
+          text: "@",
+          workspaceRef: "workspace-a",
+        },
+        context(),
+      ),
+    ).resolves.toEqual({ candidates: [], end: 1, start: 0 });
+    expect(received).toMatchObject({
+      driverId: "dsh",
+      source: "files",
+      workspaceRef: "workspace-a",
+    });
+    expect(received === undefined ? true : "ref" in received).toBe(false);
+  } finally {
+    await host.close();
+  }
+});
 
 test("v2 host replays native entries from its cursor index without ACK state", async () => {
   const store = new MemoryStore();

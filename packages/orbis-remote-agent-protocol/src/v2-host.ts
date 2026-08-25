@@ -592,10 +592,12 @@ function parsePromptReferenceCompletionInput(
   );
   return validateAgentPromptReferenceCompletionInput({
     cursor: input.cursor,
+    ...(input.driverId === undefined ? {} : { driverId: input.driverId }),
     limit: input.limit,
-    ref: parseRef(input.ref),
+    ...(input.ref === undefined ? {} : { ref: parseRef(input.ref) }),
     source: input.source,
     text: input.text,
+    ...(input.workspaceRef === undefined ? {} : { workspaceRef: input.workspaceRef }),
   });
 }
 
@@ -1411,16 +1413,15 @@ export class OrbisRemoteAgentV2Host {
     if (input.source !== expectedSource) {
       invalid("Prompt reference completion source does not match the method");
     }
+    const driverId = "ref" in input ? input.ref.driverId : input.driverId;
     await this.assertDriverCapability(
-      input.ref.driverId,
+      driverId,
       expectedSource === "files" ? "prompt.references.files" : "prompt.references.sessions",
     );
-    const owner = await this.ownerFor(input.ref);
-    return this.enqueue(owner, async () => {
+    const complete = async (completionInput: AgentPromptReferenceCompletionInput) => {
       this.assertRequestActive(context);
       const result = await this.backend.completePromptReferences({
-        ...input,
-        ref: owner.nativeRef,
+        ...completionInput,
         signal: context.signal,
       });
       const validated = validateAgentPromptReferenceCompletionResult(result, input);
@@ -1432,7 +1433,10 @@ export class OrbisRemoteAgentV2Host {
         );
       }
       return json(wire);
-    });
+    };
+    if (!("ref" in input)) return complete(input);
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, () => complete({ ...input, ref: owner.nativeRef }));
   }
 
   private async prompt(

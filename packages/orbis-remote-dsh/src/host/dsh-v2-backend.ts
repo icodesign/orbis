@@ -696,6 +696,9 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
         capabilities: [...driver.capabilities, "workspace.open"],
         displayName: driver.displayName,
         id: driver.id,
+        ...(driver.promptReferenceSyntax === undefined
+          ? {}
+          : { promptReferenceSyntax: driver.promptReferenceSyntax }),
         ...(driver.version === undefined ? {} : { version: driver.version }),
       }),
     );

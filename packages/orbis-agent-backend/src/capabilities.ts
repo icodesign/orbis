@@ -26,6 +26,10 @@ export const AGENT_DRIVER_CAPABILITIES = [
 
 export type AgentDriverCapability = (typeof AGENT_DRIVER_CAPABILITIES)[number];
 
+export const AGENT_PROMPT_REFERENCE_SYNTAXES = ["at-token"] as const;
+
+export type AgentPromptReferenceSyntax = (typeof AGENT_PROMPT_REFERENCE_SYNTAXES)[number];
+
 /** Display-safe availability for a driver that is known to the backend. */
 export interface AgentDriverAvailability {
   readonly available: boolean;
@@ -44,6 +48,7 @@ export interface AgentDriverDescriptor {
   readonly capabilities: readonly AgentDriverCapability[];
   readonly displayName: string;
   readonly id: AgentDriverId;
+  readonly promptReferenceSyntax?: AgentPromptReferenceSyntax;
   readonly version?: string;
 }
 
@@ -52,6 +57,7 @@ export interface AgentDriverDescriptorInput {
   readonly capabilities: readonly AgentDriverCapability[];
   readonly displayName: string;
   readonly id: string;
+  readonly promptReferenceSyntax?: AgentPromptReferenceSyntax;
   readonly version?: string;
 }
 
@@ -107,12 +113,21 @@ export function createAgentDriverDescriptor(
   input: AgentDriverDescriptorInput,
 ): AgentDriverDescriptor {
   const capabilities = capabilityList(input.capabilities, "Driver capabilities");
+  if (
+    input.promptReferenceSyntax !== undefined &&
+    !AGENT_PROMPT_REFERENCE_SYNTAXES.includes(input.promptReferenceSyntax)
+  ) {
+    throw new AgentBackendError("invalid_argument", "Prompt reference syntax is invalid");
+  }
 
   return {
     availability: availability(input.availability),
     capabilities,
     displayName: displayValue(input.displayName, "Driver display name", 256),
     id: agentDriverId(input.id),
+    ...(input.promptReferenceSyntax === undefined
+      ? {}
+      : { promptReferenceSyntax: input.promptReferenceSyntax }),
     ...(input.version === undefined
       ? {}
       : { version: displayValue(input.version, "Driver version", 128) }),

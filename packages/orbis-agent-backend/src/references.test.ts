@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import { createAgentSessionRef } from "./identifiers";
 import {
+  isAgentPromptReferenceActive,
   validateAgentPromptReferenceCompletionInput,
   validateAgentPromptReferenceCompletionResult,
 } from "./references";
@@ -22,6 +23,20 @@ const input = {
 };
 
 describe("prompt reference completion contract", () => {
+  test("only activates at-tokens at a token boundary", () => {
+    const active = (text: string, cursor = text.length) =>
+      isAgentPromptReferenceActive({ cursor, syntax: "at-token", text });
+
+    expect(active("@")).toBe(true);
+    expect(active("See @src")).toBe(true);
+    expect(active('See @"path with spaces')).toBe(true);
+    expect(active("first line\n@src")).toBe(true);
+    expect(active("plain text")).toBe(false);
+    expect(active("name@example.com")).toBe(false);
+    expect(active("@src trailing")).toBe(false);
+    expect(active("@src trailing", 4)).toBe(true);
+  });
+
   test("keeps UTF-16 cursor and multiline replacement ranges", () => {
     const validated = validateAgentPromptReferenceCompletionInput({
       ...input,
@@ -30,6 +45,40 @@ describe("prompt reference completion contract", () => {
     });
     expect(validated.cursor).toBe(7);
     expect(validated.text).toBe("你好\n@src");
+  });
+
+  test("accepts a draft workspace target without manufacturing a session ref", () => {
+    const validated = validateAgentPromptReferenceCompletionInput({
+      cursor: 1,
+      driverId: "dsh",
+      limit: 4,
+      source: "files",
+      text: "@",
+      workspaceRef: "workspace:project",
+    });
+    expect(validated).toMatchObject({
+      driverId: "dsh",
+      workspaceRef: "workspace:project",
+    });
+    expect("ref" in validated).toBe(false);
+  });
+
+  test("rejects missing and ambiguous completion targets", () => {
+    expect(() =>
+      validateAgentPromptReferenceCompletionInput({
+        cursor: 1,
+        limit: 4,
+        source: "files",
+        text: "@",
+      }),
+    ).toThrow(/target/u);
+    expect(() =>
+      validateAgentPromptReferenceCompletionInput({
+        ...input,
+        driverId: "dsh",
+        workspaceRef: "workspace:project",
+      }),
+    ).toThrow(/ambiguous/u);
   });
 
   test("validates source-specific candidates and bounds", () => {

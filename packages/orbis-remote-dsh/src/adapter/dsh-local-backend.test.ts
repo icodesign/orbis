@@ -23,6 +23,7 @@ import type {
   DshSessionEvent,
   DshSessionHeader,
   DshSessionModeProvider,
+  DshPromptReferenceProvider,
   DshSessionSubagentProvider,
   DshUserMessage,
 } from "./dsh-types";
@@ -436,6 +437,7 @@ function createBackend(
   onError?: (error: { readonly code: string }) => void,
   attachments?: DshSessionAttachmentPort,
   subagents?: DshSessionSubagentProvider,
+  promptReferences?: DshPromptReferenceProvider,
 ): DshLocalBackend {
   return new DshLocalBackend({
     context: testDsh.context,
@@ -458,6 +460,7 @@ function createBackend(
     ...(onError === undefined ? {} : { onError }),
     ...(attachments === undefined ? {} : { attachments }),
     ...(subagents === undefined ? {} : { subagents }),
+    ...(promptReferences === undefined ? {} : { promptReferences }),
     toSessionId: (id) => id,
   });
 }
@@ -546,6 +549,39 @@ function pendingQuestions(events: readonly AgentSessionEvent[]) {
 }
 
 describe("DSH local backend", () => {
+  test("completes draft references against the selected workspace without creating a session", async () => {
+    const dsh = new TestDsh();
+    let received: Parameters<DshPromptReferenceProvider["complete"]>[0] | undefined;
+    const backend = createBackend(
+      dsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        complete: async (input) => {
+          received = input;
+          return { candidates: [], end: input.cursor, start: 0 };
+        },
+      },
+    );
+
+    await expect(
+      backend.completePromptReferences({
+        cursor: 1,
+        driverId: agentDriverId("dsh"),
+        limit: 4,
+        source: "files",
+        text: "@",
+        workspaceRef: "workspace-1",
+      }),
+    ).resolves.toMatchObject({ end: 1, start: 0 });
+    expect(received).toMatchObject({ source: "files", workspacePath: "/workspace/demo" });
+    expect(dsh.sessionCreateCalls).toHaveLength(0);
+  });
+
   test("advertises input.attachments only when the composition port is mounted", async () => {
     const withoutAttachments = createBackend(new TestDsh());
     expect(withoutAttachments.driverDescriptor.capabilities).not.toContain("input.attachments");

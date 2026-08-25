@@ -77,14 +77,15 @@ export interface DshSessionModeProvider {
 
 /** DSH-owned grammar and candidate discovery for prompt references. */
 export interface DshPromptReferenceProvider {
-  complete(input: {
-    readonly agent: DshAgent;
-    readonly cursor: number;
-    readonly limit: number;
-    readonly signal?: AbortSignal;
-    readonly source: AgentPromptReferenceSource;
-    readonly text: string;
-  }): Promise<AgentPromptReferenceCompletionResult | undefined>;
+  complete(
+    input: {
+      readonly cursor: number;
+      readonly limit: number;
+      readonly signal?: AbortSignal;
+      readonly source: AgentPromptReferenceSource;
+      readonly text: string;
+    } & ({ readonly agent: DshAgent } | { readonly workspacePath: string }),
+  ): Promise<AgentPromptReferenceCompletionResult | undefined>;
 }
 
 /**

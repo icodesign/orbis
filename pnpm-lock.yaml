@@ -109,6 +109,9 @@ importers:
       '@deepseek-ai/dsh-file-reference':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-agent@0.1.1-rc.2(c1537a8836b04097f168b024f1e38d85))(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-typert-protocol@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)))
+      '@deepseek-ai/dsh-file-reference-local':
+        specifier: ^0.1.1-rc.2
+        version: 0.1.1-rc.2(37f0a793562929d03bc6499724f01bd5)
       '@deepseek-ai/dsh-home-paths':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
@@ -139,6 +142,9 @@ importers:
       '@deepseek-ai/dsh-session-projection-cache':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(5675a3df65adc346aa213cdd0bac196b)
+      '@deepseek-ai/dsh-session-query':
+        specifier: ^0.1.1-rc.2
+        version: 0.1.1-rc.2(d854f9afd763ce298cb594d238b23507)
       '@deepseek-ai/dsh-session-reference':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(535ff208b76500c8770cfd701efd9f97)

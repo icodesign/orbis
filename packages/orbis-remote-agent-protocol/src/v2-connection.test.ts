@@ -170,6 +170,7 @@ function referenceHelloResult(): JsonValue {
       {
         ...result.drivers[0],
         capabilities: ["prompt.references.files", "prompt.references.sessions"],
+        promptReferenceSyntax: "at-token",
       },
     ],
   };
@@ -758,6 +759,40 @@ test("v2 prompt reference completion selects the source method and forwards canc
       },
       source: "files",
       text: "See @src",
+    },
+  });
+});
+
+test("v2 prompt reference completion forwards a draft workspace target", async () => {
+  const transport = new FakeV2Transport();
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, referenceHelloResult());
+  transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles, {
+    candidates: [{ insertText: "@src/", kind: "directory", label: "src" }],
+    end: 1,
+    start: 0,
+  });
+  const connection = new OrbisRemoteAgentV2Connection(transport);
+  await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
+
+  await expect(
+    connection.completePromptReferences({
+      cursor: 1,
+      driverId: ref.driverId,
+      limit: 4,
+      source: "files",
+      text: "@",
+      workspaceRef: "workspace:project",
+    }),
+  ).resolves.toMatchObject({ start: 0, end: 1 });
+  expect(transport.requests.at(-1)).toEqual({
+    method: ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesFiles,
+    params: {
+      cursor: 1,
+      driverId: ref.driverId,
+      limit: 4,
+      source: "files",
+      text: "@",
+      workspaceRef: "workspace:project",
     },
   });
 });

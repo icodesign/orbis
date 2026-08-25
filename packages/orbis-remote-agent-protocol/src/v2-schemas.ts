@@ -581,6 +581,7 @@ export const v2DriverSchema = z
     capabilities: z.array(nonEmptyString),
     displayName: nonEmptyString,
     id: nonEmptyString,
+    promptReferenceSyntax: z.literal("at-token").optional(),
     version: nonEmptyString.optional(),
   })
   .passthrough();
@@ -802,10 +803,12 @@ export const v2PromptInputSchema = z
 export const v2PromptReferenceCompletionInputSchema = z
   .object({
     cursor: nonNegativeInteger,
+    driverId: nonEmptyString.optional(),
     limit: positiveInteger.max(64),
-    ref: v2RefSchema,
+    ref: v2RefSchema.optional(),
     source: z.enum(["files", "sessions"]),
     text: boundedReferenceText,
+    workspaceRef: nonEmptyString.optional(),
   })
   .passthrough();
 

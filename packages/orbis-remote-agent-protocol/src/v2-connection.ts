@@ -548,6 +548,9 @@ function parseDriver(value: unknown): AgentDriverDescriptor {
     id: input.id,
     displayName: input.displayName,
     capabilities: input.capabilities as never,
+    ...(input.promptReferenceSyntax === undefined
+      ? {}
+      : { promptReferenceSyntax: input.promptReferenceSyntax }),
     ...(input.version === undefined ? {} : { version: input.version }),
     ...(input.availability === undefined
       ? {}
@@ -1082,9 +1085,8 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
     const validated = validateAgentPromptReferenceCompletionInput(input);
     const capability =
       validated.source === "files" ? "prompt.references.files" : "prompt.references.sessions";
-    const driver = this.helloResult?.drivers.find(
-      (candidate) => candidate.id === validated.ref.driverId,
-    );
+    const driverId = "ref" in validated ? validated.ref.driverId : validated.driverId;
+    const driver = this.helloResult?.drivers.find((candidate) => candidate.id === driverId);
     if (driver === undefined || !driver.capabilities.includes(capability)) {
       throw new AgentBackendError(
         "unsupported",
@@ -1097,10 +1099,12 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
         : ORBIS_REMOTE_AGENT_V2_METHODS.promptReferencesSessions,
       {
         cursor: validated.cursor,
+        ...("ref" in validated ? {} : { driverId: validated.driverId }),
         limit: validated.limit,
-        ref: refPayload(validated.ref),
+        ...("ref" in validated ? { ref: refPayload(validated.ref) } : {}),
         source: validated.source,
         text: validated.text,
+        ...("ref" in validated ? {} : { workspaceRef: validated.workspaceRef }),
       },
       (result) =>
         parseSchema(
