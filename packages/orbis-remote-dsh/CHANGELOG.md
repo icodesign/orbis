@@ -1,5 +1,12 @@
 # @orbisapp/remote-dsh
 
+## 0.2.6
+
+### Patch Changes
+
+- 6bf755a: feat: add prompt reference token support for dsh
+- f37bf3d: fix(perf): improved performance when opening and streaming sessions
+
 ## 0.2.5
 
 ### Patch Changes
