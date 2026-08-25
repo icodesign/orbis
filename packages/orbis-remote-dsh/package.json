@@ -1,6 +1,6 @@
 {
   "name": "@orbisapp/remote-dsh",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Orbis remote plugin for DeepSeek Harness",
   "keywords": [
     "deepseek-harness",
