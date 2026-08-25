@@ -58,6 +58,11 @@ user-visible change with a changeset and commit it alongside the change:
 pnpm changeset
 ```
 
+Changesets maintains one draft release pull request containing all pending changesets. Keep that
+pull request open while changes accumulate. When the complete release is ready, review the combined
+version and changelog, mark the pull request as ready, and merge it to publish the release. Changes
+that do not affect a published package do not need a changeset.
+
 ## Community
 
 Wechat Group

@@ -89,9 +89,7 @@ import {
 } from "./dsh-projection";
 import type {
   DshAgent,
-  DshAgentHandle,
   DshAgentInboxEvent,
-  DshAgentOptions,
   DshApiResponse,
   DshApiInteractionResponse,
   DshApiMuxFrame,
@@ -430,8 +428,6 @@ export interface DshLocalBackendOptions {
     readonly displayName?: string;
     readonly version?: string;
   };
-  /** Defaults applied by DSH whenever a new/reopened agent is acquired. */
-  readonly agentOptions?: DshAgentOptions;
   readonly now?: () => AgentTimestamp;
   readonly attachments?: DshSessionAttachmentPort;
   /** DSH-owned @file/@session grammar and candidate discovery. */
@@ -592,9 +588,6 @@ function optionalModel(value: AgentModelSelection | undefined): AgentModelSelect
   if (!value.provider.trim() || !value.modelId.trim()) {
     throw new AgentBackendError("invalid_argument", "DSH model selection is invalid");
   }
-  if (value.thinkingLevel !== undefined) {
-    throw new AgentBackendError("unsupported", "DSH thinking selection is unavailable");
-  }
   return value;
 }
 
@@ -726,14 +719,6 @@ function withCatalogTitle(
   if (summary.title !== undefined) return summary;
   const title = catalogEntry?.title;
   return title === undefined ? summary : { ...summary, title };
-}
-
-function agentOptionsFor(
-  defaults: DshAgentOptions | undefined,
-  model: AgentModelSelection | undefined,
-): DshAgentOptions | undefined {
-  if (model === undefined) return defaults;
-  return { ...defaults, model: model.modelId, provider: model.provider };
 }
 
 function activeRunId(inspection: DshSessionInspection): ReturnType<typeof agentRunId> | undefined {
@@ -980,31 +965,21 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return this.withPublicErrors(async () => {
       await this.assertSessionDoesNotExist(ref);
       const workspace = this.requireWorkspace(workspaceRef);
-      let handle: DshAgentHandle | undefined;
-      try {
-        handle = await this.options.context.agents.create({
-          agentOptions: agentOptionsFor(this.options.agentOptions, model),
-          meta: { cwd: workspace.path },
-          sessionId: this.options.toSessionId(nativeSessionId),
-        });
-        if (!sameNativeSession(handle.agent.session, nativeSessionId)) {
-          throw new AgentBackendError("protocol", "DSH created a session with an unexpected id");
-        }
-        await workspace.attachSession(this.options.toSessionId(nativeSessionId));
-        this.sessionWorkspaceRefs.set(nativeSessionId, workspaceRef);
-        const controller = this.installController(ref, handle.agent, handle);
-        if (model === undefined) await controller.refreshModelSelection();
-        else await controller.initializeModelSelection(model);
-        const projection = await this.inspectProjection(ref);
-        return {
-          createdAt: projection.metadata.createdAt,
-          ref: controller.ref,
-          updatedAt: projection.metadata.updatedAt,
-        };
-      } catch (error) {
-        await handle?.dispose().catch(() => undefined);
-        throw error;
-      }
+      const agent = await this.openDshSession(
+        nativeSessionId,
+        { workspaceId: workspace.id },
+        "The DSH session could not be created",
+      );
+      this.sessionWorkspaceRefs.set(nativeSessionId, workspaceRef);
+      const controller = this.installController(ref, agent);
+      if (model === undefined) await controller.refreshModelSelection();
+      else await controller.initializeModelSelection(model);
+      const projection = await this.inspectProjection(ref);
+      return {
+        createdAt: projection.metadata.createdAt,
+        ref: controller.ref,
+        updatedAt: projection.metadata.updatedAt,
+      };
     });
   }
 
@@ -1444,8 +1419,6 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       typeof options.toSessionId !== "function" ||
       typeof options.createUserMessage !== "function" ||
       typeof options.context?.on !== "function" ||
-      typeof options.context?.agents?.create !== "function" ||
-      typeof options.context?.agents?.resume !== "function" ||
       typeof options.context?.agents?.get !== "function" ||
       typeof options.context?.sessionPersistence?.inspect !== "function" ||
       typeof options.context?.sessionPersistence?.list !== "function" ||
@@ -1457,6 +1430,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       );
     }
     const apiProxy = options.context.apiProxy;
+    if (apiProxy !== undefined && typeof apiProxy.sessions?.create !== "function") {
+      throw new AgentBackendError(
+        "invalid_argument",
+        "The DSH API proxy session service is invalid",
+      );
+    }
     if (
       apiProxy !== undefined &&
       (typeof apiProxy.llm?.models !== "function" ||
@@ -1678,7 +1657,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   }
 
   private async openController(ref: AgentSessionRef): Promise<DshLocalSessionController> {
-    await this.inspect(ref);
+    const inspection = await this.inspect(ref);
     const nativeId = this.options.toSessionId(ref.nativeSessionId);
     const existing = this.options.context.agents.get(nativeId);
     if (existing !== undefined) {
@@ -1689,36 +1668,57 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       await controller.refreshModelSelection();
       return controller;
     }
-    const handle = await this.options.context.agents.resume({
-      agentOptions: this.options.agentOptions,
-      resumeSessionId: nativeId,
-    });
-    if (!sameNativeSession(handle.agent.session, ref.nativeSessionId)) {
-      await handle.dispose().catch(() => undefined);
-      throw new AgentBackendError("protocol", "DSH resumed a session with an unexpected id");
-    }
-    if (this.closed) {
-      await handle.dispose().catch(() => undefined);
-      throw new AgentBackendError("closed", "The local DSH backend is closed");
-    }
-    const controller = this.installController(ref, handle.agent, handle);
+    const agent = await this.openDshSession(
+      ref.nativeSessionId,
+      inspection.meta.cwd === undefined ? {} : { cwd: inspection.meta.cwd },
+      "The DSH session could not be opened",
+    );
+    const controller = this.installController(ref, agent);
     await controller.refreshModelSelection();
     return controller;
   }
 
-  private installController(
-    ref: AgentSessionRef,
-    agent: DshAgent,
-    ownedHandle?: DshAgentHandle,
-  ): DshLocalSessionController {
+  /**
+   * Opens sessions through DSH's product gateway. That gateway is the owner of
+   * preset resolution and composition, including tools, prompts, and plugin
+   * setup; calling the raw agent registry here would create a bare LLM agent.
+   */
+  private async openDshSession(
+    nativeSessionId: string,
+    location: { readonly cwd?: string; readonly workspaceId?: unknown },
+    unavailableMessage: string,
+  ): Promise<DshAgent> {
+    const apiProxy = this.options.context.apiProxy;
+    if (apiProxy === undefined) {
+      throw new AgentBackendError("unsupported", "DSH session creation is unavailable");
+    }
+    const sessionId = this.options.toSessionId(nativeSessionId);
+    const value = this.apiValue(
+      await apiProxy.sessions.create({
+        payload: { ...location, sessionId },
+        rpcId: this.nextRpcId(),
+      }),
+      unavailableMessage,
+    );
+    if (String(value.sessionId) !== nativeSessionId) {
+      throw new AgentBackendError("protocol", "DSH opened a session with an unexpected id");
+    }
+    const agent = this.options.context.agents.get(sessionId);
+    if (agent === undefined || !sameNativeSession(agent.session, nativeSessionId)) {
+      throw new AgentBackendError("protocol", "DSH did not publish the opened session agent");
+    }
+    if (this.closed) {
+      throw new AgentBackendError("closed", "The local DSH backend is closed");
+    }
+    return agent;
+  }
+
+  private installController(ref: AgentSessionRef, agent: DshAgent): DshLocalSessionController {
     const key = agentSessionLocatorKey(ref);
     const existing = this.controllers.get(key);
     if (existing !== undefined) {
       if (!existing.isCurrent() || !isSameAgentSessionRef(existing.ref, ref)) {
         throw new AgentBackendError("conflict", "The DSH session controller is conflicted");
-      }
-      if (ownedHandle !== undefined) {
-        void ownedHandle.dispose().catch(() => undefined);
       }
       return existing;
     }
@@ -1738,14 +1738,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
           (pending) => controller?.publishQuestionState(pending),
         )
       : undefined;
-    controller = new DshLocalSessionController(
-      this,
-      ref,
-      agent,
-      ownedHandle,
-      permissionBridge,
-      questionBridge,
-    );
+    controller = new DshLocalSessionController(this, ref, agent, permissionBridge, questionBridge);
     this.controllers.set(key, controller);
     for (const pending of this.interactionFrames.get(ref.nativeSessionId)?.values() ?? []) {
       if (pending.frame.type === "approval/requested")
@@ -2059,7 +2052,6 @@ class DshLocalSessionController {
     private readonly host: DshLocalControllerHost,
     ref: AgentSessionRef,
     private readonly agent: DshAgent,
-    private readonly ownedHandle?: DshAgentHandle,
     permissionBridge?: DshPermissionInteraction,
     questionBridge?: DshQuestionBridge,
   ) {
@@ -2186,11 +2178,7 @@ class DshLocalSessionController {
     this.runtime = undefined;
     this.permissionBridge?.close();
     this.questionBridge?.close();
-    try {
-      await this.ownedHandle?.dispose();
-    } finally {
-      this.host.detachController(this);
-    }
+    this.host.detachController(this);
   }
 
   decorateProjection(projection: AgentSessionProjection): AgentSessionProjection {

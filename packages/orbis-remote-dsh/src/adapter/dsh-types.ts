@@ -13,6 +13,7 @@ import type {
 export type DshWorkspaceId = string & { readonly __dshWorkspaceId: unique symbol };
 
 export interface DshSessionHeader {
+  readonly agentPreset?: string;
   readonly createdAt: number;
   readonly cwd?: string;
   readonly id: unknown;
@@ -306,6 +307,20 @@ export interface DshApiProxy {
     >;
   };
   readonly sessions: {
+    create(request: {
+      readonly payload: {
+        readonly agentPreset?: string;
+        readonly cwd?: string;
+        readonly sessionId?: unknown;
+        readonly workspaceId?: unknown;
+      };
+      readonly rpcId: string;
+    }): Promise<
+      DshApiResponse<{
+        readonly agentPreset?: string;
+        readonly sessionId: unknown;
+      }>
+    >;
     models(request: {
       readonly payload: { readonly sessionId: unknown };
       readonly rpcId: string;

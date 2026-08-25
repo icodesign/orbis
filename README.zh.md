@@ -56,6 +56,10 @@ CI 在每次 push、每个 PR 以及发布前都会运行 `check:core`。`check:
 pnpm changeset
 ```
 
+Changesets 会维护一个包含全部待发布 changeset 的草稿发布 PR。在继续累积改动期间保持该 PR
+为打开状态；准备发布完整版本时，检查合并后的版本号和 changelog，将 PR 标记为可审核并合并，
+随后自动发布。不会影响已发布包的改动不需要 changeset。
+
 ## 社群
 
 微信交流群

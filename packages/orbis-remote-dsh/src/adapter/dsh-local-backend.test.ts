@@ -45,9 +45,15 @@ class TestSession implements DshSession {
   constructor(
     readonly id: string,
     events: readonly DshSessionEvent[] = [],
+    metadata: { readonly agentPreset?: string; readonly cwd?: string } = {},
   ) {
     this.events = [...events];
-    this.header = { createdAt: EPOCH, cwd: "/workspace/demo", id };
+    this.header = {
+      createdAt: EPOCH,
+      cwd: metadata.cwd ?? "/workspace/demo",
+      id,
+      ...(metadata.agentPreset === undefined ? {} : { agentPreset: metadata.agentPreset }),
+    };
   }
 }
 
@@ -96,14 +102,21 @@ class TestDsh {
   readonly liveAgents = new Map<string, TestAgent>();
   readonly selectedModels = new Map<
     string,
-    { readonly model: string; readonly provider: string }
+    { readonly model: string; readonly provider: string; readonly reasoningEffort?: string }
   >();
+  readonly sessionCreateCalls: Array<{
+    readonly agentPreset?: string;
+    readonly cwd?: string;
+    readonly sessionId?: unknown;
+    readonly workspaceId?: unknown;
+  }> = [];
   readonly approvalResponses: DshApiInteractionResponse[] = [];
   approvalResponse: {
     readonly accepted: boolean;
     readonly reason?: "not-pending" | "bad-response";
   } = { accepted: true };
   readonly sessions = new Map<string, TestSession>();
+  currentPreset = "standard";
 
   private readonly listeners = new Set<(session: DshSession, native: DshSessionEvent) => void>();
   private readonly inboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
@@ -148,6 +161,44 @@ class TestDsh {
           }),
         },
         sessions: {
+          create: async ({ payload, rpcId }) => {
+            this.sessionCreateCalls.push(payload);
+            const id = String(payload.sessionId);
+            const workspace =
+              payload.workspaceId === undefined
+                ? undefined
+                : this.context.workspace.get(String(payload.workspaceId) as never);
+            if (payload.workspaceId !== undefined && workspace === undefined) {
+              return {
+                result: {
+                  error: { code: "workspace-not-found", message: "missing workspace" },
+                  ok: false as const,
+                },
+                rpcId,
+              };
+            }
+            let session = this.sessions.get(id);
+            let agent = this.liveAgents.get(id);
+            if (session === undefined) {
+              session = new TestSession(id, [], {
+                agentPreset: payload.agentPreset ?? this.currentPreset,
+                cwd: workspace?.path ?? payload.cwd,
+              });
+              this.sessions.set(id, session);
+            }
+            if (agent === undefined) {
+              agent = new TestAgent(id, session);
+              this.liveAgents.set(id, agent);
+            }
+            await workspace?.attachSession(id);
+            return {
+              result: {
+                ok: true as const,
+                value: { agentPreset: session.header.agentPreset, sessionId: id },
+              },
+              rpcId,
+            };
+          },
           models: async ({ payload, rpcId }) => {
             const id = String(payload.sessionId);
             const agent = this.liveAgents.get(id);
@@ -186,7 +237,13 @@ class TestDsh {
                 rpcId,
               };
             }
-            const selected = { model: payload.model, provider: payload.provider };
+            const selected = {
+              model: payload.model,
+              provider: payload.provider,
+              ...(payload.reasoningEffort === undefined
+                ? {}
+                : { reasoningEffort: payload.reasoningEffort }),
+            };
             this.selectedModels.set(id, selected);
             return { result: { ok: true as const, value: { selected } }, rpcId };
           },
@@ -278,8 +335,12 @@ class TestDsh {
     };
   }
 
-  addPersistedSession(id: string, events: readonly DshSessionEvent[]): TestSession {
-    const session = new TestSession(id, events);
+  addPersistedSession(
+    id: string,
+    events: readonly DshSessionEvent[],
+    agentPreset?: string,
+  ): TestSession {
+    const session = new TestSession(id, events, { agentPreset });
     this.sessions.set(id, session);
     this.materialized.add(id);
     return session;
@@ -2003,6 +2064,7 @@ describe("DSH local backend", () => {
 
   test("requires a registered workspace and preserves DSH model and run controls", async () => {
     const testDsh = new TestDsh();
+    testDsh.currentPreset = "coding";
     const backend = createBackend(testDsh);
 
     expect(await backend.listWorkspaces({ driverId: agentDriverId("dsh") })).toEqual([
@@ -2017,13 +2079,21 @@ describe("DSH local backend", () => {
 
     const record = await backend.createSession({
       driverId: agentDriverId("dsh"),
-      model: { modelId: "test-model", provider: "test-provider" },
+      model: { modelId: "test-model", provider: "test-provider", thinkingLevel: "max" },
       workspaceRef: "workspace-1",
     });
-    expect(testDsh.createCalls[0]).toMatchObject({
-      agentOptions: { model: "test-model", provider: "test-provider" },
-      meta: { cwd: "/workspace/demo" },
-      sessionId: "created-session",
+    expect(testDsh.sessionCreateCalls).toEqual([
+      {
+        sessionId: "created-session",
+        workspaceId: "workspace-1",
+      },
+    ]);
+    expect(testDsh.createCalls).toHaveLength(0);
+    expect(testDsh.sessions.get("created-session")?.header.agentPreset).toBe("coding");
+    expect(testDsh.selectedModels.get("created-session")).toEqual({
+      model: "test-model",
+      provider: "test-provider",
+      reasoningEffort: "max",
     });
     expect(testDsh.attachedSessions).toEqual(["created-session"]);
 
@@ -2047,6 +2117,27 @@ describe("DSH local backend", () => {
     expect(testDsh.agent("created-session").steers).toHaveLength(1);
     expect(await runtime.cancel({ keepInbox: true })).toEqual({ cancelled: true });
     expect(testDsh.agent("created-session").cancelCalls).toEqual([{ keepInbox: true }]);
+  });
+
+  test("reopens persisted sessions through DSH's preset-aware session gateway", async () => {
+    const testDsh = new TestDsh();
+    testDsh.currentPreset = "coding";
+    testDsh.addPersistedSession("review-session", [], "review");
+    const backend = createBackend(testDsh);
+    const ref = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "review-session",
+      sessionId: "review-session",
+    });
+
+    await backend.connectRuntime(ref);
+
+    expect(testDsh.sessionCreateCalls).toEqual([
+      { cwd: "/workspace/demo", sessionId: "review-session" },
+    ]);
+    expect(testDsh.agent("review-session").session.header.agentPreset).toBe("review");
+    expect(testDsh.createCalls).toHaveLength(0);
   });
 
   test("announces catalog movement for sessions this backend does not own", async () => {

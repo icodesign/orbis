@@ -477,11 +477,13 @@ test("v2 connection round-trips canonical question responses and whole work stat
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion, { accepted: true });
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync, {
+    baseline: true,
     entries: [],
+    hasMore: false,
     hasOlder: false,
     hostRevision: "revision-question",
-    kind: "snapshot",
     oldestCursor: 0,
+    throughCursor: 0,
     state: {
       configOptions: [],
       createdAt: "2026-08-11T00:00:00.000Z",
@@ -895,11 +897,13 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
   const transport = new FakeV2Transport();
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync, {
+    baseline: true,
     entries: [],
+    hasMore: false,
     hasOlder: false,
     hostRevision: "revision-b",
-    kind: "snapshot",
     oldestCursor: 0,
+    throughCursor: 0,
     overlay: {
       runId: "run-a",
       runningTools: [
@@ -942,8 +946,8 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
   const result = await connection.sync({ mode: "once", ref });
 
   expect(result).toMatchObject({
+    baseline: true,
     hostRevision: "revision-b",
-    kind: "snapshot",
     overlay: { runningTools: [{ chunkSeq: 0 }] },
   });
 });

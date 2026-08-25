@@ -1075,26 +1075,16 @@ export const v2HostEventSchema = z.union([
   z.object({ revision: nonEmptyString, type: z.literal("host.models.changed") }).passthrough(),
 ]);
 
-export const v2SyncResultSchema = z.union([
-  z
-    .object({
-      hasMore: z.boolean(),
-      hostRevision: nonEmptyString,
-      kind: z.literal("replay"),
-      overlay: v2OverlaySchema.optional(),
-      state: v2StateSchema,
-      throughCursor: nonNegativeInteger,
-    })
-    .passthrough(),
-  z
-    .object({
-      entries: z.array(v2EntrySchema),
-      hasOlder: z.boolean(),
-      hostRevision: nonEmptyString,
-      kind: z.literal("snapshot"),
-      oldestCursor: nonNegativeInteger,
-      overlay: v2OverlaySchema.optional(),
-      state: v2StateSchema,
-    })
-    .passthrough(),
-]);
+export const v2SyncResultSchema = z
+  .object({
+    baseline: z.boolean(),
+    entries: z.array(v2EntrySchema),
+    hasMore: z.boolean(),
+    hasOlder: z.boolean(),
+    hostRevision: nonEmptyString,
+    oldestCursor: nonNegativeInteger,
+    overlay: v2OverlaySchema.optional(),
+    state: v2StateSchema,
+    throughCursor: nonNegativeInteger,
+  })
+  .passthrough();

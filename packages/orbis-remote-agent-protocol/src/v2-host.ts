@@ -174,7 +174,10 @@ interface Owner {
   runtime?: RemoteAgentV2Runtime;
   snapshot?: RemoteAgentV2SessionSnapshot;
   tail: Promise<void>;
+  transientTail: Promise<void>;
   unsubscribe?: () => void;
+  /** Includes the in-flight send and queued transient deliveries. */
+  transientPending: number;
   transientSeq: number;
   presenceSeq: number;
 }
@@ -276,21 +279,29 @@ function responseTooLarge(code: "entry_too_large" | "response_too_large", messag
   throw new OrbisTransportError("remote_request", message, { serverCode: code });
 }
 
+/**
+ * Baseline branch: a trailing window ending at the newest entry, packed
+ * backwards to fill the byte budget. `hasMore` is always `false` — a baseline
+ * never continues forward, it replaces the client's transcript outright.
+ */
 function snapshotResult(
   snapshot: RemoteAgentV2SessionSnapshot,
   hostRevision: string,
   limit: number,
   maxResponseBytes: number,
 ): JsonValue {
+  const throughCursor = snapshot.entries.at(-1)?.cursor ?? 0;
   if (
     jsonByteLength({
+      baseline: true,
+      entries: [],
+      hasMore: false,
       hasOlder: snapshot.entries.length > 0,
       hostRevision,
-      kind: "snapshot",
       oldestCursor: 0,
       overlay: snapshot.overlay,
       state: snapshot.state,
-      entries: [],
+      throughCursor,
     }) > maxResponseBytes
   ) {
     responseTooLarge(
@@ -309,13 +320,15 @@ function snapshotResult(
     const candidateStart = start - 1;
     const resultBytes =
       jsonByteLength({
+        baseline: true,
+        entries: [],
+        hasMore: false,
         hasOlder: candidateStart > 0,
         hostRevision,
-        kind: "snapshot",
         oldestCursor: candidate.cursor,
         overlay: snapshot.overlay,
         state: snapshot.state,
-        entries: [],
+        throughCursor,
       }) + candidateContentBytes;
     if (resultBytes > maxResponseBytes) break;
     start = candidateStart;
@@ -331,13 +344,101 @@ function snapshotResult(
 
   const entries = snapshot.entries.slice(start);
   const result = {
+    baseline: true,
+    entries,
+    hasMore: false,
     hasOlder: start > 0,
     hostRevision,
-    kind: "snapshot",
     oldestCursor: entries[0]?.cursor ?? 0,
     overlay: snapshot.overlay,
     state: snapshot.state,
+    throughCursor,
+  };
+  if (jsonByteLength(result) > maxResponseBytes) {
+    responseTooLarge(
+      "response_too_large",
+      "The session state cannot fit in one encrypted transport frame",
+    );
+  }
+  return toJsonResult(result);
+}
+
+/**
+ * Continuation branch: the mirror of `snapshotResult`, packing forward from
+ * the first pending entry instead of backward from the newest. `hasOlder` is
+ * always `false` — the client's existing transcript is the older part, and
+ * forward pagination is expressed only through `hasMore`.
+ */
+function continuationResult(
+  snapshot: RemoteAgentV2SessionSnapshot,
+  pending: readonly RemoteAgentV2Entry[],
+  afterCursor: number,
+  hostRevision: string,
+  limit: number,
+  maxResponseBytes: number,
+): JsonValue {
+  if (
+    jsonByteLength({
+      baseline: false,
+      entries: [],
+      hasMore: pending.length > 0,
+      hasOlder: false,
+      hostRevision,
+      oldestCursor: afterCursor,
+      overlay: snapshot.overlay,
+      state: snapshot.state,
+      throughCursor: afterCursor,
+    }) > maxResponseBytes
+  ) {
+    responseTooLarge(
+      "response_too_large",
+      "The session state cannot fit in one encrypted transport frame",
+    );
+  }
+  const upperBound = Math.min(pending.length, limit);
+  let end = 0;
+  let entriesContentBytes = 0;
+
+  while (end < upperBound) {
+    const candidate = pending[end] as RemoteAgentV2Entry;
+    const candidateContentBytes =
+      entriesContentBytes + jsonByteLength(candidate) + (end > 0 ? 1 : 0);
+    const candidateEnd = end + 1;
+    const resultBytes =
+      jsonByteLength({
+        baseline: false,
+        entries: [],
+        hasMore: pending.length > candidateEnd,
+        hasOlder: false,
+        hostRevision,
+        oldestCursor: (pending[0] as RemoteAgentV2Entry).cursor,
+        overlay: snapshot.overlay,
+        state: snapshot.state,
+        throughCursor: candidate.cursor,
+      }) + candidateContentBytes;
+    if (resultBytes > maxResponseBytes) break;
+    end = candidateEnd;
+    entriesContentBytes = candidateContentBytes;
+  }
+
+  if (end === 0 && pending.length > 0 && limit > 0) {
+    responseTooLarge(
+      "entry_too_large",
+      "The next session entry cannot fit in one encrypted transport frame",
+    );
+  }
+
+  const entries = pending.slice(0, end);
+  const result = {
+    baseline: false,
     entries,
+    hasMore: pending.length > entries.length,
+    hasOlder: false,
+    hostRevision,
+    oldestCursor: entries[0]?.cursor ?? afterCursor,
+    overlay: snapshot.overlay,
+    state: snapshot.state,
+    throughCursor: entries.at(-1)?.cursor ?? afterCursor,
   };
   if (jsonByteLength(result) > maxResponseBytes) {
     responseTooLarge(
@@ -824,6 +925,7 @@ function toJsonResult(value: unknown): JsonValue {
 }
 
 const DEFAULT_CATALOG_COALESCE_MS = 500;
+const MAX_PENDING_TRANSIENT_DELIVERIES = 256;
 
 const defaultScheduler: RemoteAgentV2HostScheduler = {
   cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -1013,7 +1115,10 @@ export class OrbisRemoteAgentV2Host {
     await Promise.all(
       owners.map(async (owner) => {
         owner.unsubscribe?.();
-        await owner.tail.catch(() => undefined);
+        await Promise.all([
+          owner.tail.catch(() => undefined),
+          owner.transientTail.catch(() => undefined),
+        ]);
         await owner.runtime?.close().catch(() => undefined);
       }),
     );
@@ -1265,27 +1370,14 @@ export class OrbisRemoteAgentV2Host {
         );
       }
       const pending = snapshot.entries.filter((entry) => entry.cursor > input.afterCursor!);
-      const batch = pending.slice(0, limit);
-      for (const entry of batch) {
-        await this.send(
-          owner,
-          context.peer,
-          entryEvent(owner.ref, entry, `entry:${entry.id}`, entry.createdAt, {
-            backendId: owner.ref.backendId,
-            driverId: owner.ref.driverId,
-            nativeType: "replay",
-          }),
-        );
-      }
-      const throughCursor = batch.at(-1)?.cursor ?? input.afterCursor;
-      return toJsonResult({
-        hasMore: pending.length > batch.length,
+      return continuationResult(
+        snapshot,
+        pending,
+        input.afterCursor,
         hostRevision,
-        kind: "replay",
-        overlay: snapshot.overlay,
-        state: snapshot.state,
-        throughCursor,
-      });
+        limit,
+        context.maxResponseBytes,
+      );
     });
   }
 
@@ -1919,7 +2011,9 @@ export class OrbisRemoteAgentV2Host {
         ref,
         subscribers: new Map(),
         tail: Promise.resolve(),
+        transientTail: Promise.resolve(),
         presenceSeq: 0,
+        transientPending: 0,
         transientSeq: 0,
       };
       this.owners.set(key, owner);
@@ -1940,9 +2034,11 @@ export class OrbisRemoteAgentV2Host {
     const runtime = await this.backend.connectRuntime(owner.nativeRef);
     owner.runtime = runtime;
     owner.unsubscribe = runtime.subscribe((event) => {
-      void this.enqueue(owner, () => this.receiveNativeEvent(owner, event)).catch((error) =>
-        this.report(error),
-      );
+      const task =
+        event.channel === "transient"
+          ? this.enqueueTransientEvent(owner, event)
+          : this.enqueue(owner, () => this.receiveNativeEvent(owner, event));
+      if (task !== undefined) void task.catch((error) => this.report(error));
     });
     await this.enqueue(owner, async () => {
       await this.refreshOwner(owner);
@@ -1989,8 +2085,7 @@ export class OrbisRemoteAgentV2Host {
 
   private async receiveNativeEvent(owner: Owner, event: RemoteAgentV2SessionEvent): Promise<void> {
     if (this.closed) return;
-    if (event.sessionId !== owner.nativeRef.sessionId)
-      protocol("The native v2 event belongs to another session");
+    this.assertNativeEventSession(owner, event);
     const previous = owner.snapshot;
     const previousSummary =
       previous === undefined ? undefined : sessionSummary(owner.ref, previous);
@@ -2023,6 +2118,7 @@ export class OrbisRemoteAgentV2Host {
               },
           isTriggeredEntry ? event.settlesEntryId : undefined,
         ),
+        [...owner.subscribers.values()],
       );
     }
     if (event.type === "entry.appended" && event.channel === "replayable") {
@@ -2036,10 +2132,57 @@ export class OrbisRemoteAgentV2Host {
         revision: event.revision,
         type: event.type,
       };
-      await this.deliverLive(owner, publicEvent);
+      await this.deliverLive(owner, publicEvent, [...owner.subscribers.values()]);
       return;
     }
-    const publicEvent: RemoteAgentV2SessionEvent = {
+    protocol("A transient native event must use the transient delivery lane");
+  }
+
+  private async receiveTransientEvent(
+    owner: Owner,
+    event: Extract<RemoteAgentV2SessionEvent, { readonly channel: "transient" }>,
+    subscribers: readonly RemoteAgentV2Subscriber[],
+  ): Promise<void> {
+    if (this.closed) return;
+    this.assertNativeEventSession(owner, event);
+    await this.deliverLive(owner, this.publicTransientEvent(owner, event), subscribers);
+  }
+
+  private assertNativeEventSession(owner: Owner, event: RemoteAgentV2SessionEvent): void {
+    if (event.sessionId !== owner.nativeRef.sessionId)
+      protocol("The native v2 event belongs to another session");
+  }
+
+  private enqueueTransientEvent(
+    owner: Owner,
+    event: Extract<RemoteAgentV2SessionEvent, { readonly channel: "transient" }>,
+  ): Promise<void> | undefined {
+    try {
+      this.assertNativeEventSession(owner, event);
+    } catch (error) {
+      this.report(error);
+      return undefined;
+    }
+    const subscribers = [...owner.subscribers.values()];
+    if (subscribers.length === 0) return undefined;
+    // G4 permits dropping transient frames; never allocate another queued
+    // operation once the in-flight plus pending delivery window is full.
+    if (owner.transientPending >= MAX_PENDING_TRANSIENT_DELIVERIES) return undefined;
+    owner.transientPending += 1;
+    return this.enqueueTransient(owner, async () => {
+      try {
+        await this.receiveTransientEvent(owner, event, subscribers);
+      } finally {
+        owner.transientPending -= 1;
+      }
+    });
+  }
+
+  private publicTransientEvent(
+    owner: Owner,
+    event: Extract<RemoteAgentV2SessionEvent, { readonly channel: "transient" }>,
+  ): RemoteAgentV2SessionEvent {
+    return {
       ...eventBase(owner.ref, event),
       ...(event.type === "entry.delta"
         ? {
@@ -2057,22 +2200,78 @@ export class OrbisRemoteAgentV2Host {
       channel: "transient",
       type: event.type,
     } as RemoteAgentV2SessionEvent;
-    await this.deliverLive(owner, publicEvent);
   }
 
-  private async deliverLive(owner: Owner, event: RemoteAgentV2SessionEvent): Promise<void> {
+  private async deliverLive(
+    owner: Owner,
+    event: RemoteAgentV2SessionEvent,
+    subscribers: readonly RemoteAgentV2Subscriber[],
+  ): Promise<void> {
     const frame = transportEvent(owner.ref, event, ++owner.transientSeq);
     let removedPeer = false;
     await Promise.all(
-      [...owner.subscribers.values()].map(async (subscriber) => {
+      subscribers.map(async (subscriber) => {
+        if (
+          owner.subscribers.get(subscriber.peer.id)?.peer.transportId !==
+          subscriber.peer.transportId
+        )
+          return;
         try {
           await this.transport.send(subscriber.peer, frame);
-        } catch {
-          removedPeer = this.removePeer(owner, subscriber.peer) || removedPeer;
+        } catch (error) {
+          removedPeer = this.handleLiveSendFailure(owner, subscriber.peer, error) || removedPeer;
         }
       }),
     );
     if (removedPeer && this.capabilities.presence) await this.broadcastPresence(owner);
+  }
+
+  /**
+   * Classifies a live-frame send failure and applies its side effect.
+   * Returns whether the peer was removed.
+   *
+   * `OrbisSecureChannel.seal` rejects an oversized plaintext with a
+   * `frame_too_large` transport error before its encrypted sequence
+   * advances, which makes this a property of the EVENT, not of the peer:
+   * every subscriber whose frame ceiling is exceeded fails identically.
+   * Removing the peer for it would silently end its live subscription with
+   * no signal -- the client keeps its socket, keeps its cursor, and simply
+   * stops receiving updates for the session. Skip the frame for this
+   * subscriber instead and surface it as a diagnostic:
+   *  - A transient frame may be dropped outright: protocol goal G4 says
+   *    transient content carries no unique information and must be
+   *    reconstructible from the durable log, so the client's own chunkSeq
+   *    continuity check marks the affected entry blocked until the next
+   *    snapshot or durable settlement repairs it.
+   *  - A durable frame that is skipped leaves a gap in the client's
+   *    delivery cursor, but the client already detects cursor gaps and
+   *    repairs them by re-syncing. `transportEvent` sets `eventSeq` to
+   *    `event.cursor` for durable events and to the running `transientSeq`
+   *    counter for transient ones, so skipping a transient frame only opens
+   *    a gap in a counter the client never validates for contiguity --
+   *    `v2-connection.ts`'s `receiveEvent` checks `eventSeq === cursor` only
+   *    when the parsed event is on the replayable (durable) channel.
+   *
+   * Any other failure keeps today's behaviour: the peer is removed, since a
+   * dead transport/connection produces no signal on either lane and removal
+   * is the only way to stop wasting effort on it.
+   */
+  private handleLiveSendFailure(owner: Owner, peer: RemoteAgentHostPeer, error: unknown): boolean {
+    if (
+      error instanceof OrbisTransportError &&
+      error.code === "invalid_argument" &&
+      error.serverCode === "frame_too_large"
+    ) {
+      this.report(
+        new AgentBackendError(
+          "invalid_argument",
+          "A live event exceeded the transport frame ceiling and was skipped for one subscriber",
+          { details: { peerId: peer.id, sessionId: owner.ref.sessionId } },
+        ),
+      );
+      return false;
+    }
+    return this.removePeer(owner, peer);
   }
 
   private async broadcastPresence(owner: Owner): Promise<void> {
@@ -2109,8 +2308,8 @@ export class OrbisRemoteAgentV2Host {
         [...owner.subscribers.values()].map(async (subscriber) => {
           try {
             await this.transport.send(subscriber.peer, frame);
-          } catch {
-            removedPeer = this.removePeer(owner, subscriber.peer) || removedPeer;
+          } catch (error) {
+            removedPeer = this.handleLiveSendFailure(owner, subscriber.peer, error) || removedPeer;
           }
         }),
       );
@@ -2203,28 +2402,6 @@ export class OrbisRemoteAgentV2Host {
     if (event.type === "host.session.removed") baseline.delete(event.sessionId);
   }
 
-  private async send(
-    owner: Owner,
-    peer: RemoteAgentHostPeer,
-    event: RemoteAgentV2SessionEvent,
-  ): Promise<void> {
-    try {
-      await this.transport.send(peer, transportEvent(owner.ref, event, ++owner.transientSeq));
-    } catch (error) {
-      const removed = this.removePeer(owner, peer);
-      if (removed && this.capabilities.presence) await this.broadcastPresence(owner);
-      if (error instanceof OrbisTransportError && error.serverCode === "frame_too_large") {
-        responseTooLarge(
-          "entry_too_large",
-          "The replayed session entry cannot fit in one encrypted transport frame",
-        );
-      }
-      throw new AgentBackendError("unavailable", "The remote peer is not connected", {
-        retryable: true,
-      });
-    }
-  }
-
   private requiredSnapshot(owner: Owner): RemoteAgentV2SessionSnapshot {
     if (owner.snapshot === undefined)
       throw new AgentBackendError("unavailable", "The native session snapshot is unavailable", {
@@ -2302,6 +2479,18 @@ export class OrbisRemoteAgentV2Host {
   private enqueue<TResult>(owner: Owner, operation: () => Promise<TResult>): Promise<TResult> {
     const task = owner.tail.then(operation);
     owner.tail = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
+  private enqueueTransient<TResult>(
+    owner: Owner,
+    operation: () => Promise<TResult>,
+  ): Promise<TResult> {
+    const task = owner.transientTail.then(operation);
+    owner.transientTail = task.then(
       () => undefined,
       () => undefined,
     );

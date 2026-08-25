@@ -9,9 +9,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
+  contents: read
 
 jobs:
   test:
@@ -37,15 +35,15 @@ jobs:
       - name: Build publishable bundle
         run: pnpm run bundle
 
-  release:
-    name: Version & publish
+  release_mode:
+    name: Select release mode
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.changesets.outputs.mode }}
     permissions:
-      contents: write
-      id-token: write
-      pull-requests: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -61,14 +59,66 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Opens (or updates) a "Version packages" pull request while changesets are
-      # pending, and publishes @orbisapp/remote-dsh to npm once that PR is merged.
-      # `prepack` rebuilds dist/ from the released commit before it is packed.
-      - uses: changesets/action@v1
+      - id: changesets
+        uses: changesets/action/select-mode@v2
+
+  version:
+    name: Update draft release PR
+    needs: release_mode
+    if: needs.release_mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
         with:
-          version: pnpm run version:packages
-          publish: pnpm run release
-          commit: "chore: version packages"
-          title: "chore: version packages"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Keep one draft release PR updated with every pending changeset. Merging
+      # this PR is the explicit decision to publish the accumulated release.
+      - uses: changesets/action/version@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: pnpm run version:packages
+          commit-message: "chore(release): version packages"
+          pr-title: "chore(release): prepare next release"
+          pr-draft: "always"
+
+  publish:
+    name: Publish release
+    needs: release_mode
+    if: needs.release_mode.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - run: pnpm install --frozen-lockfile
+
+      # `prepack` rebuilds dist/ from the released commit before it is packed.
+      - uses: changesets/action/publish@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: pnpm run release

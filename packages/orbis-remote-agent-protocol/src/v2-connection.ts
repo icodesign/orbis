@@ -98,24 +98,18 @@ import type {
 
 export type RemoteAgentV2SyncMode = "once" | "live";
 
-export type RemoteAgentV2SyncResult =
-  | {
-      readonly kind: "replay";
-      readonly throughCursor: number;
-      readonly hasMore: boolean;
-      readonly hostRevision: string;
-      readonly state: RemoteAgentV2SessionState;
-      readonly overlay?: RemoteAgentV2Overlay;
-    }
-  | {
-      readonly kind: "snapshot";
-      readonly hostRevision: string;
-      readonly state: RemoteAgentV2SessionState;
-      readonly entries: readonly RemoteAgentV2Entry[];
-      readonly oldestCursor: number;
-      readonly hasOlder: boolean;
-      readonly overlay?: RemoteAgentV2Overlay;
-    };
+export interface RemoteAgentV2SyncResult {
+  /** true = `entries` replace the client transcript from `oldestCursor`; false = they continue from the request's `afterCursor`. */
+  readonly baseline: boolean;
+  readonly entries: readonly RemoteAgentV2Entry[];
+  readonly hasMore: boolean;
+  readonly hasOlder: boolean;
+  readonly hostRevision: string;
+  readonly oldestCursor: number;
+  readonly overlay?: RemoteAgentV2Overlay;
+  readonly state: RemoteAgentV2SessionState;
+  readonly throughCursor: number;
+}
 
 export interface RemoteAgentV2Connection {
   browseWorkspaces(input: RemoteAgentV2WorkspaceBrowseInput): Promise<AgentWorkspaceFolderListing>;
@@ -814,24 +808,16 @@ function parseHostEvent(input: unknown): RemoteAgentV2Delivery["event"] {
 
 function parseSync(value: unknown): RemoteAgentV2SyncResult {
   const input = parseSchema(v2SyncResultSchema, value, "Sync result");
-  if (input.kind === "replay") {
-    return {
-      kind: input.kind,
-      throughCursor: input.throughCursor,
-      hasMore: input.hasMore,
-      hostRevision: input.hostRevision,
-      state: parseState(input.state),
-      ...(input.overlay === undefined ? {} : { overlay: parseOverlay(input.overlay) }),
-    };
-  }
   return {
-    kind: input.kind,
-    hostRevision: input.hostRevision,
-    state: parseState(input.state),
+    baseline: input.baseline,
     entries: input.entries.map(parseEntry),
-    oldestCursor: input.oldestCursor,
+    hasMore: input.hasMore,
     hasOlder: input.hasOlder,
+    hostRevision: input.hostRevision,
+    oldestCursor: input.oldestCursor,
     ...(input.overlay === undefined ? {} : { overlay: parseOverlay(input.overlay) }),
+    state: parseState(input.state),
+    throughCursor: input.throughCursor,
   };
 }
 

@@ -109,6 +109,40 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
             }),
           },
           sessions: {
+            create: async ({ payload, rpcId }) => {
+              const id = String(payload.sessionId);
+              const session: DshSession = {
+                events: [] as DshSessionEvent[],
+                header: {
+                  agentPreset: payload.agentPreset ?? "standard",
+                  createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+                  cwd: "/workspace",
+                  id,
+                },
+                id,
+              };
+              sessions.set(id, session);
+              const inbox = { nextStep: [] as DshUserMessage[], nextTurn: [] as DshUserMessage[] };
+              inboxes.set(id, inbox);
+              const agent: DshAgent = {
+                cancel: () => {},
+                followup: () => {},
+                id,
+                inbox,
+                options: {},
+                session,
+                status: "idle",
+                steer: () => {},
+              };
+              agents.set(id, agent);
+              return {
+                result: {
+                  ok: true as const,
+                  value: { agentPreset: session.header.agentPreset, sessionId: id },
+                },
+                rpcId,
+              };
+            },
             models: async ({ payload, rpcId }) => {
               const id = String(payload.sessionId);
               const agent = agents.get(id);
@@ -389,7 +423,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       },
     );
     expect(synced).toMatchObject({
-      kind: "snapshot",
+      baseline: true,
       entries: [],
       state: {
         cwd: "/workspace",
@@ -459,7 +493,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       },
     );
     expect(updated).toMatchObject({
-      kind: "snapshot",
+      baseline: true,
       state: {
         cwd: "/workspace",
         pendingInputs: [
@@ -532,7 +566,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       },
     );
     expect(liveSnapshot).toMatchObject({
-      kind: "snapshot",
+      baseline: true,
       overlay: {
         runId: "turn-1",
         streaming: {
@@ -602,8 +636,8 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       },
     );
     expect(settledSnapshot).toMatchObject({
+      baseline: true,
       entries: [{ id: "message-1-1" }],
-      kind: "snapshot",
     });
     expect(settledSnapshot).not.toHaveProperty("overlay.streaming");
     expect(String(host.nativeBackend.descriptor.id)).toBe("dsh-host");
@@ -663,6 +697,38 @@ test("delivers DSH v2 live entries through the attached host transport", async (
             }),
           },
           sessions: {
+            create: async ({ payload, rpcId }) => {
+              const id = String(payload.sessionId);
+              const session: DshSession = {
+                events: [] as DshSessionEvent[],
+                header: {
+                  agentPreset: payload.agentPreset ?? "standard",
+                  createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+                  cwd: "/workspace",
+                  id,
+                },
+                id,
+              };
+              sessions.set(id, session);
+              const agent: DshAgent = {
+                cancel: () => {},
+                followup: () => {},
+                id,
+                inbox: { nextStep: [], nextTurn: [] },
+                options: {},
+                session,
+                status: "idle",
+                steer: () => {},
+              };
+              agents.set(id, agent);
+              return {
+                result: {
+                  ok: true as const,
+                  value: { agentPreset: session.header.agentPreset, sessionId: id },
+                },
+                rpcId,
+              };
+            },
             models: async ({ rpcId }) => ({
               result: {
                 ok: true as const,
@@ -795,7 +861,7 @@ test("delivers DSH v2 live entries through the attached host transport", async (
       workspaceRef: "workspace-a",
     });
     const live = await client.sync({ mode: "live", ref: created.ref });
-    expect(live).toMatchObject({ kind: "snapshot", entries: [] });
+    expect(live).toMatchObject({ baseline: true, entries: [] });
 
     const nativeSession = sessions.get("native-transport");
     if (nativeSession === undefined) throw new Error("transport test session is missing");
@@ -1058,6 +1124,7 @@ test("pushes a catalog row created outside the host to a listening client", asyn
 test("reads the full transcript on the first cold sync of a session DSH web created and populated", async () => {
   const directory = await mkdtemp(join(tmpdir(), "orbis-remote-dsh-host-probe-"));
   const sessions = new Map<string, DshSession>();
+  const agents = new Map<string, DshAgent>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
   const webSession: DshSession = {
     events: [] as DshSessionEvent[],
@@ -1097,11 +1164,66 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        apiProxy: {
+          llm: {
+            models: async ({ rpcId }) => ({
+              result: { ok: true as const, value: { failures: [], groups: [] } },
+              rpcId,
+            }),
+          },
+          sessions: {
+            create: async ({ payload, rpcId }) => {
+              const id = String(payload.sessionId);
+              const session = sessions.get(id);
+              if (session === undefined) {
+                return {
+                  result: {
+                    error: { code: "session-not-found", message: "session not found" },
+                    ok: false as const,
+                  },
+                  rpcId,
+                };
+              }
+              const agent: DshAgent = {
+                cancel: () => {},
+                followup: () => {},
+                id,
+                inbox: { nextStep: [], nextTurn: [] },
+                options: {},
+                session,
+                status: "idle",
+                steer: () => {},
+              };
+              agents.set(id, agent);
+              return {
+                result: {
+                  ok: true as const,
+                  value: { agentPreset: session.header.agentPreset, sessionId: id },
+                },
+                rpcId,
+              };
+            },
+            models: async ({ rpcId }) => ({
+              result: {
+                ok: true as const,
+                value: { current: { model: "test-model", provider: "test-provider" } },
+              },
+              rpcId,
+            }),
+            selectModel: async ({ payload, rpcId }) => ({
+              result: {
+                ok: true as const,
+                value: { selected: { model: payload.model, provider: payload.provider } },
+              },
+              rpcId,
+            }),
+          },
+        },
         agents: {
           create: async () => {
             throw new Error("unused");
           },
-          get: () => undefined,
+          get: (id) => agents.get(String(id)),
           resume: async ({ resumeSessionId }) => {
             const id = String(resumeSessionId);
             const session = sessions.get(id);
@@ -1180,11 +1302,11 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
     // The client has never opened this session before — cold "switch to it".
     const result = await client.sync({ mode: "once", ref: publicRef });
     expect(result).toMatchObject({
+      baseline: true,
       entries: [
         { content: [{ text: "hello from web" }], kind: "message", role: "user" },
         { content: [{ text: "hi from dsh" }], kind: "message", role: "assistant" },
       ],
-      kind: "snapshot",
     });
   } finally {
     client.close();

@@ -935,7 +935,7 @@ export class OrbisDshHostService {
         this.logger.error("remote.request.failed", {
           ...fields,
           durationMs: Math.max(0, Date.now() - startedAt),
-          ...orbisDshErrorFields(error, { includeMessage: false }),
+          ...orbisDshErrorFields(error),
         });
         throw error;
       }

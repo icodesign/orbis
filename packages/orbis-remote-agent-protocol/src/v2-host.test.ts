@@ -383,7 +383,6 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     },
   };
   const sent: TransportEvent[] = [];
-  let rejectTransportFrame = false;
   const host = new OrbisRemoteAgentV2Host({
     backend,
     backendId: "remote:host-a",
@@ -391,11 +390,6 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     store,
     transport: {
       send: async (_target, event) => {
-        if (rejectTransportFrame) {
-          throw new OrbisTransportError("invalid_argument", "test frame is too large", {
-            serverCode: "frame_too_large",
-          });
-        }
         sent.push(event);
       },
     },
@@ -513,7 +507,15 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       params({ mode: "live", ref: publicRef }),
       context(),
     );
-    expect(baseline).toMatchObject({ entries: [], hostRevision: "1", kind: "snapshot" });
+    expect(baseline).toMatchObject({
+      baseline: true,
+      entries: [],
+      hasMore: false,
+      hasOlder: false,
+      hostRevision: "1",
+      oldestCursor: 0,
+      throughCursor: 0,
+    });
 
     const nextEntry = entry("entry-1");
     const burstEntry = entry("entry-2");
@@ -574,8 +576,20 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       params({ afterCursor: 0, afterEntryId: null, mode: "once", ref: publicRef }),
       context(),
     );
-    expect(replay).toMatchObject({ hasMore: false, kind: "replay", throughCursor: 2 });
-    expect(sent).toHaveLength(6);
+    expect(replay).toMatchObject({
+      baseline: false,
+      entries: [
+        { cursor: 1, id: "entry-1" },
+        { cursor: 2, id: "entry-2" },
+      ],
+      hasMore: false,
+      hasOlder: false,
+      oldestCursor: 1,
+      throughCursor: 2,
+    });
+    // A continuation returns its entries inline; it must never push separate
+    // entry.appended event frames the way the old replay shape did.
+    expect(sent).toHaveLength(4);
 
     const older = await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsEntries,
@@ -708,7 +722,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       params({ mode: "once", ref: publicRef }),
       context(),
     );
-    expect(rebuilt).toMatchObject({ hostRevision: "2", kind: "snapshot" });
+    expect(rebuilt).toMatchObject({ baseline: true, hasMore: false, hostRevision: "2" });
     await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsPrompt,
       params(retryablePrompt),
@@ -787,20 +801,49 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       snapshotBudget,
     );
 
-    rejectTransportFrame = true;
-    let replayEntryTooLarge: unknown;
+    const sentBeforeContinuationProbes = sent.length;
+
+    const truncatedContinuationBudget = 20_000;
+    const continuationPage = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ afterCursor: 0, afterEntryId: null, mode: "once", ref: publicRef }),
+      context("transport-b", truncatedContinuationBudget),
+    );
+    const continuationEntries = (continuationPage as { entries: Array<{ cursor: number }> })
+      .entries;
+    expect(continuationEntries.length).toBeGreaterThan(0);
+    expect(continuationEntries.length).toBeLessThan(largeEntries.length);
+    // Cursors are dense: a continuation page must be a contiguous run starting
+    // at afterCursor + 1, never sparse or offset.
+    expect(continuationEntries.map((item) => item.cursor)).toEqual(
+      Array.from({ length: continuationEntries.length }, (_, index) => index + 1),
+    );
+    expect(continuationPage).toMatchObject({
+      baseline: false,
+      hasMore: true,
+      hasOlder: false,
+      oldestCursor: 1,
+      throughCursor: continuationEntries.at(-1)?.cursor,
+    });
+    expect(
+      new TextEncoder().encode(JSON.stringify(continuationPage)).byteLength,
+    ).toBeLessThanOrEqual(truncatedContinuationBudget);
+
+    let continuationEntryTooLarge: unknown;
     try {
       await host.handleRequest(
         ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
         params({ afterCursor: 0, afterEntryId: null, mode: "once", ref: publicRef }),
-        context("transport-b", snapshotBudget),
+        context("transport-b", 1_024),
       );
     } catch (error) {
-      replayEntryTooLarge = error;
-    } finally {
-      rejectTransportFrame = false;
+      continuationEntryTooLarge = error;
     }
-    expect(replayEntryTooLarge).toMatchObject({ serverCode: "entry_too_large" });
+    expect(continuationEntryTooLarge).toMatchObject({ serverCode: "entry_too_large" });
+
+    // Both continuation calls above return their entries inline; neither may
+    // push separate entry.appended event frames the old replay shape did.
+    expect(sent).toHaveLength(sentBeforeContinuationProbes);
 
     const historyBudget = 64_000;
     const historyPage = await host.handleRequest(
@@ -829,6 +872,520 @@ test("v2 host replays native entries from its cursor index without ACK state", a
     }
     expect(entryTooLarge).toMatchObject({ serverCode: "entry_too_large" });
   } finally {
+    await host.close();
+  }
+});
+
+test("v2 sync continuation with no pending work is empty, and a stale afterEntryId falls back to baseline", async () => {
+  const store = new MemoryStore();
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const entryA = entry("entry-a");
+  const entryB = entry("entry-b");
+  const current = snapshot([entryA, entryB]);
+  const backendBase = presenceBackend(runtimeListeners);
+  const backend: RemoteAgentV2Backend = { ...backendBase, readSession: async () => current };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    store,
+    transport: { send: async () => undefined },
+  });
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    const baseline = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "once", ref: publicRef }),
+      context(),
+    );
+    expect(baseline).toMatchObject({
+      baseline: true,
+      entries: [
+        { cursor: 1, id: "entry-a" },
+        { cursor: 2, id: "entry-b" },
+      ],
+      hasMore: false,
+      hasOlder: false,
+      oldestCursor: 1,
+      throughCursor: 2,
+    });
+
+    // The client is already caught up: no entries follow cursor 2, so the
+    // continuation page is empty and both cursors collapse to afterCursor.
+    const empty = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ afterCursor: 2, afterEntryId: "entry-b", mode: "once", ref: publicRef }),
+      context(),
+    );
+    expect(empty).toMatchObject({
+      baseline: false,
+      entries: [],
+      hasMore: false,
+      hasOlder: false,
+      oldestCursor: 2,
+      throughCursor: 2,
+    });
+
+    // The cursor exists in the host's index but the entry id at that cursor
+    // does not match what the client claims — the client's transcript has
+    // diverged (e.g. a fork or history rewrite) and the host cannot safely
+    // continue forward, so it must fall back to a full baseline.
+    const stale = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ afterCursor: 2, afterEntryId: "entry-not-real", mode: "once", ref: publicRef }),
+      context(),
+    );
+    expect(stale).toMatchObject({
+      baseline: true,
+      entries: [
+        { cursor: 1, id: "entry-a" },
+        { cursor: 2, id: "entry-b" },
+      ],
+      hasMore: false,
+      hasOlder: false,
+      oldestCursor: 1,
+      throughCursor: 2,
+    });
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 sync continuation caps entries at maxReplayBatch when the count cap binds before the byte budget", async () => {
+  const store = new MemoryStore();
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const entries = Array.from({ length: 10 }, (_, index) => entry(`entry-${index}`));
+  const current = snapshot(entries);
+  const backendBase = presenceBackend(runtimeListeners);
+  const backend: RemoteAgentV2Backend = { ...backendBase, readSession: async () => current };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    limits: { maxReplayBatch: 3 },
+    store,
+    transport: { send: async () => undefined },
+  });
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    // `context()` grants a generous 1 MiB byte budget and these entries are
+    // tiny, so the byte budget never binds here — the count cap does, the
+    // mirror image of the byte-cap-binds-first case covered above.
+    const page = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ afterCursor: 0, afterEntryId: null, mode: "once", ref: publicRef }),
+      context(),
+    );
+    expect(page).toMatchObject({
+      baseline: false,
+      entries: [
+        { cursor: 1, id: "entry-0" },
+        { cursor: 2, id: "entry-1" },
+        { cursor: 3, id: "entry-2" },
+      ],
+      hasMore: true,
+      hasOlder: false,
+      oldestCursor: 1,
+      throughCursor: 3,
+    });
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host does not replay transient backlog to a peer joining live sync", async () => {
+  const streamEntryId = agentEntryId("stream-1");
+  const runId = agentRunId("run-1");
+  const preSyncChunkCount = 3;
+  const queuedAfterSyncChunkSeq = preSyncChunkCount + 1;
+  const postSyncChunkSeq = queuedAfterSyncChunkSeq + 1;
+  const peerB: RemoteAgentHostPeer = {
+    deviceId: "device-b",
+    deviceName: "Test Device B",
+    id: "peer-b",
+    transportId: "transport-b",
+  };
+  const peerBReconnect = { ...peerB, transportId: "transport-b-reconnect" };
+  const contextB = { ...context(peerB.transportId), peer: peerB };
+  const contextBReconnect = {
+    ...context(peerBReconnect.transportId),
+    peer: peerBReconnect,
+  };
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const delivered: Array<{
+    readonly event: RemoteAgentV2SessionEvent;
+    readonly target: string;
+    readonly transportId: string;
+  }> = [];
+  const protocolErrors: AgentBackendError[] = [];
+  let current = snapshot([]);
+  let readSessionCalls = 0;
+  let firstTransient = true;
+  let releaseFirstSend: (() => void) | undefined;
+  let firstSendStartedResolve: (() => void) | undefined;
+  const firstSendStarted = new Promise<void>((resolve) => {
+    firstSendStartedResolve = resolve;
+  });
+  let postSyncDeliveredResolve: (() => void) | undefined;
+  const postSyncDelivered = new Promise<void>((resolve) => {
+    postSyncDeliveredResolve = resolve;
+  });
+  let ownerPostSyncDeliveredResolve: (() => void) | undefined;
+  const ownerPostSyncDelivered = new Promise<void>((resolve) => {
+    ownerPostSyncDeliveredResolve = resolve;
+  });
+  let queuedDeliveredResolve: (() => void) | undefined;
+  const queuedDelivered = new Promise<void>((resolve) => {
+    queuedDeliveredResolve = resolve;
+  });
+  const backendBase = presenceBackend(runtimeListeners);
+  const backend: RemoteAgentV2Backend = {
+    ...backendBase,
+    readSession: async () => {
+      readSessionCalls += 1;
+      return current;
+    },
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    onError: (error) => protocolErrors.push(error),
+    store: new MemoryStore(),
+    transport: {
+      send: async (target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event?.channel !== "transient") return;
+        if (firstTransient) {
+          firstTransient = false;
+          firstSendStartedResolve?.();
+          await new Promise<void>((resolve) => {
+            releaseFirstSend = resolve;
+          });
+        }
+        delivered.push({ event, target: target.id, transportId: target.transportId });
+        if (
+          target.transportId === peerBReconnect.transportId &&
+          event.type === "entry.delta" &&
+          event.chunkSeq === postSyncChunkSeq
+        ) {
+          postSyncDeliveredResolve?.();
+        }
+        if (
+          target.id === peer.id &&
+          event.type === "entry.delta" &&
+          event.chunkSeq === queuedAfterSyncChunkSeq
+        ) {
+          queuedDeliveredResolve?.();
+        }
+        if (
+          target.id === peer.id &&
+          event.type === "entry.delta" &&
+          event.chunkSeq === postSyncChunkSeq
+        ) {
+          ownerPostSyncDeliveredResolve?.();
+        }
+      },
+    },
+  });
+  const emit = (chunkSeq: number, sessionId = nativeRef.sessionId): void => {
+    const event: RemoteAgentV2SessionEvent = {
+      blockIndex: 0,
+      channel: "transient",
+      chunkSeq,
+      delta: String(chunkSeq),
+      entryId: streamEntryId,
+      eventId: agentEventId(`delta-${chunkSeq}`),
+      occurredAt: now,
+      part: "text",
+      sessionId,
+      source: { backendId: nativeRef.backendId, driverId: nativeRef.driverId },
+      type: "entry.delta",
+    };
+    for (const listener of runtimeListeners) listener(event);
+  };
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test B", platform: "node" }, supportedVersions: [2] },
+      contextB,
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+    readSessionCalls = 0;
+
+    for (let chunkSeq = 1; chunkSeq <= preSyncChunkCount; chunkSeq += 1) emit(chunkSeq);
+    await firstSendStarted;
+    const preSyncOverlay = {
+      runId,
+      runningTools: [],
+      streaming: {
+        blocks: [
+          {
+            blockIndex: 0,
+            content: { text: String(preSyncChunkCount), type: "text" as const },
+          },
+        ],
+        chunkSeq: preSyncChunkCount,
+        entryId: streamEntryId,
+      },
+    };
+    current = {
+      ...snapshot([], 1, {
+        activeRun: { runId, startedAt: now },
+        runState: "running",
+      }),
+      overlay: preSyncOverlay,
+    };
+
+    const syncResult = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      contextB,
+    );
+    expect(syncResult).toMatchObject({
+      baseline: true,
+      overlay: preSyncOverlay,
+      state: { ...current.state, ref: publicRef },
+    });
+    expect(readSessionCalls).toBe(1);
+    expect(delivered.filter(({ target }) => target === peerB.id)).toHaveLength(0);
+
+    emit(queuedAfterSyncChunkSeq);
+    const queuedOverlay = {
+      ...preSyncOverlay,
+      streaming: {
+        ...preSyncOverlay.streaming,
+        blocks: [
+          {
+            blockIndex: 0,
+            content: { text: String(queuedAfterSyncChunkSeq), type: "text" as const },
+          },
+        ],
+        chunkSeq: queuedAfterSyncChunkSeq,
+      },
+    };
+    current = { ...current, overlay: queuedOverlay };
+    const onceResult = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "once", ref: publicRef }),
+      contextB,
+    );
+    expect(onceResult).toMatchObject({
+      baseline: true,
+      overlay: queuedOverlay,
+      state: { ...current.state, ref: publicRef },
+    });
+    expect(readSessionCalls).toBe(2);
+    expect(delivered.filter(({ target }) => target === peerB.id)).toHaveLength(0);
+
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test B Reconnected", platform: "node" }, supportedVersions: [2] },
+      contextBReconnect,
+    );
+    releaseFirstSend?.();
+    await queuedDelivered;
+
+    readSessionCalls = 0;
+    const resyncResult = await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      contextBReconnect,
+    );
+    expect(resyncResult).toMatchObject({
+      baseline: true,
+      overlay: queuedOverlay,
+      state: { ...current.state, ref: publicRef },
+    });
+    expect(readSessionCalls).toBe(1);
+
+    emit(postSyncChunkSeq);
+    await Promise.all([ownerPostSyncDelivered, postSyncDelivered]);
+
+    const eventsFor = (transportId: string) =>
+      delivered
+        .filter((delivery) => delivery.transportId === transportId)
+        .map(({ event }) => (event.type === "entry.delta" ? event.chunkSeq : 0));
+    expect(eventsFor(peer.transportId)).toEqual([1, 2, 3, 4, 5]);
+    expect(eventsFor(peerB.transportId)).toEqual([]);
+    expect(eventsFor(peerBReconnect.transportId)).toEqual([postSyncChunkSeq]);
+    expect(readSessionCalls).toBe(1);
+    expect(firstTransient).toBe(false);
+
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "once", ref: publicRef }),
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "once", ref: publicRef }),
+      contextBReconnect,
+    );
+    emit(99, otherNativeRef.sessionId);
+    expect(protocolErrors).toHaveLength(1);
+    expect(protocolErrors[0]).toMatchObject({ code: "protocol" });
+  } finally {
+    releaseFirstSend?.();
+    await host.close();
+  }
+});
+
+test("v2 host keeps authoritative sync independent from a blocked transient burst", async () => {
+  const chunkCount = 50_000;
+  const acceptedTransientCount = 256;
+  const postCapacityChunkSeq = chunkCount + 1;
+  const streamEntryId = agentEntryId("stream-1");
+  const runId = agentRunId("run-1");
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  let current = snapshot([]);
+  let readSessionCalls = 0;
+  let firstTransient = true;
+  let releaseFirstSend: (() => void) | undefined;
+  let firstSendStartedResolve: (() => void) | undefined;
+  const firstSendStarted = new Promise<void>((resolve) => {
+    firstSendStartedResolve = resolve;
+  });
+  let acceptedTransientsResolve: (() => void) | undefined;
+  const acceptedTransientsDelivered = new Promise<void>((resolve) => {
+    acceptedTransientsResolve = resolve;
+  });
+  let postCapacityDeliveredResolve: (() => void) | undefined;
+  const postCapacityDelivered = new Promise<void>((resolve) => {
+    postCapacityDeliveredResolve = resolve;
+  });
+  const sent: RemoteAgentV2SessionEvent[] = [];
+  const targets: string[] = [];
+  const backendBase = presenceBackend(runtimeListeners);
+  const backend: RemoteAgentV2Backend = {
+    ...backendBase,
+    readSession: async () => {
+      readSessionCalls += 1;
+      return current;
+    },
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    store: new MemoryStore(),
+    transport: {
+      send: async (target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event?.channel !== "transient") return;
+        if (firstTransient) {
+          firstTransient = false;
+          firstSendStartedResolve?.();
+          await new Promise<void>((resolve) => {
+            releaseFirstSend = resolve;
+          });
+        }
+        sent.push(event);
+        targets.push(target.id);
+        if (sent.length === acceptedTransientCount) acceptedTransientsResolve?.();
+        if (event.type === "entry.delta" && event.chunkSeq === postCapacityChunkSeq) {
+          postCapacityDeliveredResolve?.();
+        }
+      },
+    },
+  });
+  const emit = (chunkSeq: number): void => {
+    const event: RemoteAgentV2SessionEvent = {
+      blockIndex: 0,
+      channel: "transient",
+      chunkSeq,
+      delta: String(chunkSeq),
+      entryId: streamEntryId,
+      eventId: agentEventId(`delta-${chunkSeq}`),
+      occurredAt: now,
+      part: "text",
+      sessionId: nativeRef.sessionId,
+      source: { backendId: nativeRef.backendId, driverId: nativeRef.driverId },
+      type: "entry.delta",
+    };
+    for (const listener of runtimeListeners) listener(event);
+  };
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+    readSessionCalls = 0;
+
+    const finalOverlay = {
+      runId,
+      runningTools: [],
+      streaming: {
+        blocks: [
+          {
+            blockIndex: 0,
+            content: { text: String(chunkCount), type: "text" as const },
+          },
+        ],
+        chunkSeq: chunkCount,
+        entryId: streamEntryId,
+      },
+    };
+    current = {
+      ...snapshot([], 1, {
+        activeRun: { runId, startedAt: now },
+        runState: "running",
+      }),
+      overlay: finalOverlay,
+    };
+
+    for (let chunkSeq = 1; chunkSeq <= chunkCount; chunkSeq += 1) emit(chunkSeq);
+    const syncPromise = host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+    await firstSendStarted;
+    const syncResult = await syncPromise;
+
+    expect(releaseFirstSend).toEqual(expect.any(Function));
+    expect(readSessionCalls).toBe(1);
+    expect(syncResult).toMatchObject({
+      baseline: true,
+      overlay: finalOverlay,
+      state: { ...current.state, ref: publicRef },
+    });
+    expect(sent).toHaveLength(0);
+
+    releaseFirstSend?.();
+    await acceptedTransientsDelivered;
+    expect(readSessionCalls).toBe(1);
+    expect(sent).toHaveLength(acceptedTransientCount);
+    expect(targets.every((target) => target === peer.id)).toBe(true);
+    expect(sent.map((event) => (event.type === "entry.delta" ? event.chunkSeq : 0))).toEqual(
+      Array.from({ length: acceptedTransientCount }, (_, index) => index + 1),
+    );
+
+    emit(postCapacityChunkSeq);
+    await postCapacityDelivered;
+    expect(sent).toHaveLength(acceptedTransientCount + 1);
+    expect(sent.at(-1)).toMatchObject({ chunkSeq: postCapacityChunkSeq });
+  } finally {
+    releaseFirstSend?.();
     await host.close();
   }
 });
@@ -1462,6 +2019,287 @@ test("v2 host keeps presence convergence finite across cascading send failures",
       devices: [{ deviceId: "device-a", name: "Phone A", since: now, viewing: true }],
       type: "presence.changed",
     });
+  } finally {
+    await host.close();
+  }
+});
+
+function frameTooLargeError(): OrbisTransportError {
+  // Mirrors OrbisSecureChannel.seal's rejection in e2ee.ts: an oversized
+  // plaintext throws before the encrypted sequence advances.
+  return new OrbisTransportError("invalid_argument", "The encrypted frame exceeds the size limit", {
+    serverCode: "frame_too_large",
+  });
+}
+
+test("v2 host keeps a live durable subscription after an oversized frame is skipped", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const delivered: RemoteAgentV2SessionEvent[] = [];
+  const errors: AgentBackendError[] = [];
+  let current = snapshot([]);
+  const backend: RemoteAgentV2Backend = {
+    ...presenceBackend(runtimeListeners),
+    readSession: async () => current,
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    onError: (error) => errors.push(error),
+    store: new MemoryStore(),
+    transport: {
+      send: async (_target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event?.type === "entry.appended" && event.entry.id === "entry-oversized") {
+          throw frameTooLargeError();
+        }
+        if (event !== undefined) delivered.push(event);
+      },
+    },
+  });
+  const appendEntry = (target: RemoteAgentV2SessionSnapshot["entries"][number]) =>
+    runtimeListeners.forEach((listener) =>
+      listener({
+        channel: "replayable",
+        cursor: agentDeliveryCursor(0),
+        entry: target,
+        eventId: agentEventId(`native-${target.id}`),
+        occurredAt: now,
+        sessionId: nativeRef.sessionId,
+        source: {
+          backendId: nativeRef.backendId,
+          driverId: nativeRef.driverId,
+          nativeType: "test",
+        },
+        type: "entry.appended",
+      }),
+    );
+
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+
+    const oversized = entry("entry-oversized");
+    current = snapshot([oversized]);
+    appendEntry(oversized);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The oversized entry was skipped, not delivered, and it was reported --
+    // but it must not have torn down the peer's live subscription.
+    expect(delivered).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "invalid_argument" });
+
+    const normal = entry("entry-normal");
+    current = snapshot([oversized, normal]);
+    appendEntry(normal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A subsequent, normally-sized event still reaches the same peer, which
+    // proves the subscription survived the oversized frame.
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ type: "entry.appended", entry: { id: "entry-normal" } });
+    expect(errors).toHaveLength(1);
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host keeps a live transient subscription after an oversized frame is skipped", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const delivered: RemoteAgentV2SessionEvent[] = [];
+  const errors: AgentBackendError[] = [];
+  const backend = presenceBackend(runtimeListeners);
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    onError: (error) => errors.push(error),
+    store: new MemoryStore(),
+    transport: {
+      send: async (_target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event?.type === "tool.state.changed" && event.tool.callId === "call-oversized") {
+          throw frameTooLargeError();
+        }
+        if (event !== undefined) delivered.push(event);
+      },
+    },
+  });
+  const emitToolState = (callId: string) =>
+    runtimeListeners.forEach((listener) =>
+      listener({
+        channel: "transient",
+        eventId: agentEventId(`native-tool-${callId}`),
+        occurredAt: now,
+        sessionId: nativeRef.sessionId,
+        source: { backendId: nativeRef.backendId, driverId: nativeRef.driverId },
+        tool: {
+          callId,
+          entryId: agentEntryId(`tool-${callId}`),
+          input: { path: "/workspace/demo.ts" },
+          name: "read",
+          status: "running",
+        },
+        type: "tool.state.changed",
+      }),
+    );
+
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+
+    emitToolState("call-oversized");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A transient event carrying a full tool.content that exceeds the frame
+    // ceiling is skipped and reported, never delivered.
+    expect(delivered).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: "invalid_argument" });
+
+    emitToolState("call-normal");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The subscription survives: a normally-sized transient event still
+    // reaches the same peer afterward.
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      tool: { callId: "call-normal" },
+      type: "tool.state.changed",
+    });
+    expect(errors).toHaveLength(1);
+  } finally {
+    await host.close();
+  }
+});
+
+test("v2 host removes a peer and broadcasts presence on a non-size live send failure", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const deliveredToA: RemoteAgentV2SessionEvent[] = [];
+  const deliveredToB: RemoteAgentV2SessionEvent[] = [];
+  let current = snapshot([]);
+  let failNextA = true;
+  const peerA: RemoteAgentHostPeer = {
+    deviceId: "device-a",
+    deviceName: "Phone A",
+    id: "peer-a",
+    transportId: "transport-a",
+  };
+  const peerB: RemoteAgentHostPeer = {
+    deviceId: "device-b",
+    deviceName: "Phone B",
+    id: "peer-b",
+    transportId: "transport-b",
+  };
+  const backend: RemoteAgentV2Backend = {
+    ...presenceBackend(runtimeListeners),
+    readSession: async () => current,
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    capabilities: { presence: true },
+    clock: () => now,
+    store: new MemoryStore(),
+    transport: {
+      send: async (target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event === undefined) return;
+        if (target.id === peerA.id && event.type === "entry.appended" && failNextA) {
+          failNextA = false;
+          // A generic connection failure, unrelated to frame size -- today's
+          // behaviour (remove the peer) must still apply here.
+          throw new Error("connection reset");
+        }
+        if (target.id === peerA.id) deliveredToA.push(event);
+        else if (target.id === peerB.id) deliveredToB.push(event);
+      },
+    },
+  });
+  const requestContext = (target: RemoteAgentHostPeer) => ({
+    maxResponseBytes: 1024 * 1024,
+    peer: target,
+    signal: new AbortController().signal,
+  });
+  const hello = (target: RemoteAgentHostPeer) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: target.deviceName ?? "", platform: "node" }, supportedVersions: [2] },
+      requestContext(target),
+    );
+  const sync = (target: RemoteAgentHostPeer) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      requestContext(target),
+    );
+  const appendEntry = (target: RemoteAgentV2SessionSnapshot["entries"][number]) =>
+    runtimeListeners.forEach((listener) =>
+      listener({
+        channel: "replayable",
+        cursor: agentDeliveryCursor(0),
+        entry: target,
+        eventId: agentEventId(`native-${target.id}`),
+        occurredAt: now,
+        sessionId: nativeRef.sessionId,
+        source: {
+          backendId: nativeRef.backendId,
+          driverId: nativeRef.driverId,
+          nativeType: "test",
+        },
+        type: "entry.appended",
+      }),
+    );
+
+  try {
+    await hello(peerA);
+    await hello(peerB);
+    await sync(peerA);
+    await sync(peerB);
+    // Clear the presence broadcasts triggered by hello/sync itself so the
+    // assertions below reflect only what happens from the entry events on.
+    deliveredToA.length = 0;
+    deliveredToB.length = 0;
+
+    const first = entry("entry-first");
+    current = snapshot([first]);
+    appendEntry(first);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(deliveredToA).toHaveLength(0);
+    const presenceAfterFailure = [...deliveredToB]
+      .reverse()
+      .find((event) => event.type === "presence.changed");
+    // Peer A was removed as a subscriber, so the reconverged presence
+    // broadcast (triggered because presence is enabled) lists only B.
+    expect(presenceAfterFailure).toMatchObject({
+      devices: [{ deviceId: "device-b", name: "Phone B", viewing: true }],
+    });
+
+    const second = entry("entry-second");
+    current = snapshot([first, second]);
+    appendEntry(second);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The mock would now succeed for A (failNextA already consumed), so
+    // still receiving nothing proves removal, not a repeated failure.
+    expect(deliveredToA).toHaveLength(0);
+    expect(deliveredToB.filter((event) => event.type === "entry.appended")).toHaveLength(2);
   } finally {
     await host.close();
   }
