@@ -239,6 +239,13 @@ export const v2RunSummarySchema = z
   })
   .passthrough();
 
+const v2EntryScopeSchema = z
+  .object({
+    runId: nonEmptyString,
+    stepId: nonEmptyString.optional(),
+  })
+  .passthrough();
+
 export const v2EntrySchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -252,6 +259,7 @@ export const v2EntrySchema = z.discriminatedUnion("kind", [
       model: v2ModelSchema.optional(),
       parentId: nonEmptyString.nullable(),
       role: z.enum(["user", "assistant", "system"]),
+      scope: v2EntryScopeSchema.optional(),
       stopReason: z.enum(["stop", "length", "tool_use", "aborted", "error"]).optional(),
       usage: v2UsageSchema.optional(),
     })
@@ -269,6 +277,7 @@ export const v2EntrySchema = z.discriminatedUnion("kind", [
       name: nonEmptyString,
       output: jsonValueSchema.optional(),
       parentId: nonEmptyString.nullable(),
+      scope: v2EntryScopeSchema.optional(),
       status: z.enum(["success", "error", "cancelled"]),
     })
     .passthrough(),
@@ -283,6 +292,7 @@ export const v2EntrySchema = z.discriminatedUnion("kind", [
       level: z.enum(["info", "warn", "error"]),
       message: nonEmptyString,
       parentId: nonEmptyString.nullable(),
+      scope: v2EntryScopeSchema.optional(),
     })
     .passthrough(),
   z
@@ -296,6 +306,7 @@ export const v2EntrySchema = z.discriminatedUnion("kind", [
       label: nonEmptyString.optional(),
       origin: z.enum(["inject", "recall"]),
       parentId: nonEmptyString.nullable(),
+      scope: v2EntryScopeSchema.optional(),
     })
     .passthrough(),
 ]);
@@ -566,6 +577,7 @@ export const v2SessionSummarySchema = z
     runState: z.enum(["idle", "running", "suspended", "error"]),
     title: z.string().nullable(),
     updatedAt: timestamp,
+    workspaceRef: z.string().nullable(),
   })
   .passthrough();
 

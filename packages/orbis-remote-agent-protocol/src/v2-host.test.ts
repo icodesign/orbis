@@ -331,6 +331,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       runState: "idle" as const,
       title: null,
       updatedAt: now,
+      workspaceRef: "workspace-a",
     }),
     createWorkspaceFolder: async () => ({
       displayName: "New Folder",
@@ -363,6 +364,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
         runState: "idle",
         title: null,
         updatedAt: now,
+        workspaceRef: "workspace-a",
       },
       {
         driverId: agentDriverId("dsh"),
@@ -370,6 +372,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
         runState: "idle",
         title: null,
         updatedAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
+        workspaceRef: null,
       },
     ],
     listSessionSubagents: async (ref) => {
@@ -548,7 +551,9 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       params({ limit: 1 }),
       context(),
     );
-    expect(firstPage).toMatchObject({ sessions: [{ ref: { sessionId: "session-b" } }] });
+    expect(firstPage).toMatchObject({
+      sessions: [{ ref: { sessionId: "session-b" }, workspaceRef: null }],
+    });
     const nextCursor = (firstPage as { nextCursor?: string }).nextCursor;
     expect(nextCursor).toEqual(expect.any(String));
     const secondPage = await host.handleRequest(
@@ -556,7 +561,9 @@ test("v2 host replays native entries from its cursor index without ACK state", a
       params({ cursor: nextCursor, limit: 1 }),
       context(),
     );
-    expect(secondPage).toMatchObject({ sessions: [{ ref: { sessionId: "session-a" } }] });
+    expect(secondPage).toMatchObject({
+      sessions: [{ ref: { sessionId: "session-a" }, workspaceRef: "workspace-a" }],
+    });
 
     const baseline = await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
@@ -1457,6 +1464,7 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
         runState: "idle",
         title: null,
         updatedAt: now,
+        workspaceRef: "workspace-a",
       },
     ],
   ]);
@@ -1561,6 +1569,7 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
       runState: "running",
       title: null,
       updatedAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
+      workspaceRef: "workspace-a",
     });
     notifyCatalog?.();
     notifyCatalog?.();
@@ -1575,6 +1584,7 @@ test("v2 host announces catalog rows that move outside its own session runtimes"
           runState: "running",
           title: null,
           updatedAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
+          workspaceRef: "workspace-a",
         },
         type: "host.session.added",
       },
@@ -1741,6 +1751,128 @@ test("v2 host owns live presence membership and converges disconnects", async ()
   } finally {
     await host.close();
   }
+});
+
+test("v2 host reports per-session subscriber availability transitions", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const transitions: Array<{ readonly available: boolean; readonly ref: AgentSessionRef }> = [];
+  let observerShouldThrow = true;
+  let disconnectPeer: ((peer: RemoteAgentHostPeer) => void) | undefined;
+  let current = snapshot([]);
+  let failLiveSend = false;
+  const backend: RemoteAgentV2Backend = {
+    ...presenceBackend(runtimeListeners),
+    readSession: async () => current,
+  };
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    onSessionSubscriberAvailabilityChanged: (ref, available) => {
+      transitions.push({ available, ref });
+      if (observerShouldThrow) {
+        observerShouldThrow = false;
+        throw new Error("observer failure");
+      }
+    },
+    store: new MemoryStore(),
+    transport: {
+      onPeerDisconnected: (listener) => {
+        disconnectPeer = listener;
+        return () => {
+          if (disconnectPeer === listener) disconnectPeer = undefined;
+        };
+      },
+      send: async (_target, frame) => {
+        if (failLiveSend && sessionEventFromTransport(frame)?.type === "entry.appended") {
+          throw new Error("live send failed");
+        }
+      },
+    },
+  });
+  const sync = (mode: "live" | "once", transportId = peer.transportId) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode, ref: publicRef }),
+      context(transportId),
+    );
+  const hello = (transportId = peer.transportId) =>
+    host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test Device", platform: "node" }, supportedVersions: [2] },
+      context(transportId),
+    );
+
+  try {
+    await hello();
+    await sync("live");
+    expect(transitions).toEqual([{ available: true, ref: nativeRef }]);
+
+    // Repeating live sync for the same peer does not duplicate the transition.
+    await sync("live");
+    expect(transitions.map(({ available }) => available)).toEqual([true]);
+
+    // Once sync removes the last subscriber and emits the matching false edge.
+    await sync("once");
+    expect(transitions.map(({ available }) => available)).toEqual([true, false]);
+
+    // A peer disconnect removes the last subscriber as well.
+    await sync("live");
+    disconnectPeer?.(peer);
+    for (let attempt = 0; attempt < 20 && transitions.length < 4; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(transitions.map(({ available }) => available)).toEqual([true, false, true, false]);
+
+    // A non-size live send failure removes the subscriber and emits false.
+    const reconnectTransportId = "transport-a-reconnected";
+    await hello(reconnectTransportId);
+    await sync("live", reconnectTransportId);
+    failLiveSend = true;
+    current = snapshot([entry("entry-failure")]);
+    for (const listener of runtimeListeners) {
+      listener({
+        channel: "replayable",
+        cursor: agentDeliveryCursor(1),
+        entry: entry("entry-failure"),
+        eventId: agentEventId("event-failure"),
+        occurredAt: now,
+        sessionId: nativeRef.sessionId,
+        source: {
+          backendId: nativeRef.backendId,
+          driverId: nativeRef.driverId,
+          nativeType: "test",
+        },
+        type: "entry.appended",
+      });
+    }
+    for (let attempt = 0; attempt < 20 && transitions.length < 6; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(transitions.map(({ available }) => available)).toEqual([
+      true,
+      false,
+      true,
+      false,
+      true,
+      false,
+    ]);
+
+    // Close reports false for an owner that is still subscribed.
+    failLiveSend = false;
+    await sync("live", reconnectTransportId);
+  } finally {
+    await host.close();
+  }
+  expect(transitions.map(({ available }) => available)).toEqual([
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+  ]);
 });
 
 test("v2 host leaves presence disabled by default", async () => {

@@ -84,6 +84,7 @@ function v2Entry(
     cursor: agentDeliveryCursor(0),
     id: entry.id,
     parentId,
+    ...(entry.scope === undefined ? {} : { scope: entry.scope }),
   };
   switch (entry.kind) {
     case "message":
@@ -297,6 +298,7 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     projection: AgentSessionProjection,
     initialOverlay: RemoteAgentV2Overlay | undefined,
     private readonly setOverlay: (overlay: RemoteAgentV2Overlay | undefined) => void,
+    private readonly onClosed: (runtime: DshV2Runtime) => void,
   ) {
     this.ref = ref;
     this.lastEntryId = projection.entries.at(-1)?.id ?? null;
@@ -332,7 +334,13 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     if (this.closed) return;
     this.closed = true;
     this.removeNative();
+    this.onClosed(this);
     await this.native.close();
+  }
+
+  flushPendingDeltas(): void {
+    this.assertOpen();
+    this.native.flushPendingDeltas();
   }
 
   async prompt(input: {
@@ -626,6 +634,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
   readonly hostId = DSH_HOST_BACKEND_ID;
   private readonly overlays = new Map<string, RemoteAgentV2Overlay>();
   private readonly pendingInputs = new Map<string, readonly AgentQueuedInput[]>();
+  private readonly runtimes = new Map<string, DshV2Runtime>();
   private readonly stateRevisions = new Map<string, number>();
   private readonly sessionCwds = new Map<string, string | null>();
 
@@ -635,7 +644,11 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
   ) {}
 
   async close(): Promise<void> {
-    await this.native.close();
+    try {
+      await this.native.close();
+    } finally {
+      this.runtimes.clear();
+    }
   }
 
   async connectRuntime(ref: AgentSessionRef): Promise<RemoteAgentV2Runtime> {
@@ -643,7 +656,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     this.pendingInputs.set(ref.sessionId, nativeRuntime.pendingInputs());
     const projection = await this.native.readSession(ref);
     this.setStateRevision(ref.sessionId, await this.native.readStateRevision(ref));
-    return new DshV2Runtime(
+    const runtime = new DshV2Runtime(
       this,
       nativeRuntime,
       ref,
@@ -653,7 +666,10 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
         if (overlay === undefined) this.overlays.delete(ref.sessionId);
         else this.overlays.set(ref.sessionId, overlay);
       },
+      (closedRuntime) => this.removeRuntime(ref.sessionId, closedRuntime),
     );
+    this.runtimes.set(ref.sessionId, runtime);
+    return runtime;
   }
 
   async createSession(input: {
@@ -684,6 +700,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
       runState: runState(projection),
       title: projection.metadata.title ?? null,
       updatedAt: record.updatedAt,
+      workspaceRef: projection.workspaceRef ?? null,
     };
   }
 
@@ -774,6 +791,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
       runState: session.runtimeStatus === "running" ? "running" : "idle",
       title: session.title ?? null,
       updatedAt: session.updatedAt,
+      workspaceRef: session.workspaceRef ?? null,
     }));
   }
 
@@ -790,6 +808,7 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
   }
 
   async readSession(ref: AgentSessionRef): Promise<RemoteAgentV2SessionSnapshot> {
+    this.runtimes.get(ref.sessionId)?.flushPendingDeltas();
     const projection = await this.native.readSession(ref);
     const stateRevision = await this.native.readStateRevision(ref);
     this.setStateRevision(ref.sessionId, stateRevision);
@@ -804,6 +823,10 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     if (driverId !== this.native.driverDescriptor.id) {
       throw new AgentBackendError("not_found", "The DSH driver is unavailable");
     }
+  }
+
+  private removeRuntime(sessionId: string, runtime: DshV2Runtime): void {
+    if (this.runtimes.get(sessionId) === runtime) this.runtimes.delete(sessionId);
   }
 
   nextStateRevision(sessionId: AgentSessionRef["sessionId"]): number {

@@ -140,6 +140,10 @@ interface RemoteAgentV2EntryBase {
   /** Host-assigned cursor. Native adapters use 0 before host materialization. */
   readonly cursor: AgentDeliveryCursor;
   readonly createdAt: AgentTimestamp;
+  readonly scope?: {
+    readonly runId: AgentRunId;
+    readonly stepId?: string;
+  };
   readonly _meta?: RemoteAgentV2JsonValue;
 }
 
@@ -210,6 +214,7 @@ export interface RemoteAgentV2SessionSummary {
   readonly title: string | null;
   readonly runState: RemoteAgentV2RunState;
   readonly updatedAt: AgentTimestamp;
+  readonly workspaceRef: string | null;
 }
 
 export interface RemoteAgentV2SessionRecord extends RemoteAgentV2SessionSummary {

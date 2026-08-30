@@ -9,6 +9,7 @@ import {
   type AgentContentBlock,
   type AgentContextEntry,
   type AgentContextOrigin,
+  type AgentEntryScope,
   type AgentJsonValue,
   type AgentMessageEntry,
   type AgentModelSelection,
@@ -348,8 +349,9 @@ function projectAssistantMessage(
   const stopReason: AgentMessageEntry["stopReason"] =
     data.interrupted === true ? "aborted" : undefined;
   // DSH permits an empty assistant message to carry usage at a max-token
-  // boundary. It is not a transcript entry.
-  if (content.length === 0) return undefined;
+  // boundary. Preserve that accounting as a contentless canonical entry so a
+  // run-level presentation can include it without inventing provider totals.
+  if (content.length === 0 && usage === undefined) return undefined;
   return {
     content,
     createdAt: dshTimestamp(event.time),
@@ -438,24 +440,112 @@ function projectToolResult(
   };
 }
 
+function lifecycleNumber(event: DshSessionEvent, key: "step" | "turn", label: string): number {
+  const value = record(event.data, label)[key];
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new AgentBackendError("protocol", `DSH ${label} ${key} is invalid`);
+  }
+  return value as number;
+}
+
+function projectRequestSystemPrompt(
+  event: DshSessionEvent,
+  previousSystem: string | undefined,
+  hasPreviousHeader: boolean,
+): { readonly entry?: AgentMessageEntry; readonly system: string } {
+  const data = record(event.data, "request header");
+  const header = record(data.header, "request header payload");
+  const systemValue = header.system;
+  if (systemValue !== undefined && typeof systemValue !== "string") {
+    throw new AgentBackendError("protocol", "DSH request system prompt is invalid");
+  }
+  const system = systemValue ?? "";
+  const reason = data.reason;
+  if (reason !== "initial" && reason !== "resume" && reason !== "change" && reason !== "series") {
+    throw new AgentBackendError("protocol", "DSH request header reason is invalid");
+  }
+  if (data.startsSeries !== undefined && data.startsSeries !== true) {
+    throw new AgentBackendError("protocol", "DSH request header series marker is invalid");
+  }
+  const showsPrompt =
+    !hasPreviousHeader ||
+    reason !== "change" ||
+    data.startsSeries === true ||
+    previousSystem !== system;
+  if (!showsPrompt || system.length === 0) return { system };
+  return {
+    entry: {
+      content: [{ text: system, type: "text" }],
+      createdAt: dshTimestamp(event.time),
+      cursor: agentDeliveryCursor(0),
+      id: dshEntryId(event),
+      kind: "message",
+      parentId: null,
+      role: "system",
+    },
+    system,
+  };
+}
+
 /** Stateful only to retain call metadata from DSH's append-only event log. */
 export class DshSessionEntryProjector {
   private readonly toolCalls = new Map<string, DshToolCall>();
+  private activeRunId: AgentEntryScope["runId"] | undefined;
+  private activeStepId: string | undefined;
+  private hasRequestHeader = false;
+  private requestSystem: string | undefined;
 
   project(event: DshSessionEvent): AgentSessionEntry | undefined {
+    if (event.type === "turn/start") {
+      this.activeRunId = dshRunId(lifecycleNumber(event, "turn", "turn start"));
+      this.activeStepId = undefined;
+    } else if (event.type === "step/start") {
+      this.activeStepId = String(lifecycleNumber(event, "step", "step start"));
+    }
+
+    let entry: AgentSessionEntry | undefined;
     switch (event.type) {
       case "user/message":
-        return projectUserMessage(event, this.toolCalls);
+        entry = projectUserMessage(event, this.toolCalls);
+        break;
       case "assistant/message":
-        return projectAssistantMessage(event, this.toolCalls);
+        entry = projectAssistantMessage(event, this.toolCalls);
+        break;
       case "tool/call":
         rememberToolCall(event, this.toolCalls);
-        return undefined;
+        break;
       case "tool/result":
-        return projectToolResult(event, this.toolCalls);
-      default:
-        return undefined;
+        entry = projectToolResult(event, this.toolCalls);
+        break;
+      case "request/header": {
+        const projected = projectRequestSystemPrompt(
+          event,
+          this.requestSystem,
+          this.hasRequestHeader,
+        );
+        this.hasRequestHeader = true;
+        this.requestSystem = projected.system;
+        entry = projected.entry;
+        break;
+      }
     }
+
+    const scope =
+      this.activeRunId === undefined
+        ? undefined
+        : {
+            runId: this.activeRunId,
+            ...(this.activeStepId === undefined ? {} : { stepId: this.activeStepId }),
+          };
+    const scopedEntry =
+      entry === undefined || scope === undefined ? entry : { ...entry, scope: { ...scope } };
+
+    if (event.type === "step/end") this.activeStepId = undefined;
+    if (event.type === "turn/end") {
+      this.activeRunId = undefined;
+      this.activeStepId = undefined;
+    }
+    return scopedEntry;
   }
 }
 

@@ -20,8 +20,9 @@ import { expect, test } from "vitest";
 import type {
   DshAgent,
   DshAgentInboxEvent,
-  DshApiInteractionResponse,
-  DshApiMuxRequest,
+  DshContext,
+  DshQuestionAnswer,
+  DshQuestionRequest,
   DshSession,
   DshSessionEvent,
   DshUserMessage,
@@ -83,108 +84,57 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
-        apiProxy: {
-          llm: {
-            models: async ({ rpcId }) => ({
-              result: {
-                ok: true,
-                value: {
-                  failures: [],
-                  groups: [
-                    {
-                      id: "test-provider",
-                      models: [
-                        {
-                          description: "A deterministic test model",
-                          id: "test-model",
-                          name: "Test Model",
-                        },
-                      ],
-                      name: "Test Provider",
-                    },
-                  ],
-                },
+        sessionController: {
+          create: async (payload) => {
+            const id = String(payload.sessionId);
+            const session: DshSession = {
+              events: [] as DshSessionEvent[],
+              header: {
+                agentPreset: payload.agentPreset ?? "standard",
+                createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+                cwd: "/workspace",
+                id,
               },
-              rpcId,
-            }),
+              id,
+            };
+            sessions.set(id, session);
+            const inbox = { nextStep: [] as DshUserMessage[], nextTurn: [] as DshUserMessage[] };
+            inboxes.set(id, inbox);
+            const agent: DshAgent = {
+              cancel: () => {},
+              followup: () => {},
+              id,
+              inbox,
+              options: {},
+              session,
+              status: "idle",
+              steer: () => {},
+            };
+            agents.set(id, agent);
+            return { agentPreset: session.header.agentPreset, sessionId: id };
           },
-          sessions: {
-            create: async ({ payload, rpcId }) => {
-              const id = String(payload.sessionId);
-              const session: DshSession = {
-                events: [] as DshSessionEvent[],
-                header: {
-                  agentPreset: payload.agentPreset ?? "standard",
-                  createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
-                  cwd: "/workspace",
-                  id,
-                },
-                id,
-              };
-              sessions.set(id, session);
-              const inbox = { nextStep: [] as DshUserMessage[], nextTurn: [] as DshUserMessage[] };
-              inboxes.set(id, inbox);
-              const agent: DshAgent = {
-                cancel: () => {},
-                followup: () => {},
-                id,
-                inbox,
-                options: {},
-                session,
-                status: "idle",
-                steer: () => {},
-              };
-              agents.set(id, agent);
-              return {
-                result: {
-                  ok: true as const,
-                  value: { agentPreset: session.header.agentPreset, sessionId: id },
-                },
-                rpcId,
-              };
-            },
-            models: async ({ payload, rpcId }) => {
-              const id = String(payload.sessionId);
-              const agent = agents.get(id);
-              if (agent === undefined) {
-                return {
-                  result: {
-                    error: { code: "session-not-found", message: "missing session" },
-                    ok: false as const,
+          modelCatalog: async () => ({
+            failures: [],
+            groups: [
+              {
+                id: "test-provider",
+                models: [
+                  {
+                    description: "A deterministic test model",
+                    id: "test-model",
+                    name: "Test Model",
                   },
-                  rpcId,
-                };
-              }
-              return {
-                result: {
-                  ok: true as const,
-                  value: {
-                    current:
-                      selectedModels.get(id) ??
-                      ({
-                        model: agent.options.model ?? "test-model",
-                        provider: agent.options.provider ?? "test-provider",
-                      } as const),
-                  },
-                },
-                rpcId,
-              };
-            },
-            selectModel: async ({ payload, rpcId }) => {
-              const id = String(payload.sessionId);
-              if (!agents.has(id)) {
-                return {
-                  result: {
-                    error: { code: "session-not-found", message: "missing session" },
-                    ok: false as const,
-                  },
-                  rpcId,
-                };
-              }
-              const selected = { model: payload.model, provider: payload.provider };
-              selectedModels.set(id, selected);
-              return { result: { ok: true as const, value: { selected } }, rpcId };
-            },
+                ],
+                name: "Test Provider",
+              },
+            ],
+          }),
+          selectModel: async (payload) => {
+            const id = String(payload.sessionId);
+            if (!agents.has(id)) throw new Error("missing session");
+            const selected = { model: payload.model, provider: payload.provider };
+            selectedModels.set(id, selected);
+            return { selected };
           },
         },
         agents: {
@@ -254,6 +204,15 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
             return { events: session.events, meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
+        },
+        sessionProjections: {
+          snapshot: (session) => {
+            const next = selectedModels.get(String(session.id)) ?? {
+              model: "test-model",
+              provider: "test-provider",
+            };
+            return { values: { modelSelection: { lastUsed: next, next } } };
+          },
         },
         workspace: {
           get: (id) =>
@@ -652,103 +611,46 @@ test("delivers DSH v2 live entries through the attached host transport", async (
   const sessions = new Map<string, DshSession>();
   const agents = new Map<string, DshAgent>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
-  const interactionResponses: DshApiInteractionResponse[] = [];
-  const interactionQueue: DshApiMuxRequest[] = [];
-  const interactionWaiters: Array<(request: DshApiMuxRequest | undefined) => void> = [];
-  const emitInteraction = (request: DshApiMuxRequest): void => {
-    const waiter = interactionWaiters.shift();
-    if (waiter === undefined) interactionQueue.push(request);
-    else waiter(request);
-  };
-  const interactionMux = async function* (signal: AbortSignal): AsyncIterable<DshApiMuxRequest> {
-    while (!signal.aborted) {
-      const request = await new Promise<DshApiMuxRequest | undefined>((resolve) => {
-        if (signal.aborted) {
-          resolve(undefined);
-          return;
-        }
-        const queued = interactionQueue.shift();
-        if (queued !== undefined) {
-          resolve(queued);
-          return;
-        }
-        const abort = () => {
-          signal.removeEventListener("abort", abort);
-          resolve(undefined);
-        };
-        signal.addEventListener("abort", abort, { once: true });
-        interactionWaiters.push((value) => {
-          signal.removeEventListener("abort", abort);
-          resolve(value);
-        });
-      });
-      if (request === undefined) return;
-      yield request;
-    }
-  };
+  let questionListener:
+    | ((
+        request: DshQuestionRequest,
+        next: () => Promise<DshQuestionAnswer>,
+      ) => Promise<DshQuestionAnswer>)
+    | undefined;
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
-        apiProxy: {
-          llm: {
-            models: async ({ rpcId }) => ({
-              result: { ok: true as const, value: { failures: [], groups: [] } },
-              rpcId,
-            }),
-          },
-          sessions: {
-            create: async ({ payload, rpcId }) => {
-              const id = String(payload.sessionId);
-              const session: DshSession = {
-                events: [] as DshSessionEvent[],
-                header: {
-                  agentPreset: payload.agentPreset ?? "standard",
-                  createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
-                  cwd: "/workspace",
-                  id,
-                },
+        sessionController: {
+          create: async (payload) => {
+            const id = String(payload.sessionId);
+            const session: DshSession = {
+              events: [] as DshSessionEvent[],
+              header: {
+                agentPreset: payload.agentPreset ?? "standard",
+                createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+                cwd: "/workspace",
                 id,
-              };
-              sessions.set(id, session);
-              const agent: DshAgent = {
-                cancel: () => {},
-                followup: () => {},
-                id,
-                inbox: { nextStep: [], nextTurn: [] },
-                options: {},
-                session,
-                status: "idle",
-                steer: () => {},
-              };
-              agents.set(id, agent);
-              return {
-                result: {
-                  ok: true as const,
-                  value: { agentPreset: session.header.agentPreset, sessionId: id },
-                },
-                rpcId,
-              };
-            },
-            models: async ({ rpcId }) => ({
-              result: {
-                ok: true as const,
-                value: { current: { model: "test-model", provider: "test-provider" } },
               },
-              rpcId,
-            }),
-            selectModel: async ({ payload, rpcId }) => ({
-              result: {
-                ok: true as const,
-                value: { selected: { model: payload.model, provider: payload.provider } },
-              },
-              rpcId,
-            }),
+              id,
+            };
+            sessions.set(id, session);
+            const agent: DshAgent = {
+              cancel: () => {},
+              followup: () => {},
+              id,
+              inbox: { nextStep: [], nextTurn: [] },
+              options: {},
+              session,
+              status: "idle",
+              steer: () => {},
+            };
+            agents.set(id, agent);
+            return { agentPreset: session.header.agentPreset, sessionId: id };
           },
-          events: { mux: (_request, signal) => interactionMux(signal) },
-          respond: async (message: DshApiInteractionResponse) => {
-            interactionResponses.push(message);
-            return { accepted: true };
-          },
+          modelCatalog: async () => ({ failures: [], groups: [] }),
+          selectModel: async (payload) => ({
+            selected: { model: payload.model, provider: payload.provider },
+          }),
         },
         agents: {
           create: async ({ agentOptions, sessionId }) => {
@@ -790,7 +692,13 @@ test("delivers DSH v2 live entries through the attached host transport", async (
             };
           },
         },
-        on: (event, listener) => {
+        on: ((event: string, listener: unknown) => {
+          if (event === "user-questions/request") {
+            questionListener = listener as NonNullable<typeof questionListener>;
+            return () => {
+              questionListener = undefined;
+            };
+          }
           if (event !== "session/event") return () => {};
           const sessionListener = listener as (
             session: DshSession,
@@ -798,7 +706,7 @@ test("delivers DSH v2 live entries through the attached host transport", async (
           ) => void;
           nativeListeners.add(sessionListener);
           return () => nativeListeners.delete(sessionListener);
-        },
+        }) as DshContext["on"],
         sessionPersistence: {
           inspect: async (id) => {
             const session = sessions.get(String(id));
@@ -806,6 +714,16 @@ test("delivers DSH v2 live entries through the attached host transport", async (
             return { events: session.events, meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
+        },
+        sessionProjections: {
+          snapshot: () => ({
+            values: {
+              modelSelection: {
+                lastUsed: { model: "test-model", provider: "test-provider" },
+                next: { model: "test-model", provider: "test-provider" },
+              },
+            },
+          }),
         },
         workspace: {
           get: (id) =>
@@ -912,8 +830,13 @@ test("delivers DSH v2 live entries through the attached host transport", async (
       time: Date.parse("2026-08-10T00:00:07.000Z"),
       type: "todo/write",
     });
-    emitInteraction({
-      payload: {
+    const nativeAgent = agents.get("native-transport");
+    if (nativeAgent === undefined || questionListener === undefined) {
+      throw new Error("transport interaction listener is missing");
+    }
+    const questionResult = questionListener(
+      {
+        agent: nativeAgent,
         questions: [
           {
             id: "host-question",
@@ -921,11 +844,9 @@ test("delivers DSH v2 live entries through the attached host transport", async (
             question: "Continue the host bridge test?",
           },
         ],
-        sessionId: "native-transport",
-        type: "question/requested",
       },
-      rpcId: "host-question",
-    });
+      async () => ({ answers: [] }),
+    );
 
     await eventually(() =>
       deliveries.some(
@@ -954,40 +875,37 @@ test("delivers DSH v2 live entries through the attached host transport", async (
           (delivery) =>
             delivery.ref?.sessionId === created.ref.sessionId &&
             delivery.event.type === "session.state.changed" &&
-            delivery.event.patch.pendingQuestions?.[0]?.requestId === "host-question",
+            delivery.event.patch.pendingQuestions?.length === 1,
         ),
     );
-    const snapshot = await client.sync({ mode: "once", ref: created.ref });
+    // Keep the session live while reading this snapshot: an intentional once
+    // sync removes the last subscriber and delegates pending interactions.
+    const snapshot = await client.sync({ mode: "live", ref: created.ref });
     expect(snapshot).toMatchObject({
       state: {
         mode: "plan",
-        pendingQuestions: [{ requestId: "host-question" }],
+        pendingQuestions: [{}],
         workState: {
           goal: { id: "goal-host", objective: "Verify the DSH host bridge" },
           todos: [{ content: "Inspect snapshot", status: "in_progress" }],
         },
       },
     });
+    const requestId = snapshot.state.pendingQuestions?.[0]?.requestId;
+    if (requestId === undefined) throw new Error("transport question request is missing");
     await expect(
       client.respondQuestion({
         idempotencyKey: "host-question-answer",
         ref: created.ref,
-        requestId: "host-question",
+        requestId,
         response: {
           answers: [{ optionIds: ["dsh-option-0-0"], questionId: "host-question" }],
           kind: "answered",
         },
       }),
     ).resolves.toEqual({ accepted: true });
-    expect(interactionResponses.at(-1)).toMatchObject({
-      result: {
-        ok: true,
-        value: {
-          answer: { answers: [{ id: "host-question", selected: ["Yes"] }] },
-          sessionId: "native-transport",
-        },
-      },
-      rpcId: "host-question",
+    await expect(questionResult).resolves.toEqual({
+      answers: [{ id: "host-question", selected: ["Yes"] }],
     });
     expect(deliveries.some((delivery) => delivery.event.type === "host.session.added")).toBe(true);
   } finally {
@@ -1016,6 +934,15 @@ test("pushes a catalog row created outside the host to a listening client", asyn
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        sessionController: {
+          create: async () => {
+            throw new Error("unused");
+          },
+          modelCatalog: async () => ({ failures: [], groups: [] }),
+          selectModel: async () => {
+            throw new Error("unused");
+          },
+        },
         agents: {
           create: async () => {
             throw new Error("unused");
@@ -1042,6 +969,7 @@ test("pushes a catalog row created outside the host to a listening client", asyn
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
+        sessionProjections: { snapshot: () => ({ values: {} }) },
         workspace: { get: () => undefined, list: () => [] },
       },
       createUserMessage: () => ({ id: "message" }),
@@ -1164,60 +1092,28 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
-        apiProxy: {
-          llm: {
-            models: async ({ rpcId }) => ({
-              result: { ok: true as const, value: { failures: [], groups: [] } },
-              rpcId,
-            }),
+        sessionController: {
+          create: async (payload) => {
+            const id = String(payload.sessionId);
+            const session = sessions.get(id);
+            if (session === undefined) throw new Error("session not found");
+            const agent: DshAgent = {
+              cancel: () => {},
+              followup: () => {},
+              id,
+              inbox: { nextStep: [], nextTurn: [] },
+              options: {},
+              session,
+              status: "idle",
+              steer: () => {},
+            };
+            agents.set(id, agent);
+            return { agentPreset: session.header.agentPreset, sessionId: id };
           },
-          sessions: {
-            create: async ({ payload, rpcId }) => {
-              const id = String(payload.sessionId);
-              const session = sessions.get(id);
-              if (session === undefined) {
-                return {
-                  result: {
-                    error: { code: "session-not-found", message: "session not found" },
-                    ok: false as const,
-                  },
-                  rpcId,
-                };
-              }
-              const agent: DshAgent = {
-                cancel: () => {},
-                followup: () => {},
-                id,
-                inbox: { nextStep: [], nextTurn: [] },
-                options: {},
-                session,
-                status: "idle",
-                steer: () => {},
-              };
-              agents.set(id, agent);
-              return {
-                result: {
-                  ok: true as const,
-                  value: { agentPreset: session.header.agentPreset, sessionId: id },
-                },
-                rpcId,
-              };
-            },
-            models: async ({ rpcId }) => ({
-              result: {
-                ok: true as const,
-                value: { current: { model: "test-model", provider: "test-provider" } },
-              },
-              rpcId,
-            }),
-            selectModel: async ({ payload, rpcId }) => ({
-              result: {
-                ok: true as const,
-                value: { selected: { model: payload.model, provider: payload.provider } },
-              },
-              rpcId,
-            }),
-          },
+          modelCatalog: async () => ({ failures: [], groups: [] }),
+          selectModel: async (payload) => ({
+            selected: { model: payload.model, provider: payload.provider },
+          }),
         },
         agents: {
           create: async () => {
@@ -1257,6 +1153,16 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
             return { events: session.events, meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
+        },
+        sessionProjections: {
+          snapshot: () => ({
+            values: {
+              modelSelection: {
+                lastUsed: { model: "test-model", provider: "test-provider" },
+                next: { model: "test-model", provider: "test-provider" },
+              },
+            },
+          }),
         },
         workspace: { get: () => undefined, list: () => [] },
       },

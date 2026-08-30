@@ -1,11 +1,18 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
+
+import {
+  type CommandSpec,
+  type DshSelection,
+  parseDshSelection,
+  prepareDsh,
+} from "./serve-dsh-source";
 
 const packageManifestSchema = z.object({
   dependencies: z.record(z.string(), z.unknown()),
@@ -19,14 +26,8 @@ const PACKAGE_NAME = "@orbisapp/remote-dsh";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3080;
 
-interface CommandSpec {
-  readonly command: string;
-  readonly prefix: readonly string[];
-  readonly cwd: string;
-}
-
 interface Options {
-  readonly dsh: CommandSpec;
+  readonly dsh: DshSelection;
   readonly home: string;
   readonly port: number;
   readonly workspaceRoot?: string;
@@ -34,7 +35,7 @@ interface Options {
 }
 
 interface Fixture {
-  readonly cleanupPaths: readonly string[];
+  readonly cleanupPaths: string[];
   readonly home: string;
   readonly workspaceRoot: string;
 }
@@ -46,16 +47,23 @@ Build and install ${PACKAGE_NAME} into the persistent DSH web profile,
 then start dsh web on the loopback interface.
 
 Options:
-  --dsh-bin <command>     dsh executable; defaults to the package-local DSH CLI
+  --dsh <selector>         DSH source; defaults to the package-local npm CLI
+                           local:<path>
+                           github:tag:<tag>
+                           github:commit:<commit>
+                           npm:<tag-or-version>
+                           bin:<command>
+  --dsh-bin <command>      explicit dsh executable (mutually exclusive with --dsh)
   --home <path>            DSH_HOME; defaults to ~/.dsh and reuses its web profile
   --workspace-root <path>  workspace root; defaults to a disposable temporary path
   --port <number>          DSH Web port (default: ${DEFAULT_PORT})
-  --keep                   keep the generated temporary workspace after exit
+  --keep                   keep generated temporary files after exit
   -h, --help               show this help
 
 Environment overrides:
-  ORBIS_DSH_BIN           same as --dsh-bin
-  DSH_HOME                override the default DSH home
+  ORBIS_DSH              same as --dsh
+  ORBIS_DSH_BIN          same as --dsh-bin
+  DSH_HOME               override the default DSH home
 `);
 }
 
@@ -77,35 +85,8 @@ function parsePort(value: string): number {
   return port;
 }
 
-function resolveDshCommand(requested?: string): CommandSpec {
-  const localDsh = join(
-    PACKAGE_DIRECTORY,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "dsh.cmd" : "dsh",
-  );
-  const candidate = requested ?? (existsSync(localDsh) ? localDsh : "dsh");
-  if (candidate.includes("/") || candidate.includes("\\") || isAbsolute(candidate)) {
-    if (!existsSync(candidate)) {
-      throw new Error(`dsh CLI not found: ${candidate}`);
-    }
-    return {
-      command: resolve(candidate),
-      prefix: [],
-      cwd: PACKAGE_DIRECTORY,
-    };
-  }
-  if (candidate.length === 0) {
-    throw new Error(`dsh CLI not found: ${candidate}`);
-  }
-  return {
-    command: candidate,
-    prefix: [],
-    cwd: PACKAGE_DIRECTORY,
-  };
-}
-
 function parseOptions(argv: readonly string[]): Options {
+  let dshSelector = process.env.ORBIS_DSH;
   let dshBin = process.env.ORBIS_DSH_BIN;
   let home = process.env.DSH_HOME ?? DEFAULT_DSH_HOME;
   let port = DEFAULT_PORT;
@@ -122,6 +103,10 @@ function parseOptions(argv: readonly string[]): Options {
         break;
       case "--dsh-bin":
         dshBin = requireValue(argv, index, argument);
+        index += 1;
+        break;
+      case "--dsh":
+        dshSelector = requireValue(argv, index, argument);
         index += 1;
         break;
       case "--home":
@@ -145,7 +130,7 @@ function parseOptions(argv: readonly string[]): Options {
   }
 
   return {
-    dsh: resolveDshCommand(dshBin),
+    dsh: parseDshSelection(dshSelector, dshBin),
     home: resolve(home),
     keepFixture,
     port,
@@ -238,9 +223,9 @@ async function main(): Promise<void> {
     DSH_HOME: fixture.home,
     DSH_PERMISSION_MODE: process.env.DSH_PERMISSION_MODE ?? "workspace-write",
     DSH_TELEMETRY_DISABLED: process.env.DSH_TELEMETRY_DISABLED ?? "1",
+    ORBIS_DSH_RAW_EVENT_RECORDING: process.env.ORBIS_DSH_RAW_EVENT_RECORDING ?? "1",
   };
 
-  console.log(`DSH command: ${commandLine(options.dsh, [])}`);
   console.log(`DSH profile: ${DSH_PROFILE}`);
   console.log(`DSH home: ${fixture.home}`);
   console.log(`Workspace root: ${fixture.workspaceRoot}`);
@@ -267,6 +252,14 @@ async function main(): Promise<void> {
       ["run", "build"],
       environment,
     );
+    const dsh = await prepareDsh(options.dsh, {
+      packageDirectory: PACKAGE_DIRECTORY,
+      cleanupPaths: fixture.cleanupPaths,
+      environment,
+      runCommand,
+    });
+    console.log(`DSH source: ${dsh.description}`);
+    console.log(`DSH command: ${commandLine(dsh.command, [])}`);
     const existingDependencies = await profileDependencies(fixture.home);
     if (existingDependencies !== undefined) {
       await runCommand(
@@ -282,18 +275,18 @@ async function main(): Promise<void> {
     for (const packageName of [...OBSOLETE_PACKAGE_NAMES, PACKAGE_NAME]) {
       if (!existingDependencies?.has(packageName)) continue;
       await runCommand(
-        options.dsh,
+        dsh.command,
         ["plugin", "--profile", DSH_PROFILE, "remove", packageName],
         environment,
       );
     }
     await runCommand(
-      options.dsh,
+      dsh.command,
       ["plugin", "--profile", DSH_PROFILE, "add", `link:${PACKAGE_DIRECTORY}`],
       environment,
     );
     await runCommand(
-      options.dsh,
+      dsh.command,
       ["plugin", "--profile", DSH_PROFILE, "why", PACKAGE_NAME],
       environment,
     );
@@ -306,8 +299,8 @@ async function main(): Promise<void> {
       "--port",
       String(options.port),
     ];
-    console.log(`\n$ ${commandLine(options.dsh, webArgs)}\n`);
-    web = spawn(options.dsh.command, [...options.dsh.prefix, ...webArgs], {
+    console.log(`\n$ ${commandLine(dsh.command, webArgs)}\n`);
+    web = spawn(dsh.command.command, [...dsh.command.prefix, ...webArgs], {
       cwd: fixture.workspaceRoot,
       env: environment,
       stdio: "inherit",
@@ -322,9 +315,9 @@ async function main(): Promise<void> {
     process.removeListener("SIGTERM", forwardSignal);
     if (web !== undefined) await stopChild(web);
     if (options.keepFixture && fixture.cleanupPaths.length > 0) {
-      console.log(`Kept temporary workspace at ${fixture.cleanupPaths.join(", ")}`);
+      console.log(`Kept temporary paths at ${fixture.cleanupPaths.join(", ")}`);
     } else if (options.keepFixture) {
-      console.log("No temporary workspace was created.");
+      console.log("No temporary paths were created.");
     } else {
       await Promise.all(
         fixture.cleanupPaths.map((path) => rm(path, { recursive: true, force: true })),

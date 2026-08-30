@@ -58,6 +58,7 @@ export type {
   AgentContextEntry,
   AgentContextOrigin,
   AgentDurableSessionEvent,
+  AgentEntryScope,
   AgentEntryDeltaEvent,
   AgentEntryAppendedEvent,
   AgentEventSource,

@@ -155,6 +155,11 @@ export interface RemoteAgentV2HostOptions {
   readonly clock?: () => AgentTimestamp;
   readonly limits?: Partial<RemoteAgentV2Limits>;
   readonly onError?: (error: AgentBackendError) => void;
+  /** Passive notification when a session gains or loses its last live subscriber. */
+  readonly onSessionSubscriberAvailabilityChanged?: (
+    nativeRef: AgentSessionRef,
+    available: boolean,
+  ) => void;
   readonly scheduler?: RemoteAgentV2HostScheduler;
   readonly store: RemoteAgentV2HostStore;
   readonly transport: RemoteAgentHostDeliveryTransport;
@@ -901,6 +906,7 @@ function sessionSummary(
     runState: snapshot.state.runState,
     title: snapshot.state.title,
     updatedAt: snapshot.state.updatedAt,
+    workspaceRef: snapshot.state.workspaceRef,
   };
 }
 
@@ -918,7 +924,8 @@ function sameSessionSummary(
     left.ref.sessionId === right.ref.sessionId &&
     left.title === right.title &&
     left.runState === right.runState &&
-    left.updatedAt === right.updatedAt
+    left.updatedAt === right.updatedAt &&
+    left.workspaceRef === right.workspaceRef
   );
 }
 
@@ -949,6 +956,9 @@ export class OrbisRemoteAgentV2Host {
   private readonly capabilities: RemoteAgentV2HostCapabilities;
   private readonly limits: RemoteAgentV2Limits;
   private readonly onError: ((error: AgentBackendError) => void) | undefined;
+  private readonly onSessionSubscriberAvailabilityChanged:
+    | ((nativeRef: AgentSessionRef, available: boolean) => void)
+    | undefined;
   private readonly scheduler: RemoteAgentV2HostScheduler;
   private readonly clock: () => AgentTimestamp;
   private readonly catalogCoalesceMs: number;
@@ -973,6 +983,7 @@ export class OrbisRemoteAgentV2Host {
     this.store = options.store;
     this.transport = options.transport;
     this.onError = options.onError;
+    this.onSessionSubscriberAvailabilityChanged = options.onSessionSubscriberAvailabilityChanged;
     this.capabilities = {
       attachments: false,
       dispose: false,
@@ -1116,6 +1127,10 @@ export class OrbisRemoteAgentV2Host {
     this.attachmentReads.clear();
     await Promise.all(
       owners.map(async (owner) => {
+        if (owner.subscribers.size > 0) {
+          owner.subscribers.clear();
+          this.notifySubscriberAvailability(owner, false);
+        }
         owner.unsubscribe?.();
         await Promise.all([
           owner.tail.catch(() => undefined),
@@ -1321,6 +1336,7 @@ export class OrbisRemoteAgentV2Host {
         runState: created.runState,
         title: created.title,
         updatedAt: created.updatedAt,
+        workspaceRef: created.workspaceRef,
       },
       type: "host.session.added",
     });
@@ -1335,11 +1351,13 @@ export class OrbisRemoteAgentV2Host {
     return this.enqueue(owner, async () => {
       this.assertRequestActive(context);
       if (input.mode === "live") {
+        const wasAvailable = owner.subscribers.size > 0;
         const existing = owner.subscribers.get(context.peer.id);
         owner.subscribers.set(context.peer.id, {
           peer: context.peer,
           since: existing?.since ?? this.clock(),
         });
+        if (!wasAvailable) this.notifySubscriberAvailability(owner, true);
       } else {
         this.removePeer(owner, context.peer);
       }
@@ -2504,7 +2522,11 @@ export class OrbisRemoteAgentV2Host {
   private removePeer(owner: Owner, peer: RemoteAgentHostPeer): boolean {
     const current = owner.subscribers.get(peer.id);
     if (current?.peer.transportId !== peer.transportId) return false;
-    return owner.subscribers.delete(peer.id);
+    const removed = owner.subscribers.delete(peer.id);
+    if (removed && owner.subscribers.size === 0) {
+      this.notifySubscriberAvailability(owner, false);
+    }
+    return removed;
   }
 
   private handlePeerDisconnected(peer: RemoteAgentHostPeer): void {
@@ -2543,6 +2565,14 @@ export class OrbisRemoteAgentV2Host {
 
   private assertOpen(): void {
     if (this.closed) throw new AgentBackendError("closed", "The remote agent host is closed");
+  }
+
+  private notifySubscriberAvailability(owner: Owner, available: boolean): void {
+    try {
+      this.onSessionSubscriberAvailabilityChanged?.(owner.nativeRef, available);
+    } catch {
+      // Subscriber observers are passive and cannot break protocol handling.
+    }
   }
 
   private report(error: unknown): void {

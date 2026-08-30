@@ -323,6 +323,14 @@ function parseEntry(value: unknown): RemoteAgentV2Entry {
     parentId: input.parentId === null ? null : agentEntryId(input.parentId),
     cursor: agentDeliveryCursor(input.cursor),
     createdAt: agentTimestamp(input.createdAt),
+    ...(input.scope === undefined
+      ? {}
+      : {
+          scope: {
+            runId: agentRunId(input.scope.runId),
+            ...(input.scope.stepId === undefined ? {} : { stepId: input.scope.stepId }),
+          },
+        }),
     ...(input._meta === undefined ? {} : { _meta: json(input._meta) }),
   };
   switch (input.kind) {
@@ -497,6 +505,7 @@ function parseSummary(value: unknown): RemoteAgentV2SessionSummary {
     title: input.title,
     runState: input.runState,
     updatedAt: agentTimestamp(input.updatedAt),
+    workspaceRef: input.workspaceRef,
   };
 }
 

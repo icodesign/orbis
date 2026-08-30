@@ -1,16 +1,25 @@
 import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
 import { QRCodeSVG } from "qrcode.react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   cancelPairing,
+  cancelRawDshEventReplay,
   connect,
   disconnect,
+  getRawDshEventRecordingStatus,
+  getRawDshEventReplayStatus,
   getStatus,
+  RAW_DSH_EVENT_RECORDING_EXPORT_URL,
   revokeDevice,
   saveConfiguration,
   startPairing,
+  startRawDshEventRecording,
+  startRawDshEventReplay,
+  stopRawDshEventRecording,
   type OrbisStatus,
+  type RawDshEventRecordingStatus,
+  type RawDshEventReplayStatus,
 } from "./api";
 import type { OrbisLocaleKey } from "./locales";
 import { ORBIS_PLUGIN_VERSION, ORBIS_PROTOCOL_VERSION } from "./metadata";
@@ -57,10 +66,41 @@ function pairingPhaseLabel(phase: string, t: Translate): string {
   return t("pairingFailed");
 }
 
+function recordingStateLabel(state: RawDshEventRecordingStatus["state"], t: Translate): string {
+  if (state === "recording") return t("recordingActive");
+  if (state === "stopped") return t("recordingStopped");
+  if (state === "failed") return t("recordingFailed");
+  return t("recordingIdle");
+}
+
+function replayStateLabel(state: RawDshEventReplayStatus["state"], t: Translate): string {
+  if (state === "preparing") return t("replayPreparing");
+  if (state === "waiting") return t("replayWaiting");
+  if (state === "replaying") return t("replayActive");
+  if (state === "completed") return t("replayCompleted");
+  if (state === "cancelled") return t("replayCancelled");
+  if (state === "failed") return t("replayFailed");
+  return t("replayIdle");
+}
+
+function replayActive(state: RawDshEventReplayStatus["state"] | undefined): boolean {
+  return state === "preparing" || state === "waiting" || state === "replaying";
+}
+
+function byteCount(value: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1, notation: "compact" }).format(
+    value,
+  );
+}
+
 export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
   const [status, setStatus] = useState<OrbisStatus>();
   const [directPort, setDirectPort] = useState("47000");
   const [hostName, setHostName] = useState("");
+  const [recording, setRecording] = useState<RawDshEventRecordingStatus>();
+  const [replay, setReplay] = useState<RawDshEventReplayStatus>();
+  const [replayFile, setReplayFile] = useState<File>();
+  const replayFileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
@@ -76,7 +116,14 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
     async (syncConfiguration = false): Promise<void> => {
       try {
         setError(undefined);
-        adopt(await getStatus(), syncConfiguration);
+        const [nextStatus, nextRecording, nextReplay] = await Promise.all([
+          getStatus(),
+          getRawDshEventRecordingStatus(),
+          getRawDshEventReplayStatus(),
+        ]);
+        adopt(nextStatus, syncConfiguration);
+        setRecording(nextRecording);
+        setReplay(nextReplay);
       } catch {
         setError(t("loadFailed"));
       }
@@ -118,6 +165,40 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
       setNotice(t("copied"));
     } catch {
       setError(t("copyFailed"));
+    }
+  }
+
+  async function runRecording(
+    label: string,
+    action: () => Promise<RawDshEventRecordingStatus>,
+  ): Promise<void> {
+    try {
+      setBusy(label);
+      setError(undefined);
+      setNotice(undefined);
+      setRecording(await action());
+    } catch {
+      setError(t("recordingActionFailed"));
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  async function runReplay(
+    label: string,
+    action: () => Promise<RawDshEventReplayStatus>,
+  ): Promise<void> {
+    try {
+      setBusy(label);
+      setError(undefined);
+      setNotice(undefined);
+      const next = await action();
+      setReplay(next);
+      if (next.state === "waiting") setNotice(t("replayWaitingNotice"));
+    } catch {
+      setError(t("replayActionFailed"));
+    } finally {
+      setBusy(undefined);
     }
   }
 
@@ -395,6 +476,169 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
           </div>
         ))}
       </section>
+
+      {recording !== undefined && (
+        <section style={cardStyle}>
+          <div>
+            <h3 style={{ margin: "0 0 4px" }}>{t("recordingTitle")}</h3>
+            <div style={{ fontSize: 13, opacity: 0.72 }}>{t("recordingIntro")}</div>
+          </div>
+          <div
+            role="note"
+            style={{
+              border: "1px solid var(--dsh-warning, #d97706)",
+              borderRadius: 8,
+              padding: 10,
+              fontSize: 13,
+            }}
+          >
+            {t("recordingWarning")}
+          </div>
+          <dl style={{ display: "grid", gap: 6, margin: 0, fontSize: 13 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+              <dt style={{ opacity: 0.72 }}>{t("recordingState")}</dt>
+              <dd style={{ margin: 0 }}>{recordingStateLabel(recording.state, t)}</dd>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+              <dt style={{ opacity: 0.72 }}>{t("recordingEvents")}</dt>
+              <dd style={{ margin: 0 }}>{recording.eventCount}</dd>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+              <dt style={{ opacity: 0.72 }}>{t("recordingBytes")}</dt>
+              <dd style={{ margin: 0 }}>{byteCount(recording.bytes)}</dd>
+            </div>
+          </dl>
+          {recording.error && (
+            <div role="alert" style={{ color: "var(--dsh-danger, #dc2626)", fontSize: 13 }}>
+              {recording.error}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled || recording.state === "recording" || replayActive(replay?.state)}
+              onClick={() => void runRecording("recording-start", startRawDshEventRecording)}
+            >
+              {busy === "recording-start" ? t("busy") : t("recordingStart")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled || recording.state !== "recording"}
+              onClick={() => void runRecording("recording-stop", stopRawDshEventRecording)}
+            >
+              {busy === "recording-stop" ? t("busy") : t("recordingStop")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled || !recording.exportAvailable}
+              onClick={() => window.location.assign(RAW_DSH_EVENT_RECORDING_EXPORT_URL)}
+            >
+              {t("recordingExport")}
+            </Button>
+          </div>
+
+          {replay !== undefined && (
+            <div
+              style={{
+                borderTop: "1px solid var(--dsh-border, rgba(127, 127, 127, .2))",
+                display: "grid",
+                gap: 10,
+                paddingTop: 12,
+              }}
+            >
+              <div>
+                <h4 style={{ margin: "0 0 4px" }}>{t("replayTitle")}</h4>
+                <div style={{ fontSize: 13, opacity: 0.72 }}>{t("replayIntro")}</div>
+              </div>
+              <input
+                ref={replayFileInput}
+                type="file"
+                accept=".jsonl,application/x-ndjson"
+                style={{ display: "none" }}
+                onChange={(event) => setReplayFile(event.target.files?.[0])}
+              />
+              {replayFile && (
+                <div style={{ fontSize: 13 }}>
+                  {t("replaySelected", { filename: replayFile.name })}
+                </div>
+              )}
+              <dl style={{ display: "grid", gap: 6, margin: 0, fontSize: 13 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+                  <dt style={{ opacity: 0.72 }}>{t("replayState")}</dt>
+                  <dd style={{ margin: 0 }}>{replayStateLabel(replay.state, t)}</dd>
+                </div>
+                {replay.eventCount > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+                    <dt style={{ opacity: 0.72 }}>{t("replayProgress")}</dt>
+                    <dd style={{ margin: 0 }}>
+                      {replay.replayedEventCount} / {replay.eventCount}
+                    </dd>
+                  </div>
+                )}
+                {replay.sessionId && (
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+                    <dt style={{ opacity: 0.72 }}>{t("replaySession")}</dt>
+                    <dd style={{ margin: 0, overflowWrap: "anywhere", textAlign: "right" }}>
+                      {replay.sessionId}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+              {replay.error && (
+                <div role="alert" style={{ color: "var(--dsh-danger, #dc2626)", fontSize: 13 }}>
+                  {replay.error}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={disabled || replayActive(replay.state)}
+                  onClick={() => replayFileInput.current?.click()}
+                >
+                  {t("replayChoose")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    disabled ||
+                    replayFile === undefined ||
+                    recording.state === "recording" ||
+                    replayActive(replay.state)
+                  }
+                  onClick={() => {
+                    if (replayFile !== undefined) {
+                      void runReplay("replay-start", () => startRawDshEventReplay(replayFile));
+                    }
+                  }}
+                >
+                  {busy === "replay-start" ? t("busy") : t("replayStart")}
+                </Button>
+                {replayActive(replay.state) && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={disabled}
+                    onClick={() => void runReplay("replay-cancel", cancelRawDshEventReplay)}
+                  >
+                    {busy === "replay-cancel" ? t("busy") : t("replayCancel")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <section style={cardStyle}>
         <h3 style={{ margin: 0 }}>{t("about")}</h3>

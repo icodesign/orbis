@@ -1,8 +1,32 @@
+import { createReadStream } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { pipeline } from "node:stream/promises";
 
 import { z } from "zod";
 
 import { type OrbisDshHostService } from "./host-service";
+import type {
+  OrbisDshRawEventExportMetadata,
+  OrbisDshRawEventRecordingStatus,
+} from "./raw-dsh-event-recorder";
+import type {
+  OrbisDshRawEventReplayStatus,
+  OrbisDshRawEventReplayer,
+} from "./raw-dsh-event-replayer";
+
+export type OrbisRawDshEventRecordingStatus = OrbisDshRawEventRecordingStatus;
+
+export interface OrbisRawDshEventRecorderPort {
+  latestExport(): Promise<OrbisDshRawEventExportMetadata | undefined>;
+  start(): Promise<OrbisRawDshEventRecordingStatus>;
+  status(): OrbisRawDshEventRecordingStatus;
+  stop(): Promise<OrbisRawDshEventRecordingStatus>;
+}
+
+export type OrbisRawDshEventReplayerPort = Pick<
+  OrbisDshRawEventReplayer,
+  "cancel" | "start" | "status"
+>;
 
 const MAX_BODY_BYTES = 32 * 1024;
 
@@ -72,6 +96,27 @@ function send(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
+function safeDownloadFilename(value: string): string {
+  const filename = value.replace(/[^A-Za-z0-9._-]/gu, "_");
+  return filename.length > 0 ? filename : "dsh-raw-events.jsonl";
+}
+
+async function sendRecordingExport(
+  response: ServerResponse,
+  recorder: OrbisRawDshEventRecorderPort,
+): Promise<void> {
+  const artifact = await recorder.latestExport();
+  if (artifact === undefined) throw new Error("No DSH event recording is available to export");
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-disposition": `attachment; filename="${safeDownloadFilename(artifact.filename)}"`,
+    "content-length": String(artifact.bytes),
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  await pipeline(createReadStream(artifact.path), response);
+}
+
 function failure(response: ServerResponse, status: number, error: unknown): void {
   const message =
     error instanceof Error && error.message.length > 0
@@ -100,8 +145,26 @@ function methodNotAllowed(response: ServerResponse): void {
   send(response, 405, { error: "Method not allowed" });
 }
 
+function replayActive(status: OrbisDshRawEventReplayStatus): boolean {
+  return status.state === "preparing" || status.state === "waiting" || status.state === "replaying";
+}
+
+function replayFilename(request: IncomingMessage): string | undefined {
+  const value = header(request, "x-orbis-replay-filename");
+  if (value === undefined) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error("The replay filename is invalid");
+  }
+}
+
 /** Creates the privileged local management route consumed by the settings page. */
-export function createOrbisHttpRoute(service: OrbisDshHostService): OrbisHttpRoute {
+export function createOrbisHttpRoute(
+  service: OrbisDshHostService,
+  recorder?: OrbisRawDshEventRecorderPort,
+  replayer?: OrbisRawDshEventReplayerPort,
+): OrbisHttpRoute {
   return {
     kind: "prefix",
     path: "/orbis",
@@ -112,6 +175,70 @@ export function createOrbisHttpRoute(service: OrbisDshHostService): OrbisHttpRou
       }
       const pathname = new URL(request.url ?? "/", "http://orbis.local").pathname;
       try {
+        if (pathname === "/orbis/replay") {
+          if (replayer === undefined) {
+            failure(response, 404, new Error("DSH event replay is unavailable"));
+            return;
+          }
+          if (request.method === "GET") {
+            send(response, 200, replayer.status());
+            return;
+          }
+          if (request.method === "POST") {
+            if (recorder?.status().state === "recording") {
+              throw new Error("Stop the active DSH event recording before starting a replay");
+            }
+            if ((await service.status()).connection.state !== "connected") {
+              throw new Error("Turn on Orbis access before starting a DSH event replay");
+            }
+            const filename = replayFilename(request);
+            send(
+              response,
+              200,
+              await replayer.start({
+                data: request,
+                ...(filename === undefined ? {} : { filename }),
+              }),
+            );
+            return;
+          }
+          if (request.method === "DELETE") {
+            send(response, 200, await replayer.cancel());
+            return;
+          }
+          return methodNotAllowed(response);
+        }
+        if (pathname === "/orbis/recording/export") {
+          if (recorder === undefined) {
+            failure(response, 404, new Error("DSH event recording is unavailable"));
+            return;
+          }
+          if (request.method !== "GET") return methodNotAllowed(response);
+          await sendRecordingExport(response, recorder);
+          return;
+        }
+        if (pathname === "/orbis/recording") {
+          if (recorder === undefined) {
+            failure(response, 404, new Error("DSH event recording is unavailable"));
+            return;
+          }
+          if (request.method === "GET") {
+            send(response, 200, recorder.status());
+            return;
+          }
+          if (request.method === "POST") {
+            if (replayer !== undefined && replayActive(replayer.status())) {
+              throw new Error("Cancel the active DSH event replay before starting a recording");
+            }
+            send(response, 200, await recorder.start());
+            return;
+          }
+          if (request.method === "DELETE") {
+            send(response, 200, await recorder.stop());
+            return;
+          }
+          return methodNotAllowed(response);
+        }
         if (pathname === "/orbis/status") {
           if (request.method !== "GET") return methodNotAllowed(response);
           send(response, 200, await service.status());
@@ -162,6 +289,10 @@ export function createOrbisHttpRoute(service: OrbisDshHostService): OrbisHttpRou
         }
         failure(response, 404, new Error("Orbis route not found"));
       } catch (error) {
+        if (response.headersSent) {
+          response.destroy(error instanceof Error ? error : new Error("Orbis export failed"));
+          return;
+        }
         failure(response, 400, error);
       }
     },

@@ -190,6 +190,7 @@ function entryEvent(): TransportEvent {
       kind: "message",
       parentId: null,
       role: "assistant",
+      scope: { runId: "turn-1", stepId: "2" },
     },
     eventId: "event-a",
     occurredAt,
@@ -415,7 +416,7 @@ test("v2 connection enforces hello-first and delivers replayable events without 
   expect(deliveries[0]).toMatchObject({
     event: {
       cursor: 1,
-      entry: { id: "entry-a" },
+      entry: { id: "entry-a", scope: { runId: "turn-1", stepId: "2" } },
       settlesEntryId: "stream:1",
       type: "entry.appended",
     },

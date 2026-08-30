@@ -12,7 +12,6 @@ import type { EncodedImageAttachment, ImageAttachmentRef } from "@deepseek-ai/ds
 import type {} from "@deepseek-ai/dsh-credentials";
 import type {} from "@deepseek-ai/dsh-file-reference";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
-import type {} from "@deepseek-ai/dsh-host-apiproxy";
 import type { DirectoryPickerBrowseCapability } from "@deepseek-ai/dsh-host-directory-picker";
 import type {} from "@deepseek-ai/dsh-host-webserver";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -44,6 +43,12 @@ import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-ses
 import { OrbisDshFileLogger } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
 import { createOrbisHttpRoute } from "./http-api";
+import { OrbisDshRawEventRecorder } from "./raw-dsh-event-recorder";
+import {
+  OrbisDshRawEventReplayer,
+  type OrbisDshRawEventReplayEvent,
+  type OrbisDshRawEventReplayPort,
+} from "./raw-dsh-event-replayer";
 import { OrbisDshStateStore } from "./state-store";
 import { createDshWorkspaceFolderProvider } from "./workspace-folder-provider";
 
@@ -52,16 +57,20 @@ export const inject = [
   "agents",
   "subagents",
   "attachments",
+  "approval",
   "fileReferences",
-  "apiProxy",
   "credentials",
   "directoryPicker",
   "webServer",
   "sessionPersistence",
+  "sessionController",
+  "sessionProjections",
   "sessionProjectionCache",
   "sessionReferenceResolver",
   "sessionQuery",
+  "sessionTitle",
   "sessions",
+  "userQuestions",
   "permissionPresets",
   "workspaceRegistry",
 ] as const;
@@ -86,6 +95,142 @@ export const Config: z<Config> = z.object({
   statePath: z.string(),
   workspaceRoots: z.array(z.string()),
 });
+
+export function isRawDshEventRecordingEnabled(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return environment.ORBIS_DSH_RAW_EVENT_RECORDING === "1";
+}
+
+export function subscribeRawDshEventRecorder(
+  context: Context,
+  recorder: Pick<OrbisDshRawEventRecorder, "capture">,
+): () => void {
+  return context.on("session/event", (session, event) => {
+    recorder.capture(String(session.id), event);
+  });
+}
+
+interface ReplayDshSession {
+  readonly events: readonly (OrbisDshRawEventReplayEvent & { readonly time: number })[];
+  readonly id: unknown;
+  readonly seq: number;
+  append(
+    type: string,
+    data: unknown,
+    options?: {
+      readonly sourceEventSeqs?: readonly number[];
+      readonly surfaceOp?: OrbisDshRawEventReplayEvent["surfaceOp"];
+    },
+  ): { readonly seq: number };
+}
+
+interface ReplaySessionStore {
+  flush(session: ReplayDshSession): Promise<void>;
+  get(id: unknown): ReplayDshSession | undefined;
+}
+
+interface ReplaySessionTitleService {
+  rename(session: ReplayDshSession, title: string): unknown;
+}
+
+function replayTitle(events: readonly OrbisDshRawEventReplayEvent[]): string | undefined {
+  let title: string | undefined;
+  let containsHumanMessage = false;
+  for (const event of events) {
+    if (
+      event.type === "session/title" &&
+      typeof event.data === "object" &&
+      event.data !== null &&
+      !Array.isArray(event.data)
+    ) {
+      const data = event.data as Readonly<Record<string, unknown>>;
+      if (typeof data.title === "string" && data.title.trim().length > 0) title = data.title;
+    }
+    if (
+      event.type === "user/message" &&
+      typeof event.data === "object" &&
+      event.data !== null &&
+      !Array.isArray(event.data)
+    ) {
+      const data = event.data as Readonly<Record<string, unknown>>;
+      const source = data.source as Readonly<Record<string, unknown>> | undefined;
+      if (source?.kind === "user") containsHumanMessage = true;
+    }
+  }
+  if (!containsHumanMessage) return undefined;
+  return title ?? "DSH event replay";
+}
+
+export function createRawDshEventReplayPort(
+  context: Context,
+  host: () => OrbisRemoteDshHost | undefined,
+): OrbisDshRawEventReplayPort {
+  return {
+    async createSession() {
+      const activeHost = host();
+      if (activeHost === undefined) {
+        throw new Error("Turn on Orbis access before starting a DSH event replay");
+      }
+      const driver = activeHost.nativeBackend.getDshDriver();
+      const workspace = (await driver.listWorkspaces())[0];
+      if (workspace === undefined) {
+        throw new Error("Open or register a DSH workspace before starting a replay");
+      }
+      const record = await driver.createSession({ workspaceRef: workspace.ref });
+      const nativeSessionId = record.ref.nativeSessionId;
+      const sessions = (context as unknown as { readonly sessions: ReplaySessionStore }).sessions;
+      const sessionTitle = (
+        context as unknown as { readonly sessionTitle: ReplaySessionTitleService }
+      ).sessionTitle;
+      const session = sessions.get(SessionId(nativeSessionId));
+      if (session === undefined || String(session.id) !== nativeSessionId) {
+        throw new Error("DSH did not publish the replay session");
+      }
+      return {
+        announce: () => activeHost.nativeBackend.announceCatalogChanged(record.ref),
+        append(event: OrbisDshRawEventReplayEvent): number {
+          const options =
+            event.surfaceOp === undefined && event.sourceEventSeqs === undefined
+              ? undefined
+              : {
+                  ...(event.sourceEventSeqs === undefined
+                    ? {}
+                    : { sourceEventSeqs: event.sourceEventSeqs }),
+                  ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
+                };
+          const appended =
+            options === undefined
+              ? session.append(event.type, event.data)
+              : session.append(event.type, event.data, options);
+          return appended.seq;
+        },
+        flush: () => sessions.flush(session),
+        initialSeq: session.seq,
+        isSubscribed: () => activeHost.isSessionSubscribed(nativeSessionId),
+        observeSubscription(listener) {
+          return activeHost.observeSessionSubscription((sessionId, subscribed) => {
+            if (sessionId === nativeSessionId) listener(subscribed);
+          });
+        },
+        prepare(events) {
+          const title = replayTitle(events);
+          if (title !== undefined) sessionTitle.rename(session, title);
+        },
+        prefixEvents: session.events.map((event) => ({
+          data: event.data,
+          seq: event.seq,
+          ...(event.sourceEventSeqs === undefined
+            ? {}
+            : { sourceEventSeqs: event.sourceEventSeqs }),
+          ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
+          type: event.type,
+        })),
+        sessionId: nativeSessionId,
+      };
+    },
+  };
+}
 
 function createDshUserMessage(input: {
   readonly content: readonly unknown[];
@@ -163,11 +308,14 @@ function dshPlanMode(context: Context): Context["planMode"] | undefined {
 function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["context"] {
   const planMode = dshPlanMode(context);
   return {
-    ...(context.apiProxy === undefined ? {} : { apiProxy: context.apiProxy }),
     agents: context.agents,
     ...(planMode === undefined ? {} : { planMode }),
     on: context.on.bind(context),
+    sessionController: (context as unknown as { readonly sessionController: unknown })
+      .sessionController,
     sessionPersistence: context.sessionPersistence,
+    sessionProjections: (context as unknown as { readonly sessionProjections: unknown })
+      .sessionProjections,
     // The generic Orbis backend keeps its own narrow DSH port named
     // `workspace`; the current Harness service is exposed as `workspaceRegistry`.
     workspace: context.workspaceRegistry,
@@ -275,6 +423,9 @@ export async function apply(context: Context, config?: Config): Promise<void> {
   const logPath = resolve(
     config?.logPath ?? join(resolveDshHome(), "orbis", "dsh-remote-debug.jsonl"),
   );
+  const rawEventRecorder = isRawDshEventRecordingEnabled()
+    ? new OrbisDshRawEventRecorder(join(resolveDshHome(), "orbis", "recordings"))
+    : undefined;
   const directoryPicker = context.directoryPicker.capability();
   if (directoryPicker.kind !== "browse") {
     throw new Error("orbis-dsh-remote requires a browse directoryPicker capability");
@@ -285,12 +436,13 @@ export async function apply(context: Context, config?: Config): Promise<void> {
     workspace: context.workspaceRegistry,
   });
   const dshContext = createOrbisDshContext(context);
+  let activeRemoteHost: OrbisRemoteDshHost | undefined;
   const service = new OrbisDshHostService(
     new OrbisDshStateStore(statePath),
     context.credentials as unknown as OrbisDshCredentials,
     {
-      create: ({ hostId, hostKeyId }) =>
-        new OrbisRemoteDshHost({
+      create: ({ hostId, hostKeyId }) => {
+        const host = new OrbisRemoteDshHost({
           dsh: {
             context: dshContext,
             createUserMessage: createDshUserMessage,
@@ -313,20 +465,43 @@ export async function apply(context: Context, config?: Config): Promise<void> {
           state: {
             path: agentStatePath,
           },
-        }),
+        });
+        activeRemoteHost = host;
+        return host;
+      },
     },
     undefined,
     undefined,
     new OrbisDshFileLogger(logPath),
   );
-  await service.start();
+  const rawEventReplayer = rawEventRecorder
+    ? new OrbisDshRawEventReplayer(createRawDshEventReplayPort(context, () => activeRemoteHost))
+    : undefined;
+  const removeRawEventListener = rawEventRecorder
+    ? subscribeRawDshEventRecorder(context, rawEventRecorder)
+    : undefined;
+  try {
+    await service.start();
+  } catch (error) {
+    removeRawEventListener?.();
+    await rawEventRecorder?.dispose();
+    throw error;
+  }
 
   context.effect(async () => {
-    const disposeRoute = context.webServer.register(createOrbisHttpRoute(service));
+    const disposeRoute = context.webServer.register(
+      createOrbisHttpRoute(service, rawEventRecorder, rawEventReplayer),
+    );
     void service.connectIfConfigured().catch(() => undefined);
     return async () => {
       disposeRoute();
-      await service.dispose();
+      try {
+        await rawEventReplayer?.dispose();
+        await service.dispose();
+      } finally {
+        removeRawEventListener?.();
+        await rawEventRecorder?.dispose();
+      }
     };
   }, "orbis-dsh-remote: host lifecycle");
 }

@@ -91,9 +91,9 @@ importers:
       '@deepseek-ai/dsh-client-locale':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(048e7c438545728704e82d9acbc5c221)
-      '@deepseek-ai/dsh-client-runtime':
+      '@deepseek-ai/dsh-client-ui-directory-picker-browse':
         specifier: ^0.1.1-rc.2
-        version: 0.1.1-rc.2(601e9129357dc48738583e18d75d19b2)
+        version: 0.1.1-rc.2(e266472b05d0f28968096fd7865f8cdf)
       '@deepseek-ai/dsh-client-ui-primitives':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
@@ -115,9 +115,6 @@ importers:
       '@deepseek-ai/dsh-home-paths':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
-      '@deepseek-ai/dsh-host-apiproxy':
-        specifier: ^0.1.1-rc.2
-        version: 0.1.1-rc.2(7a1c54e2b954eca6f88bad802758761b)
       '@deepseek-ai/dsh-host-directory-picker':
         specifier: ^0.1.1-rc.2
         version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))

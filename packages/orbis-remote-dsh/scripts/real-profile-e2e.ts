@@ -23,7 +23,7 @@ import {
 } from "@orbisapp/transport";
 
 import { createNodeWebSocketFactory } from "../src/plugin/node-websocket.ts";
-import { delay, waitFor } from "./real-profile-e2e-utils.ts";
+import { authenticateDshWeb, delay, fetchDshWeb, waitFor } from "./real-profile-e2e-utils.ts";
 
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const STRICT = process.env.ORBIS_DSH_REAL_E2E_STRICT === "1";
@@ -34,6 +34,12 @@ const PACKAGE_DSH_BIN = join(
   ".bin",
   process.platform === "win32" ? "dsh.cmd" : "dsh",
 );
+const PACKAGE_TSX_BIN = join(
+  PACKAGE_DIRECTORY,
+  "node_modules",
+  ".bin",
+  process.platform === "win32" ? "tsx.cmd" : "tsx",
+);
 const DSH_COMMAND =
   process.env.ORBIS_DSH_BIN ?? (existsSync(PACKAGE_DSH_BIN) ? PACKAGE_DSH_BIN : "dsh");
 const WEB_READY_TIMEOUT_MS = 90_000;
@@ -43,7 +49,10 @@ function log(message) {
 }
 
 function redact(value) {
-  let result = String(value);
+  let result = String(value).replace(
+    /(http:\/\/127\.0\.0\.1:\d+\/\?token=)[^\s]+/gu,
+    "$1<redacted>",
+  );
   for (const secret of [process.env.DEEPSEEK_API_KEY]) {
     if (secret !== undefined && secret.length > 0) result = result.split(secret).join("<redacted>");
   }
@@ -119,11 +128,11 @@ function startWeb({ home, agentsHome, workspace, overlay }) {
   }, WEB_READY_TIMEOUT_MS);
   const consume = (chunk) => {
     output = `${output}${chunk.toString()}`.slice(-24_000);
-    const match = /dsh web: (http:\/\/127\.0\.0\.1:\d+)/u.exec(output);
-    if (match?.[1] !== undefined) {
+    const match = /dsh web: (http:\/\/127\.0\.0\.1:\d+[^\s]*)/u.exec(output);
+    if (match?.[1] !== undefined && !didSettleReady) {
       didSettleReady = true;
       clearTimeout(timer);
-      resolveReady(match[1]);
+      void authenticateDshWeb(match[1]).then(resolveReady, rejectReady);
     }
   };
   child.stdout?.on("data", consume);
@@ -160,8 +169,8 @@ function startWeb({ home, agentsHome, workspace, overlay }) {
   };
 }
 
-async function requestJson(baseUrl, path, options = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
+async function requestJson(webSession, path, options = {}) {
+  const response = await fetchDshWeb(webSession, path, {
     ...options,
     headers: { "content-type": "application/json", ...(options.headers ?? {}) },
   });
@@ -178,8 +187,8 @@ async function requestJson(baseUrl, path, options = {}) {
   return body;
 }
 
-async function dshRpc(baseUrl, method, payload) {
-  const body = await requestJson(baseUrl, `/api/${method}`, {
+async function dshRpc(webSession, method, payload) {
+  const body = await requestJson(webSession, `/api/${method}`, {
     method: "POST",
     body: JSON.stringify({
       type: "client-request",
@@ -190,9 +199,26 @@ async function dshRpc(baseUrl, method, payload) {
   });
   const result = body.result;
   if (!result?.ok) {
-    throw new Error(`${method} failed: ${result?.error?.code ?? "unknown"}`);
+    const code = result?.error?.code ?? "unknown";
+    const message = result?.error?.message;
+    throw new Error(`${method} failed: ${code}${message ? ` (${redact(message)})` : ""}`);
   }
   return result.value;
+}
+
+async function readDshModelSelection(webSession, dshVersion, sessionId) {
+  if (dshVersion === "0.1.2-alpha.1") {
+    const sessions = await dshRpc(webSession, "session/list", {
+      args: { _request: {} },
+    });
+    const summary = sessions.items?.find((item) => item.sessionId === sessionId);
+    if (summary === undefined) throw new Error("session/list did not include the selected Session");
+    return summary.projections?.values?.modelSelection?.next ?? null;
+  }
+  if (dshVersion === "0.1.1-rc.2") {
+    return (await dshRpc(webSession, "session.models", { sessionId })).current ?? null;
+  }
+  throw new Error(`DSH ${dshVersion} has no reviewed model-observation contract`);
 }
 
 /** Preserve the test phase when an encrypted remote request fails. */
@@ -317,17 +343,6 @@ function createDeliveryQueue(journalPath) {
   };
 }
 
-function latestDurableDeliveryCursor(deliveries, fallback) {
-  let cursor = fallback;
-  for (const delivery of deliveries) {
-    if (delivery.transportEvent.durability !== "durable") continue;
-    const candidate = delivery.transportEvent.eventSeq;
-    if (!Number.isSafeInteger(candidate) || candidate < cursor) continue;
-    cursor = candidate;
-  }
-  return cursor;
-}
-
 async function persistedIndexEntryCount(path) {
   try {
     const state = JSON.parse(await readFile(path, "utf8"));
@@ -371,6 +386,7 @@ async function assertDshCompatibility() {
       if (!webHelp.output.includes(flag))
         throw new Error(`DSH Web is missing the required ${flag} flag`);
     }
+    return expected;
   } finally {
     await rm(probeRoot, { recursive: true, force: true });
   }
@@ -480,8 +496,9 @@ async function main() {
     log("SKIP: set ORBIS_DSH_REAL_E2E=1 to run the real profile fixture");
     return;
   }
+  let dshVersion;
   try {
-    await assertDshCompatibility();
+    dshVersion = await assertDshCompatibility();
   } catch (error) {
     prerequisiteFailure(
       `the installed DSH CLI is not the reviewed profile prerequisite: ${error instanceof Error ? error.message : String(error)}`,
@@ -489,7 +506,7 @@ async function main() {
     return;
   }
   try {
-    await runCommand("pnpm", ["--dir", PACKAGE_DIRECTORY, "run", "build"]);
+    await runCommand(PACKAGE_TSX_BIN, ["scripts/build.ts"], { cwd: PACKAGE_DIRECTORY });
   } catch (error) {
     prerequisiteFailure(
       `the Orbis DSH bundle could not be built: ${error instanceof Error ? error.message : String(error)}`,
@@ -531,7 +548,6 @@ async function main() {
   let workspaceId;
   let session;
   let baselineCursor = 0;
-  let baselineEntryId;
   let deliveries = [];
   const providerSecrets = [process.env.DEEPSEEK_API_KEY];
   try {
@@ -549,21 +565,21 @@ async function main() {
       },
     );
     web = startWeb({ home, agentsHome, workspace, overlay });
-    const baseUrl = await web.ready;
+    const webSession = await web.ready;
     await waitFor(async () => {
-      const response = await fetch(`${baseUrl}/orbis/status`);
+      const response = await fetchDshWeb(webSession, "/orbis/status");
       return response.ok;
     }, "Orbis loopback management route");
 
     const directPort = await freePort();
-    await requestJson(baseUrl, "/orbis/config", {
+    await requestJson(webSession, "/orbis/config", {
       method: "PUT",
       body: JSON.stringify({
         directPort,
         hostName: "Orbis real profile fixture",
       }),
     });
-    const pairingStatus = await requestJson(baseUrl, "/orbis/pairings", {
+    const pairingStatus = await requestJson(webSession, "/orbis/pairings", {
       method: "POST",
       body: "{}",
     });
@@ -590,7 +606,7 @@ async function main() {
     }
 
     const statusAfterPairing = await waitFor(async () => {
-      const status = await requestJson(baseUrl, "/orbis/status");
+      const status = await requestJson(webSession, "/orbis/status");
       return status.devices?.some((device) => device.keyId === deviceIdentity.keyId)
         ? status
         : false;
@@ -651,8 +667,7 @@ async function main() {
     const initialSync = await agentStep("initial sessions.sync", () =>
       activeAgent.sync({ mode: "live", ref: session.ref }),
     );
-    if (initialSync.kind !== "snapshot")
-      throw new Error("initial session sync did not return a snapshot");
+    if (!initialSync.baseline) throw new Error("initial session sync did not return a snapshot");
     baselineCursor = 0;
 
     const modelCatalog = await agentStep("models.list", () =>
@@ -709,12 +724,14 @@ async function main() {
         ),
       "real DSH model selection event",
     );
-    const dshModelState = await dshRpc(baseUrl, "session.models", {
-      sessionId: session.ref.nativeSessionId,
-    });
+    const dshModelState = await readDshModelSelection(
+      webSession,
+      dshVersion,
+      session.ref.nativeSessionId,
+    );
     if (
-      dshModelState.current?.provider !== modelSelection.provider ||
-      dshModelState.current.model !== modelSelection.modelId
+      dshModelState?.provider !== modelSelection.provider ||
+      dshModelState.model !== modelSelection.modelId
     ) {
       throw new Error("Orbis and DSH Web did not observe the same selected model");
     }
@@ -771,12 +788,6 @@ async function main() {
       deviceId: "orbis-real-e2e-reconnect",
     });
     const replayAgent = agentConnection.agent;
-    const replayDeliveries = [];
-    const replayDeliveryQueue = createDeliveryQueue(clientJournal);
-    replayAgent.onEvent((delivery) => {
-      replayDeliveries.push(delivery);
-      void replayDeliveryQueue.enqueue(delivery).catch(() => undefined);
-    });
     const replay = await agentStep("reconnect sessions.sync", () =>
       replayAgent.sync({
         afterCursor: baselineCursor,
@@ -785,22 +796,30 @@ async function main() {
         ref: session.ref,
       }),
     );
-    if (replay.kind !== "replay") {
+    if (replay.baseline) {
       throw new Error("direct reconnect did not replay the native durable suffix");
     }
-    if (replayDeliveries.length === 0) throw new Error("replay returned no durable deliveries");
-    await replayDeliveryQueue.wait();
-    const committedCursor = latestDurableDeliveryCursor(
-      [...deliveries, ...replayDeliveries],
-      baselineCursor,
+    if (replay.entries.length === 0) throw new Error("replay returned no durable entries");
+    const assistantWithUsage = replay.entries.find(
+      (entry) =>
+        entry.kind === "message" && entry.role === "assistant" && entry.usage !== undefined,
     );
+    if (
+      assistantWithUsage?.usage === undefined ||
+      assistantWithUsage.usage.inputTokens <= 0 ||
+      assistantWithUsage.usage.outputTokens <= 0
+    ) {
+      throw new Error("the real provider response did not expose non-zero assistant usage");
+    }
+    const committedCursor = Number(replay.throughCursor);
     if (committedCursor <= baselineCursor) {
       throw new Error("replay did not advance the durable client cursor");
     }
-    const committedEntryId = [...deliveries, ...replayDeliveries]
-      .filter((delivery) => delivery.event.type === "entry.appended")
-      .at(-1)?.event.entry.id;
-    if (committedEntryId === undefined) throw new Error("replay did not include an appended entry");
+    const committedEntry = replay.entries.at(-1);
+    if (committedEntry === undefined || committedEntry.cursor !== committedCursor) {
+      throw new Error("replay tail did not match its through cursor");
+    }
+    const committedEntryId = committedEntry.id;
 
     // Restart the real DSH Web process. The native transcript and the small
     // cursor index are independent, so the durable suffix remains
@@ -862,7 +881,7 @@ async function main() {
         ref: session.ref,
       }),
     );
-    if (restartSync.kind !== "replay" || Number(restartSync.throughCursor) !== committedCursor) {
+    if (restartSync.baseline || Number(restartSync.throughCursor) !== committedCursor) {
       throw new Error("post-restart sync did not establish the committed live baseline");
     }
     const secondReceipt = await agentStep("post-restart new-run prompt", () =>
@@ -899,7 +918,7 @@ async function main() {
     const history = await agentStep("full history replay after restart", () =>
       historyAgent.sync({ mode: "once", ref: session.ref }),
     );
-    if (history.kind !== "snapshot" || history.entries.length < 2) {
+    if (!history.baseline || history.entries.length < 2) {
       throw new Error("the native history was not returned as a v2 snapshot");
     }
     const historyPage = await agentStep("sessions.entries", () =>

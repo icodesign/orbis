@@ -84,28 +84,67 @@ profile dependency, and starts DSH Web on `127.0.0.1:3080`:
 pnpm run serve:dsh
 ```
 
-The launcher reuses `~/.dsh/profiles/web` and creates only the workspace root in a
-disposable temporary directory. It uses the package-local public DSH CLI. Override
-the DSH executable, DSH home, or keep the generated workspace for inspection when
-needed:
+The launcher reuses `~/.dsh/profiles/web` and creates the workspace root in a
+disposable temporary directory. It uses the package-local public DSH CLI by default.
+Use `--dsh` to select a local Harness checkout, an exact GitHub tag or commit, or an
+npm dist-tag/exact version:
 
 ```sh
+pnpm run serve:dsh --dsh local:/path/to/deepseek-harness
+pnpm run serve:dsh --dsh github:tag:dsh-v0.1.2-alpha.1
+pnpm run serve:dsh --dsh github:commit:cd5ef8148158c3a752a658978873241fdf8e2bbc
+pnpm run serve:dsh --dsh npm:latest
 pnpm run serve:dsh --dsh-bin /path/to/dsh
 pnpm run serve:dsh --port 3090 --keep
 pnpm run serve:dsh --home "$DSH_HOME"
 pnpm run serve:dsh --workspace-root /path/to/workspace
 ```
 
+`local:` and both `github:` selectors run the selected checkout's frozen pnpm
+install and full build before starting the resulting CLI. GitHub checkouts are
+temporary and detached at the requested tag or commit. `npm:` installs the resolved
+`@deepseek-ai/dsh` release into an isolated temporary directory, so selecting a DSH
+does not rewrite this workspace's dependencies. `--keep` retains generated DSH
+checkouts/installations as well as the temporary workspace. `ORBIS_DSH` accepts the
+same selector syntax; `ORBIS_DSH_BIN` remains the executable override.
+Selecting a source does not add cross-release compatibility behavior: the selected
+DSH must satisfy the plugin's current peer and runtime contract.
+
 Before refreshing the local plugin link, the launcher runs the active pnpm in
 the existing Web profile. This safely realigns a profile created by an older
 pnpm store version. It also removes the former development package names
 `@orbis/dsh-orbis-remote` and `@orbis/remote-dsh`, so obsolete and current Orbis
 bundles cannot load together. The launcher uses the public DSH CLI's normal profile installation
-path, so it does not need a separate Node executable or Harness checkout.
+path. The default package-local source does not need a Harness checkout; explicit
+`local:` and `github:` sources prepare and own their selected checkout as described above.
 
 Open `http://127.0.0.1:3080`, then choose **Settings → Plugins → Orbis**. Stop the
 launcher with Ctrl-C. DSH Web must remain on `127.0.0.1`; the Orbis data-plane
 listener binds all network interfaces separately.
+
+### Raw event recording for local E2E
+
+The `serve:dsh` launcher enables a development-only recorder in the Orbis settings page. Choose
+**Start recording** before an E2E action, **Stop recording** when the action is complete, and then
+**Export JSONL**. The file contains the native Cordis `session/event` stream in arrival order before
+the Orbis adapter projects or coalesces it. Recordings are stored with owner-only permissions under
+`$DSH_HOME/orbis/recordings` and the HTTP export remains behind the loopback management fence.
+
+To exercise the real mobile path again, choose an exported `.jsonl` file in the adjacent **Replay
+raw DSH events** control. The plugin creates a fresh real DSH session and announces it through the
+normal remote catalog. Open that new session in the Orbis app; replay waits for the app's live sync
+before appending the captured native events on their original relative timeline. Those appends pass
+through the normal DSH session log, Orbis adapter, coalescer, encrypted transport, mobile sync, and
+UI. Replay currently accepts one native session per file and requires the recording's first native
+sequence to match a fresh session boundary, so a partial mid-session capture fails explicitly rather
+than producing a corrupt transcript. Recording and replay cannot run simultaneously.
+
+Raw recordings are intentionally not redacted. They can contain prompts, model output, tool
+arguments and results, workspace paths, and provider metadata. Treat every export as sensitive test
+data and do not commit it as a fixture without reviewing its contents. The normal plugin runtime does
+not expose the recorder; it is present only when `ORBIS_DSH_RAW_EVENT_RECORDING=1` is set on the DSH
+server process. Set that variable to `0` when launching `serve:dsh` to test the production-disabled
+surface.
 
 `dsh plugin --profile web why @orbisapp/remote-dsh` prints the active local
 package. Re-running `add` refreshes the profile link to the current build while

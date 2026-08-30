@@ -72,6 +72,8 @@ export interface AgentSessionRecord {
 export interface AgentSessionSummary extends AgentSessionRecord {
   readonly runtimeStatus: AgentRuntimeStatus;
   readonly title?: string | null;
+  /** Opaque project/workspace identity when the owning driver exposes one. */
+  readonly workspaceRef?: string | null;
 }
 
 export interface AgentSessionListInput {

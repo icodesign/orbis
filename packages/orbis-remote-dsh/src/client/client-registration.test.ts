@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import type { ClientContext } from "@deepseek-ai/dsh-client-runtime/client";
+import type { Context as ClientContext } from "@deepseek-ai/cordis";
 import { expect, test, vi } from "vitest";
 
 import { apply } from "./index";
@@ -19,7 +19,6 @@ test("declares the browser bundle through the current dsh.client manifest", () =
   expect(manifest).not.toHaveProperty("dshClient");
   expect(dsh.client).toEqual({
     inject: [
-      "@deepseek-ai/dsh-client-runtime",
       "@deepseek-ai/dsh-client-locale",
       "@deepseek-ai/dsh-client-ui-primitives",
       "@deepseek-ai/dsh-client-ui-settings",

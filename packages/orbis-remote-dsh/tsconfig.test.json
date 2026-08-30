@@ -3,6 +3,11 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "scripts/serve-dsh-web.ts"],
+  "include": [
+    "src/**/*.ts",
+    "scripts/serve-dsh-source.test.ts",
+    "scripts/serve-dsh-source.ts",
+    "scripts/serve-dsh-web.ts"
+  ],
   "exclude": ["node_modules"]
 }

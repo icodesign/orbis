@@ -71,6 +71,7 @@ import {
   type AgentTimestamp,
 } from "@orbisapp/orbis-agent-backend";
 
+import { DshDeltaCoalescer, type DshDeltaInput } from "./dsh-delta-coalescer";
 import {
   DshSessionEntryProjector,
   dshEventIdentity,
@@ -90,15 +91,14 @@ import {
 import type {
   DshAgent,
   DshAgentInboxEvent,
-  DshApiResponse,
-  DshApiInteractionResponse,
-  DshApiMuxFrame,
-  DshApiMuxRequest,
-  DshApiQuestionResponse,
-  DshEncodedImageAttachment,
+  DshApprovalOutcome,
+  DshApprovalRequest,
   DshImageAttachmentReference,
   DshContext,
+  DshInteractionAvailability,
   DshModelTarget,
+  DshQuestionAnswer,
+  DshQuestionRequest,
   DshSession,
   DshSessionCatalogEntry,
   DshSessionEvent,
@@ -106,7 +106,6 @@ import type {
   DshSessionPermissionProvider,
   DshSessionModeProvider,
   DshSessionSubagentProvider,
-  DshSessionSubagentEntry,
   DshSessionAttachmentPort,
   DshPromptReferenceProvider,
   DshUserMessageContent,
@@ -130,45 +129,48 @@ const DSH_LOCAL_CAPABILITIES = [
 
 interface DshPermissionPending {
   readonly request: AgentPermissionRequest;
-  readonly rpcId: string;
+  readonly resolve: (outcome: DshApprovalOutcome) => void;
+  readonly next: () => Promise<DshApprovalOutcome>;
+  readonly removeAbort: () => void;
 }
 
 class DshPermissionInteraction {
   private readonly pending = new Map<string, DshPermissionPending>();
 
   constructor(
-    private readonly sessionId: string,
-    private readonly apiProxy: NonNullable<DshContext["apiProxy"]>,
+    private readonly nextRequestId: () => string,
     private readonly onChanged: (pending: readonly AgentPermissionRequest[]) => void,
   ) {}
 
-  requested(frame: DshApiMuxFrame, rpcId: string, requestedAt: AgentTimestamp): void {
-    if (frame.approvalId === undefined || frame.toolName === undefined) return;
-    const existing = this.pending.get(frame.approvalId);
-    if (existing !== undefined) {
-      if (existing.rpcId !== rpcId) {
-        throw new AgentBackendError("protocol", "DSH permission rpc id changed during replay");
-      }
-      return;
-    }
+  requested(
+    native: DshApprovalRequest,
+    next: () => Promise<DshApprovalOutcome>,
+    requestedAt: AgentTimestamp,
+  ): Promise<DshApprovalOutcome> {
+    const requestId = this.nextRequestId();
     const request = validateAgentPermissionRequest({
-      ...(frame.callId === undefined ? {} : { callId: frame.callId }),
-      ...(frame.reason === undefined ? {} : { detail: frame.reason }),
+      ...(native.callId === undefined ? {} : { callId: native.callId }),
+      ...(native.reason === undefined ? {} : { detail: native.reason }),
       options: [
         { kind: "allow_once", label: "Allow once", optionId: "allow_once" },
         { kind: "reject_once", label: "Reject", optionId: "reject_once" },
       ],
       requestedAt,
-      requestId: frame.approvalId,
-      title: frame.toolName,
+      requestId,
+      title: native.toolName,
     });
-    this.pending.set(frame.approvalId, { request, rpcId });
+    const result = new Promise<DshApprovalOutcome>((resolve) => {
+      const abort = () => this.finish(requestId, "cancelled");
+      native.signal?.addEventListener("abort", abort, { once: true });
+      this.pending.set(requestId, {
+        next,
+        removeAbort: () => native.signal?.removeEventListener("abort", abort),
+        request,
+        resolve,
+      });
+    });
     this.publish();
-  }
-
-  resolved(approvalId: string | undefined): void {
-    if (approvalId === undefined || !this.pending.delete(approvalId)) return;
-    this.publish();
+    return result;
   }
 
   async respond(input: AgentPermissionResponseInput): Promise<AgentPermissionResponseResult> {
@@ -184,39 +186,12 @@ class DshPermissionInteraction {
         "Permission option is not valid for this request",
       );
     }
-    const message: DshApiInteractionResponse = {
-      result: {
-        ok: true,
-        value: {
-          approvalId: validated.requestId,
-          outcome: option.kind === "allow_once" ? "allowed-once" : "rejected",
-          sessionId: this.sessionId,
-        },
-      },
-      rpcId: pending.rpcId,
-      type: "client-response",
-    };
-    const receipt = await this.apiProxy.respond?.(message);
-    if (receipt === undefined) {
-      throw new AgentBackendError("unsupported", "DSH permission response is unavailable");
-    }
-    if (!receipt.accepted) {
-      if (receipt.reason === "not-pending") {
-        this.pending.delete(validated.requestId);
-        this.publish();
-        return { accepted: false };
-      }
-      throw new AgentBackendError("protocol", "DSH rejected the permission response");
-    }
-    this.pending.delete(validated.requestId);
-    this.publish();
+    this.finish(validated.requestId, option.kind === "allow_once" ? "allowed-once" : "rejected");
     return { accepted: true };
   }
 
-  close(): void {
-    if (this.pending.size === 0) return;
-    this.pending.clear();
-    this.publish();
+  delegate(): void {
+    for (const requestId of [...this.pending.keys()]) this.delegateOne(requestId);
   }
 
   snapshot(): readonly AgentPermissionRequest[] {
@@ -226,12 +201,33 @@ class DshPermissionInteraction {
   private publish(): void {
     this.onChanged(this.snapshot());
   }
+
+  private finish(requestId: string, outcome: DshApprovalOutcome): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) return;
+    this.pending.delete(requestId);
+    pending.removeAbort();
+    this.publish();
+    pending.resolve(outcome);
+  }
+
+  private delegateOne(requestId: string): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) return;
+    this.pending.delete(requestId);
+    pending.removeAbort();
+    this.publish();
+    void pending.next().then(pending.resolve, () => pending.resolve("unavailable"));
+  }
 }
 
 interface DshQuestionPending {
   readonly optionLabels: ReadonlyMap<string, string>;
   readonly request: AgentQuestionRequest;
-  readonly rpcId: string;
+  readonly resolve: (answer: DshQuestionAnswer) => void;
+  readonly reject: (reason: unknown) => void;
+  readonly next: () => Promise<DshQuestionAnswer>;
+  readonly removeAbort: () => void;
 }
 
 /** Maps one DSH Ask User batch to the canonical, opaque-id question domain. */
@@ -239,27 +235,18 @@ class DshQuestionBridge {
   private readonly pending = new Map<string, DshQuestionPending>();
 
   constructor(
-    private readonly sessionId: string,
-    private readonly apiProxy: NonNullable<DshContext["apiProxy"]>,
+    private readonly nextRequestId: () => string,
     private readonly onChanged: (pending: readonly AgentQuestionRequest[]) => void,
   ) {}
 
-  requested(frame: DshApiMuxFrame, rpcId: string, requestedAt: AgentTimestamp): void {
-    if (frame.type !== "question/requested" || !Array.isArray(frame.questions)) {
-      throw new AgentBackendError("protocol", "DSH question request is invalid");
-    }
-    const requestId = rpcId.trim();
-    if (!requestId) throw new AgentBackendError("protocol", "DSH question rpc id is invalid");
-    const existing = this.pending.get(requestId);
-    if (existing !== undefined) {
-      if (existing.rpcId !== rpcId) {
-        throw new AgentBackendError("protocol", "DSH question rpc id changed during replay");
-      }
-      return;
-    }
-
+  requested(
+    native: DshQuestionRequest,
+    next: () => Promise<DshQuestionAnswer>,
+    requestedAt: AgentTimestamp,
+  ): Promise<DshQuestionAnswer> {
+    const requestId = this.nextRequestId();
     const optionLabels = new Map<string, string>();
-    const questions = frame.questions.map((raw, questionIndex) => {
+    const questions = native.questions.map((raw, questionIndex) => {
       if (typeof raw.id !== "string" || !raw.id.trim() || raw.id !== raw.id.trim()) {
         throw new AgentBackendError("protocol", "DSH question id is invalid");
       }
@@ -323,13 +310,20 @@ class DshQuestionBridge {
       requestedAt,
       requestId,
     });
-    this.pending.set(requestId, { optionLabels, request, rpcId });
+    const result = new Promise<DshQuestionAnswer>((resolve, reject) => {
+      const abort = () => this.reject(requestId, questionError("ASK_ABORTED"));
+      native.signal?.addEventListener("abort", abort, { once: true });
+      this.pending.set(requestId, {
+        next,
+        optionLabels,
+        reject,
+        removeAbort: () => native.signal?.removeEventListener("abort", abort),
+        request,
+        resolve,
+      });
+    });
     this.publish();
-  }
-
-  resolved(questionRpcId: string | undefined): void {
-    if (questionRpcId === undefined || !this.pending.delete(questionRpcId)) return;
-    this.publish();
+    return result;
   }
 
   async respond(input: AgentQuestionResponseInput): Promise<AgentQuestionResponseResult> {
@@ -337,15 +331,8 @@ class DshQuestionBridge {
     if (pending === undefined) return { accepted: false };
     const validated = validateAgentQuestionResponseForRequest(input, pending.request);
     if (validated.response.kind === "cancelled") {
-      const message: DshApiQuestionResponse = {
-        result: {
-          error: { code: "cancelled", message: "The question response was cancelled" },
-          ok: false,
-        },
-        rpcId: pending.rpcId,
-        type: "client-response",
-      };
-      return this.send(pending, message, input.requestId);
+      this.reject(input.requestId, questionError("ASK_CANCELLED"));
+      return { accepted: true };
     }
     const answers = validated.response.answers.map((answer) => ({
       ...(answer.customText === undefined ? {} : { custom: answer.customText }),
@@ -358,49 +345,55 @@ class DshQuestionBridge {
         return label;
       }),
     }));
-    const message: DshApiQuestionResponse = {
-      result: { ok: true, value: { answer: { answers }, sessionId: this.sessionId } },
-      rpcId: pending.rpcId,
-      type: "client-response",
-    };
-    return this.send(pending, message, input.requestId);
+    this.finish(input.requestId, { answers });
+    return { accepted: true };
   }
 
-  close(): void {
-    if (this.pending.size === 0) return;
-    this.pending.clear();
-    this.publish();
+  delegate(): void {
+    for (const requestId of [...this.pending.keys()]) this.delegateOne(requestId);
   }
 
   snapshot(): readonly AgentQuestionRequest[] {
     return [...this.pending.values()].map((item) => item.request);
   }
 
-  private async send(
-    pending: DshQuestionPending,
-    message: DshApiQuestionResponse,
-    requestId: string,
-  ): Promise<AgentQuestionResponseResult> {
-    const receipt = await this.apiProxy.respond?.(message);
-    if (receipt === undefined) {
-      throw new AgentBackendError("unsupported", "DSH question response is unavailable");
-    }
-    if (!receipt.accepted) {
-      if (receipt.reason === "not-pending") {
-        this.pending.delete(requestId);
-        this.publish();
-        return { accepted: false };
-      }
-      throw new AgentBackendError("protocol", "DSH rejected the question response");
-    }
-    this.pending.delete(requestId);
-    this.publish();
-    return { accepted: true };
-  }
-
   private publish(): void {
     this.onChanged(this.snapshot());
   }
+
+  private finish(requestId: string, answer: DshQuestionAnswer): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) return;
+    this.pending.delete(requestId);
+    pending.removeAbort();
+    this.publish();
+    pending.resolve(answer);
+  }
+
+  private reject(requestId: string, reason: unknown): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) return;
+    this.pending.delete(requestId);
+    pending.removeAbort();
+    this.publish();
+    pending.reject(reason);
+  }
+
+  private delegateOne(requestId: string): void {
+    const pending = this.pending.get(requestId);
+    if (pending === undefined) return;
+    this.pending.delete(requestId);
+    pending.removeAbort();
+    this.publish();
+    void pending.next().then(pending.resolve, pending.reject);
+  }
+}
+
+function questionError(code: "ASK_ABORTED" | "ASK_CANCELLED"): Error & { readonly code: string } {
+  return Object.assign(new Error("The DSH user question was cancelled"), {
+    code,
+    name: "UserQuestionError",
+  });
 }
 
 export interface DshLocalBackendOptions {
@@ -430,6 +423,8 @@ export interface DshLocalBackendOptions {
   };
   readonly now?: () => AgentTimestamp;
   readonly attachments?: DshSessionAttachmentPort;
+  /** Authenticated Orbis presence; absent means DSH Web retains interaction ownership. */
+  readonly interactionAvailability?: DshInteractionAvailability;
   /** DSH-owned @file/@session grammar and candidate discovery. */
   readonly promptReferences?: DshPromptReferenceProvider;
   readonly onError?: (error: AgentBackendError) => void;
@@ -636,36 +631,6 @@ function stateRevisionForEvents(events: readonly DshSessionEvent[]): number {
   return revision;
 }
 
-/**
- * Replayed interaction requests must describe the same native request. The
- * mux's rpc id is the correlation key, but it is not permission to silently
- * replace a question batch (or an approval's details) under that key.
- */
-function sameInteractionRequestFrame(left: DshApiMuxFrame, right: DshApiMuxFrame): boolean {
-  if (left.type !== right.type) return false;
-  if (left.type.endsWith("/resolved")) return true;
-  try {
-    if (left.type === "question/requested" && right.type === "question/requested") {
-      return (
-        String(left.sessionId) === String(right.sessionId) &&
-        JSON.stringify(left.questions ?? []) === JSON.stringify(right.questions ?? [])
-      );
-    }
-    if (left.type === "approval/requested" && right.type === "approval/requested") {
-      return (
-        String(left.sessionId) === String(right.sessionId) &&
-        left.approvalId === right.approvalId &&
-        left.toolName === right.toolName &&
-        left.callId === right.callId &&
-        left.reason === right.reason
-      );
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function isDshPermissionConfigEvent(event: DshSessionEvent): boolean {
   return (
     event.type === "permission/preset" ||
@@ -828,23 +793,14 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   private readonly sessionWorkspaceRefs = new Map<string, string>();
   private readonly removeEventListener: () => void;
   private readonly removeInboxEventListeners: readonly (() => void)[];
+  private readonly removeInteractionListeners: readonly (() => void)[];
+  private readonly removeAvailabilityListener: (() => void) | undefined;
   private readonly catalogListeners = new Set<DshLocalCatalogListener>();
   private readonly driver: DshLocalHarnessDriver;
   private readonly clock: () => AgentTimestamp;
-  private interactionAbortController: AbortController | undefined;
-  private interactionPump: Promise<void> | undefined;
-  private readonly interactionFrames = new Map<
-    string,
-    Map<
-      string,
-      {
-        readonly firstSeenAt: AgentTimestamp;
-        readonly frame: DshApiMuxFrame;
-        readonly rpcId: string;
-      }
-    >
-  >();
-  private rpcSequence = 0;
+  private readonly permissionInteractions = new Map<string, DshPermissionInteraction>();
+  private readonly questionInteractions = new Map<string, DshQuestionBridge>();
+  private interactionSequence = 0;
 
   constructor(private readonly options: DshLocalBackendOptions) {
     this.assertOptions(options);
@@ -855,10 +811,10 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     });
     const capabilities: AgentDriverCapability[] = [
       ...DSH_LOCAL_CAPABILITIES,
-      ...(options.context.apiProxy === undefined ? [] : (["model.select"] as const)),
-      ...(this.hasInteractionProxy(options.context.apiProxy)
-        ? (["permission.respond", "question.respond"] as const)
-        : []),
+      "model.select",
+      ...(options.interactionAvailability === undefined
+        ? []
+        : (["permission.respond", "question.respond"] as const)),
       ...(options.planMode === undefined && options.context.planMode === undefined
         ? []
         : (["plan.select"] as const)),
@@ -892,17 +848,34 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         this.forwardInboxEvent(agent);
       }),
     );
-    if (this.hasInteractionProxy(options.context.apiProxy)) {
-      this.interactionAbortController = new AbortController();
-      this.interactionPump = this.consumeInteractionMux(this.interactionAbortController.signal);
-    }
+    this.removeInteractionListeners =
+      options.interactionAvailability === undefined
+        ? []
+        : [
+            options.context.on(
+              "approval/request",
+              (request, next) => this.receivePermissionRequest(request, next),
+              { prepend: true },
+            ),
+            options.context.on(
+              "user-questions/request",
+              (request, next) => this.receiveQuestionRequest(request, next),
+              { prepend: true },
+            ),
+          ];
+    this.removeAvailabilityListener = options.interactionAvailability?.subscribe(
+      (sessionId, available) => {
+        if (!available) this.delegateInteractions(sessionId);
+      },
+    );
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.interactionAbortController?.abort();
-    await this.interactionPump?.catch(() => undefined);
+    this.delegateInteractions();
+    this.removeAvailabilityListener?.();
+    for (const remove of this.removeInteractionListeners) remove();
     this.removeEventListener();
     for (const remove of this.removeInboxEventListeners) remove();
     this.catalogListeners.clear();
@@ -939,6 +912,13 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return () => this.catalogListeners.delete(listener);
   }
 
+  /** Announces a host-created session that did not arrive through the public remote create RPC. */
+  announceCatalogChanged(ref: AgentSessionRef): void {
+    this.assertOpen();
+    this.assertDshRef(ref);
+    this.notifyCatalogChanged(ref);
+  }
+
   async connectRuntime(ref: AgentSessionRef): Promise<DshLocalSessionRuntime> {
     this.assertOpen();
     this.assertDshRef(ref);
@@ -968,11 +948,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return this.withPublicErrors(async () => {
       await this.assertSessionDoesNotExist(ref);
       const workspace = this.requireWorkspace(workspaceRef);
-      const agent = await this.openDshSession(
-        nativeSessionId,
-        { workspaceId: workspace.id },
-        "The DSH session could not be created",
-      );
+      const agent = await this.openDshSession(nativeSessionId, { workspaceId: workspace.id });
       this.sessionWorkspaceRefs.set(nativeSessionId, workspaceRef);
       const controller = this.installController(ref, agent);
       if (model === undefined) await controller.refreshModelSelection();
@@ -999,13 +975,8 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   async listModels(input: AgentModelListInput = {}): Promise<readonly AgentModelMetadata[]> {
     this.assertOpen();
     if (input.driverId !== undefined && input.driverId !== this.driverDescriptor.id) return [];
-    const apiProxy = this.options.context.apiProxy;
-    if (apiProxy === undefined) return [];
     return this.withPublicErrors(async () => {
-      const value = this.apiValue(
-        await apiProxy.llm.models({ payload: {}, rpcId: this.nextRpcId() }),
-        "The DSH model catalog is unavailable",
-      );
+      const value = await this.options.context.sessionController.modelCatalog();
       return value.groups.flatMap((provider) =>
         provider.models.map((model) => ({
           ...(model.reasoning === undefined
@@ -1075,7 +1046,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         // title event the controller could fold.
         records.set(key, withCatalogTitle(controller.summary(), records.get(key)));
       }
-      const summaries = [...records.values()];
+      const summaries = await Promise.all(
+        [...records.values()].map(async (summary) => ({
+          ...summary,
+          workspaceRef: await this.workspaceRefFor(summary.ref),
+        })),
+      );
       summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
       return input.limit === undefined ? summaries : summaries.slice(0, input.limit);
     });
@@ -1380,40 +1356,28 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   }
 
   async readCurrentModel(ref: AgentSessionRef): Promise<AgentModelSelection | undefined> {
-    const apiProxy = this.options.context.apiProxy;
-    if (apiProxy === undefined) return undefined;
-    const value = this.apiValue(
-      await apiProxy.sessions.models({
-        payload: { sessionId: this.options.toSessionId(ref.nativeSessionId) },
-        rpcId: this.nextRpcId(),
-      }),
-      "The DSH session model is unavailable",
-    );
-    return modelSelectionFromTarget(value.current);
+    const agent = this.options.context.agents.get(this.options.toSessionId(ref.nativeSessionId));
+    if (agent === undefined || !sameNativeSession(agent.session, ref.nativeSessionId))
+      return undefined;
+    const current = this.options.context.sessionProjections.snapshot(agent.session).values
+      .modelSelection?.next;
+    return current === null || current === undefined
+      ? undefined
+      : modelSelectionFromTarget(current);
   }
 
   async selectCurrentModel(
     ref: AgentSessionRef,
     selection: AgentModelSelection,
   ): Promise<AgentModelSelection> {
-    const apiProxy = this.options.context.apiProxy;
-    if (apiProxy === undefined) {
-      throw new AgentBackendError("unsupported", "DSH session model selection is unavailable");
-    }
-    const value = this.apiValue(
-      await apiProxy.sessions.selectModel({
-        payload: {
-          model: selection.modelId,
-          provider: selection.provider,
-          ...(selection.thinkingLevel === undefined
-            ? {}
-            : { reasoningEffort: selection.thinkingLevel }),
-          sessionId: this.options.toSessionId(ref.nativeSessionId),
-        },
-        rpcId: this.nextRpcId(),
-      }),
-      "The DSH session model could not be changed",
-    );
+    const value = await this.options.context.sessionController.selectModel({
+      model: selection.modelId,
+      provider: selection.provider,
+      ...(selection.thinkingLevel === undefined
+        ? {}
+        : { reasoningEffort: selection.thinkingLevel }),
+      sessionId: this.options.toSessionId(ref.nativeSessionId),
+    });
     return modelSelectionFromTarget(value.selected);
   }
 
@@ -1432,8 +1396,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       typeof options.createUserMessage !== "function" ||
       typeof options.context?.on !== "function" ||
       typeof options.context?.agents?.get !== "function" ||
+      typeof options.context?.sessionController?.create !== "function" ||
+      typeof options.context?.sessionController?.modelCatalog !== "function" ||
+      typeof options.context?.sessionController?.selectModel !== "function" ||
       typeof options.context?.sessionPersistence?.inspect !== "function" ||
       typeof options.context?.sessionPersistence?.list !== "function" ||
+      typeof options.context?.sessionProjections?.snapshot !== "function" ||
       typeof options.context?.workspace?.get !== "function"
     ) {
       throw new AgentBackendError(
@@ -1441,150 +1409,82 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         "The DSH context does not provide its session persistence and agent lifecycle services",
       );
     }
-    const apiProxy = options.context.apiProxy;
-    if (apiProxy !== undefined && typeof apiProxy.sessions?.create !== "function") {
-      throw new AgentBackendError(
-        "invalid_argument",
-        "The DSH API proxy session service is invalid",
-      );
-    }
-    if (
-      apiProxy !== undefined &&
-      (typeof apiProxy.llm?.models !== "function" ||
-        typeof apiProxy.sessions?.models !== "function" ||
-        typeof apiProxy.sessions?.selectModel !== "function")
-    ) {
-      throw new AgentBackendError("invalid_argument", "The DSH API proxy model service is invalid");
-    }
-    if (
-      apiProxy !== undefined &&
-      ((apiProxy.events !== undefined && typeof apiProxy.events.mux !== "function") ||
-        (apiProxy.respond !== undefined && typeof apiProxy.respond !== "function"))
-    ) {
-      throw new AgentBackendError(
-        "invalid_argument",
-        "The DSH API proxy interaction service is invalid",
-      );
-    }
-    if (
-      apiProxy?.events !== undefined &&
-      (apiProxy.respond === undefined || typeof apiProxy.respond !== "function")
-    ) {
-      throw new AgentBackendError(
-        "invalid_argument",
-        "The DSH API proxy interaction response is unavailable",
-      );
-    }
-    if (
-      apiProxy?.respond !== undefined &&
-      (apiProxy.events === undefined || typeof apiProxy.events.mux !== "function")
-    ) {
-      throw new AgentBackendError(
-        "invalid_argument",
-        "The DSH API proxy interaction mux is unavailable",
-      );
-    }
   }
 
-  private hasInteractionProxy(apiProxy: DshContext["apiProxy"]): boolean {
-    return apiProxy?.events?.mux !== undefined && apiProxy.respond !== undefined;
+  private receivePermissionRequest(
+    request: DshApprovalRequest,
+    next: () => Promise<DshApprovalOutcome>,
+  ): Promise<DshApprovalOutcome> {
+    if (!this.canClaimInteraction(request.agent)) return next();
+    const sessionId = String(request.agent.session.id);
+    const interaction = this.permissionInteraction(sessionId);
+    const result = interaction.requested(request, next, this.now());
+    if (this.options.interactionAvailability?.isAvailable(sessionId) !== true)
+      interaction.delegate();
+    return result;
   }
 
-  private async consumeInteractionMux(signal: AbortSignal): Promise<void> {
-    const apiProxy = this.options.context.apiProxy;
-    if (!this.hasInteractionProxy(apiProxy)) return;
-    const mux = apiProxy?.events?.mux;
-    if (mux === undefined) return;
-    try {
-      for await (const request of mux({ payload: {}, rpcId: this.nextRpcId() }, signal)) {
-        if (signal.aborted || this.closed) return;
-        this.receiveInteractionFrame(request);
-      }
-    } catch (error) {
-      if (!signal.aborted) {
-        this.report(
-          isAgentBackendError(error)
-            ? error
-            : publicUnavailable("The DSH interaction stream is unavailable"),
-        );
-      }
-    }
+  private receiveQuestionRequest(
+    request: DshQuestionRequest,
+    next: () => Promise<DshQuestionAnswer>,
+  ): Promise<DshQuestionAnswer> {
+    if (request.agent === undefined || !this.canClaimInteraction(request.agent)) return next();
+    const sessionId = String(request.agent.session.id);
+    const interaction = this.questionInteraction(sessionId);
+    const result = interaction.requested(request, next, this.now());
+    if (this.options.interactionAvailability?.isAvailable(sessionId) !== true)
+      interaction.delegate();
+    return result;
   }
 
-  private receiveInteractionFrame(request: DshApiMuxRequest): void {
-    const frame = request.payload;
-    if (
-      frame.type !== "approval/requested" &&
-      frame.type !== "approval/resolved" &&
-      frame.type !== "question/requested" &&
-      frame.type !== "question/resolved"
-    )
+  private canClaimInteraction(agent: DshAgent): boolean {
+    const sessionId = String(agent.session.id);
+    return (
+      !this.closed &&
+      this.options.interactionAvailability?.isAvailable(sessionId) === true &&
+      this.options.context.agents.get(agent.id) === agent
+    );
+  }
+
+  private permissionInteraction(sessionId: string): DshPermissionInteraction {
+    const existing = this.permissionInteractions.get(sessionId);
+    if (existing !== undefined) return existing;
+    const created = new DshPermissionInteraction(
+      () => this.nextInteractionId("approval"),
+      (pending) => this.controllerForInteraction(sessionId)?.publishPermissionState(pending),
+    );
+    this.permissionInteractions.set(sessionId, created);
+    return created;
+  }
+
+  private questionInteraction(sessionId: string): DshQuestionBridge {
+    const existing = this.questionInteractions.get(sessionId);
+    if (existing !== undefined) return existing;
+    const created = new DshQuestionBridge(
+      () => this.nextInteractionId("question"),
+      (pending) => this.controllerForInteraction(sessionId)?.publishQuestionState(pending),
+    );
+    this.questionInteractions.set(sessionId, created);
+    return created;
+  }
+
+  private controllerForInteraction(sessionId: string): DshLocalSessionController | undefined {
+    return this.controllers.get(agentSessionLocatorKey(this.refForNativeId(sessionId)));
+  }
+
+  private nextInteractionId(kind: "approval" | "question"): string {
+    this.interactionSequence += 1;
+    return `orbis-dsh-${kind}-${this.interactionSequence}`;
+  }
+
+  private delegateInteractions(sessionId?: string): void {
+    if (sessionId === undefined) {
+      for (const interaction of this.permissionInteractions.values()) interaction.delegate();
+      for (const interaction of this.questionInteractions.values()) interaction.delegate();
       return;
-    const sessionId = frame.sessionId === undefined ? undefined : String(frame.sessionId);
-    if (sessionId === undefined) return;
-    const interactionId = frame.type.startsWith("approval/")
-      ? frame.approvalId
-      : frame.type === "question/requested"
-        ? request.rpcId
-        : frame.questionRpcId;
-    if (interactionId === undefined || !interactionId.trim()) {
-      throw new AgentBackendError("protocol", "DSH interaction identity is invalid");
     }
-    const ref = this.refForNativeId(sessionId);
-    const key = agentSessionLocatorKey(ref);
-    const frames = this.interactionFrames.get(sessionId) ?? new Map();
-    if (frame.type === "approval/requested" || frame.type === "question/requested") {
-      const existing = frames.get(interactionId);
-      if (existing !== undefined && existing.rpcId !== request.rpcId) {
-        throw new AgentBackendError("protocol", "DSH interaction rpc id changed during replay");
-      }
-      if (existing !== undefined && !sameInteractionRequestFrame(existing.frame, frame)) {
-        throw new AgentBackendError(
-          "protocol",
-          "DSH interaction replay changed the request payload",
-        );
-      }
-      const stored =
-        existing === undefined
-          ? { firstSeenAt: this.now(), frame, rpcId: request.rpcId }
-          : existing;
-      frames.set(interactionId, stored);
-    } else {
-      frames.delete(interactionId);
-    }
-    if (frames.size === 0) this.interactionFrames.delete(sessionId);
-    else this.interactionFrames.set(sessionId, frames);
-    const controller = this.controllers.get(key);
-    if (controller === undefined) return;
-    const firstSeenAt = frames.get(interactionId)?.firstSeenAt ?? this.now();
-    const storedRpcId = frames.get(interactionId)?.rpcId ?? request.rpcId;
-    if (frame.type === "approval/requested")
-      controller.receivePermissionRequested(frame, storedRpcId, firstSeenAt);
-    else if (frame.type === "approval/resolved")
-      controller.receivePermissionResolved(frame.approvalId);
-    else if (frame.type === "question/requested")
-      controller.receiveQuestionRequested(frame, storedRpcId, firstSeenAt);
-    else controller.receiveQuestionResolved(frame.questionRpcId);
-  }
-
-  private apiValue<T>(response: DshApiResponse<T>, unavailableMessage: string): T {
-    if (response.result.ok) return response.result.value;
-    const error = response.result.error;
-    switch (error.code) {
-      case "agent-busy":
-        throw new AgentBackendError("conflict", unavailableMessage);
-      case "model-unavailable":
-        throw new AgentBackendError("invalid_argument", "The requested DSH model is unavailable");
-      case "session-not-found":
-        throw new AgentBackendError("not_found", "The requested DSH session was not found");
-      default:
-        throw publicUnavailable(unavailableMessage);
-    }
-  }
-
-  private nextRpcId(): string {
-    this.rpcSequence += 1;
-    return `orbis-dsh-${this.rpcSequence}`;
+    this.permissionInteractions.get(sessionId)?.delegate();
+    this.questionInteractions.get(sessionId)?.delegate();
   }
 
   private assertOpen(): void {
@@ -1683,7 +1583,6 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     const agent = await this.openDshSession(
       ref.nativeSessionId,
       inspection.meta.cwd === undefined ? {} : { cwd: inspection.meta.cwd },
-      "The DSH session could not be opened",
     );
     const controller = this.installController(ref, agent);
     await controller.refreshModelSelection();
@@ -1698,20 +1597,9 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   private async openDshSession(
     nativeSessionId: string,
     location: { readonly cwd?: string; readonly workspaceId?: unknown },
-    unavailableMessage: string,
   ): Promise<DshAgent> {
-    const apiProxy = this.options.context.apiProxy;
-    if (apiProxy === undefined) {
-      throw new AgentBackendError("unsupported", "DSH session creation is unavailable");
-    }
     const sessionId = this.options.toSessionId(nativeSessionId);
-    const value = this.apiValue(
-      await apiProxy.sessions.create({
-        payload: { ...location, sessionId },
-        rpcId: this.nextRpcId(),
-      }),
-      unavailableMessage,
-    );
+    const value = await this.options.context.sessionController.create({ ...location, sessionId });
     if (String(value.sessionId) !== nativeSessionId) {
       throw new AgentBackendError("protocol", "DSH opened a session with an unexpected id");
     }
@@ -1734,30 +1622,22 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       }
       return existing;
     }
-    let controller: DshLocalSessionController | undefined;
-    const apiProxy = this.options.context.apiProxy;
-    const permissionBridge = this.hasInteractionProxy(apiProxy)
-      ? new DshPermissionInteraction(
-          ref.nativeSessionId,
-          apiProxy as NonNullable<DshContext["apiProxy"]>,
-          (pending) => controller?.publishPermissionState(pending),
-        )
-      : undefined;
-    const questionBridge = this.hasInteractionProxy(apiProxy)
-      ? new DshQuestionBridge(
-          ref.nativeSessionId,
-          apiProxy as NonNullable<DshContext["apiProxy"]>,
-          (pending) => controller?.publishQuestionState(pending),
-        )
-      : undefined;
-    controller = new DshLocalSessionController(this, ref, agent, permissionBridge, questionBridge);
+    const permissionBridge =
+      this.options.interactionAvailability === undefined
+        ? undefined
+        : this.permissionInteraction(ref.nativeSessionId);
+    const questionBridge =
+      this.options.interactionAvailability === undefined
+        ? undefined
+        : this.questionInteraction(ref.nativeSessionId);
+    const controller = new DshLocalSessionController(
+      this,
+      ref,
+      agent,
+      permissionBridge,
+      questionBridge,
+    );
     this.controllers.set(key, controller);
-    for (const pending of this.interactionFrames.get(ref.nativeSessionId)?.values() ?? []) {
-      if (pending.frame.type === "approval/requested")
-        permissionBridge?.requested(pending.frame, pending.rpcId, pending.firstSeenAt);
-      else if (pending.frame.type === "question/requested")
-        questionBridge?.requested(pending.frame, pending.rpcId, pending.firstSeenAt);
-    }
     if (permissionBridge !== undefined)
       controller.publishPermissionState(permissionBridge.snapshot());
     if (questionBridge !== undefined) controller.publishQuestionState(questionBridge.snapshot());
@@ -1822,9 +1702,27 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       return await operation();
     } catch (error) {
       if (isAgentBackendError(error)) throw error;
+      const code = dshRemoteFailureCode(error);
+      if (code === "model-unavailable" || code === "bad-request") {
+        throw new AgentBackendError("invalid_argument", "The requested DSH operation is invalid");
+      }
+      if (code === "session-not-found" || code === "workspace-not-found") {
+        throw new AgentBackendError("not_found", "The requested DSH resource was not found");
+      }
+      if (code === "agent-busy" || code === "session-conflict") {
+        throw new AgentBackendError("conflict", "The DSH session is busy or conflicted");
+      }
       throw publicUnavailable();
     }
   }
+}
+
+function dshRemoteFailureCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const failure = (error as { readonly failure?: unknown }).failure;
+  if (typeof failure !== "object" || failure === null) return undefined;
+  const code = (failure as { readonly code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 function isDshCancellation(error: unknown): boolean {
@@ -1950,6 +1848,12 @@ export class DshLocalSessionRuntime implements AgentSessionRuntime {
     return this.closed ? "closed" : this.controller.runtimeStatus();
   }
 
+  /** Flushes coalesced transient deltas for a snapshot boundary. */
+  flushPendingDeltas(): void {
+    this.assertOpen();
+    this.controller.flushPendingDeltas(this);
+  }
+
   observeStatus(listener: AgentRuntimeStatusListener): () => void {
     const status = this.getStatus();
     this.observedStatus = status;
@@ -2046,6 +1950,7 @@ class DshLocalSessionController {
   private runtime: DshLocalSessionRuntime | undefined;
   private readonly projector = new DshSessionEntryProjector();
   private readonly deltaSequence = new Map<string, number>();
+  private readonly deltaCoalescer: DshDeltaCoalescer;
   private readonly pendingInboxIds: Record<DshInboxTarget, string[]> = {
     "next-step": [],
     "next-turn": [],
@@ -2070,6 +1975,9 @@ class DshLocalSessionController {
     this.ref = ref;
     this.permissionBridge = permissionBridge;
     this.questionBridge = questionBridge;
+    this.deltaCoalescer = new DshDeltaCoalescer({
+      emit: (delta) => this.publishDelta(delta),
+    });
     const folded = dshProjectionState(agent.session.events);
     this.mode = folded.mode;
     this.workState = folded.workState;
@@ -2169,9 +2077,12 @@ class DshLocalSessionController {
     } catch {
       throw publicUnavailable("The DSH run could not be cancelled");
     }
-    this.permissionBridge?.close();
-    this.questionBridge?.close();
     return { cancelled: true };
+  }
+
+  flushPendingDeltas(runtime: DshLocalSessionRuntime): void {
+    this.assertAttached(runtime);
+    this.deltaCoalescer.flush();
   }
 
   disconnect(runtime: DshLocalSessionRuntime): void {
@@ -2179,6 +2090,7 @@ class DshLocalSessionController {
       runtime.markClosed();
       return;
     }
+    this.deltaCoalescer.flush();
     runtime.markClosed();
     this.runtime = undefined;
   }
@@ -2186,10 +2098,9 @@ class DshLocalSessionController {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.deltaCoalescer.close();
     this.runtime?.markClosed();
     this.runtime = undefined;
-    this.permissionBridge?.close();
-    this.questionBridge?.close();
     this.host.detachController(this);
   }
 
@@ -2319,30 +2230,6 @@ class DshLocalSessionController {
     return this.questionBridge.respond(input);
   }
 
-  receivePermissionRequested(
-    frame: DshApiMuxFrame,
-    rpcId: string,
-    requestedAt: AgentTimestamp,
-  ): void {
-    this.permissionBridge?.requested(frame, rpcId, requestedAt);
-  }
-
-  receivePermissionResolved(approvalId: string | undefined): void {
-    this.permissionBridge?.resolved(approvalId);
-  }
-
-  receiveQuestionRequested(
-    frame: DshApiMuxFrame,
-    rpcId: string,
-    requestedAt: AgentTimestamp,
-  ): void {
-    this.questionBridge?.requested(frame, rpcId, requestedAt);
-  }
-
-  receiveQuestionResolved(questionRpcId: string | undefined): void {
-    this.questionBridge?.resolved(questionRpcId);
-  }
-
   publishPermissionState(pending: readonly AgentPermissionRequest[]): void {
     if (this.disposed || this.permissionBridge === undefined) return;
     const native =
@@ -2366,6 +2253,7 @@ class DshLocalSessionController {
   receive(event: DshSessionEvent): void {
     if (this.disposed) return;
     try {
+      if (event.type !== "assistant/chunk") this.deltaCoalescer.flush();
       const folded = reduceDshProjectionState(
         { mode: this.mode, workState: this.workState },
         event,
@@ -2576,6 +2464,7 @@ class DshLocalSessionController {
     entry: AgentSessionProjection["entries"][number],
     settlesEntryId?: ReturnType<typeof agentEntryId>,
   ): void {
+    this.deltaCoalescer.flush();
     this.cursor = nextAgentDeliveryCursor(this.cursor);
     this.runtime?.publish({
       cursor: this.cursor,
@@ -2600,16 +2489,25 @@ class DshLocalSessionController {
     delta: string,
     blockIndex: number,
   ): void {
-    const key = String(entryId);
-    const chunkSeq = (this.deltaSequence.get(key) ?? 0) + 1;
-    this.deltaSequence.set(key, chunkSeq);
-    this.runtime?.publish({
-      durability: "transient",
+    this.deltaCoalescer.push({
       eventId: agentEventId(dshEventIdentity(native, suffix)),
       occurredAt: dshTimestamp(native.time),
-      payload: { blockIndex, chunkSeq, delta, entryId, part },
+      payload: { blockIndex, delta, entryId, part },
       sessionId: this.ref.sessionId,
       source: this.source(native.type),
+    });
+  }
+
+  private publishDelta(delta: DshDeltaInput): void {
+    const runtime = this.runtime;
+    if (runtime === undefined) return;
+    const key = String(delta.payload.entryId);
+    const chunkSeq = (this.deltaSequence.get(key) ?? 0) + 1;
+    this.deltaSequence.set(key, chunkSeq);
+    runtime.publish({
+      ...delta,
+      durability: "transient",
+      payload: { ...delta.payload, chunkSeq },
       type: "entry.delta",
     });
   }
@@ -2653,6 +2551,7 @@ class DshLocalSessionController {
       readonly status: "pending" | "running" | "success" | "error" | "cancelled";
     },
   ): void {
+    this.deltaCoalescer.flush();
     this.runtime?.publish({
       durability: "transient",
       eventId: agentEventId(dshEventIdentity(native, suffix)),
@@ -2665,6 +2564,7 @@ class DshLocalSessionController {
   }
 
   private emitState(native: DshSessionEvent, suffix: string, patch: AgentSessionStatePatch): void {
+    this.deltaCoalescer.flush();
     this.stateRevision += 1;
     this.runtime?.publish({
       durability: "transient",
@@ -2681,6 +2581,7 @@ class DshLocalSessionController {
     native: DshSessionEvent,
     payload: Extract<AgentSessionEvent, { readonly type: "run.activity" }>["payload"],
   ): void {
+    this.deltaCoalescer.flush();
     this.runtime?.publish({
       durability: "transient",
       eventId: agentEventId(dshEventIdentity(native, "activity")),
@@ -2694,6 +2595,7 @@ class DshLocalSessionController {
 
   private emitModelState(occurredAt: AgentTimestamp, suffix: string): void {
     if (this.selectedModel === undefined) return;
+    this.deltaCoalescer.flush();
     this.stateRevision += 1;
     this.runtime?.publish({
       durability: "transient",
@@ -2722,7 +2624,10 @@ class DshLocalSessionController {
 
   private emitChunkEvents(event: DshSessionEvent): void {
     const data = event.data;
-    if (typeof data !== "object" || data === null || Array.isArray(data)) return;
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      this.deltaCoalescer.flush();
+      return;
+    }
     const payload = data as Record<string, unknown>;
     const turn = payload.turn;
     const step = payload.step;
@@ -2734,6 +2639,7 @@ class DshLocalSessionController {
       chunk === null ||
       Array.isArray(chunk)
     ) {
+      this.deltaCoalescer.flush();
       return;
     }
     const turnNumber = turn as number;
@@ -2748,12 +2654,19 @@ class DshLocalSessionController {
     const messageId = `message-${turnNumber}-${stepNumber}`;
     switch (chunkValue.type) {
       case "block-start":
+        this.deltaCoalescer.flush();
         return;
       case "text-delta":
       case "reasoning-delta": {
-        if (blockIndex === undefined) return;
+        if (blockIndex === undefined) {
+          this.deltaCoalescer.flush();
+          return;
+        }
         const text = chunkValue.text;
-        if (typeof text !== "string") return;
+        if (typeof text !== "string") {
+          this.deltaCoalescer.flush();
+          return;
+        }
         this.emitDelta(
           event,
           "message-delta",
@@ -2765,10 +2678,16 @@ class DshLocalSessionController {
         return;
       }
       case "tool-call-delta": {
-        if (blockIndex === undefined) return;
+        if (blockIndex === undefined) {
+          this.deltaCoalescer.flush();
+          return;
+        }
         const callId = chunkValue.id;
         const delta = chunkValue.argumentsDelta;
-        if (typeof callId !== "string" || !callId || typeof delta !== "string") return;
+        if (typeof callId !== "string" || !callId || typeof delta !== "string") {
+          this.deltaCoalescer.flush();
+          return;
+        }
         const entryId = agentEntryId(`tool-${callId}`);
         const previous = this.overlayTools.get(String(entryId));
         const name = chunkValue.name;
@@ -2788,6 +2707,7 @@ class DshLocalSessionController {
         return;
       }
       default:
+        this.deltaCoalescer.flush();
         return;
     }
   }

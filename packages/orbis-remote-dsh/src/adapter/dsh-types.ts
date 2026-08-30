@@ -203,153 +203,89 @@ export interface DshModelTarget {
   readonly reasoningEffort?: string;
 }
 
-export interface DshApiError {
-  readonly code: string;
-  readonly message: string;
-}
-
-export interface DshApiQuestionOption {
+export interface DshQuestionOption {
   readonly description?: string;
   readonly label: string;
 }
 
-export interface DshApiQuestionIntent {
+export interface DshQuestionIntent {
   readonly approve: string;
   readonly kind: "plan-review";
 }
 
-export interface DshApiQuestionItem {
+export interface DshQuestionItem {
   readonly detail?: string;
   readonly header?: string;
   readonly id: string;
-  readonly intent?: DshApiQuestionIntent;
+  readonly intent?: DshQuestionIntent;
   readonly multiSelect?: boolean;
-  readonly options?: readonly DshApiQuestionOption[];
+  readonly options?: readonly DshQuestionOption[];
   readonly question: string;
 }
 
-export interface DshApiQuestionAnswerItem {
+export interface DshQuestionAnswerItem {
   readonly custom?: string;
   readonly id: string;
   readonly selected: readonly string[];
 }
 
-export interface DshApiResponse<T> {
-  readonly result:
-    | { readonly ok: true; readonly value: T }
-    | { readonly ok: false; readonly error: DshApiError };
-  readonly rpcId: string;
-}
+export type DshApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
 
-export interface DshApiMuxFrame {
-  readonly type:
-    | "approval/requested"
-    | "approval/resolved"
-    | "question/requested"
-    | "question/resolved"
-    | "session/event"
-    | "session/subscribed"
-    | "stream/error";
-  readonly sessionId?: unknown;
-  readonly approvalId?: string;
-  /** The DSH question request itself; its rpc id is the enclosing request.rpcId. */
-  readonly questions?: readonly DshApiQuestionItem[];
-  /** The enclosing request rpc id echoed by a question resolution. */
-  readonly questionRpcId?: string;
-  readonly rpcId?: string;
-  readonly toolName?: string;
+export interface DshApprovalRequest {
+  readonly agent: DshAgent;
+  readonly toolName: string;
   readonly callId?: string;
   readonly reason?: string;
-  readonly outcome?: "allowed-once" | "rejected" | "cancelled" | "unavailable" | "answered";
+  readonly signal?: AbortSignal;
 }
 
-export interface DshApiMuxRequest {
-  readonly payload: DshApiMuxFrame;
-  readonly rpcId: string;
+export interface DshQuestionRequest {
+  readonly agent?: DshAgent;
+  readonly questions: readonly DshQuestionItem[];
+  readonly signal?: AbortSignal;
 }
 
-export interface DshApiPermissionResponse {
-  readonly type: "client-response";
-  readonly rpcId: string;
-  readonly result: {
-    readonly ok: true;
-    readonly value: {
-      readonly approvalId: string;
-      readonly outcome: "allowed-once" | "rejected";
-      readonly sessionId: unknown;
+export interface DshQuestionAnswer {
+  readonly answers: readonly DshQuestionAnswerItem[];
+}
+
+/** Host-owned presence seam used to claim DSH interactions only while Orbis can answer. */
+export interface DshInteractionAvailability {
+  isAvailable(sessionId: string): boolean;
+  subscribe(listener: (sessionId: string, available: boolean) => void): () => void;
+}
+
+/** DSH alpha Host product service replacing the removed APIProxy session namespace. */
+export interface DshSessionController {
+  create(request: {
+    readonly agentPreset?: string;
+    readonly cwd?: string;
+    readonly sessionId?: unknown;
+    readonly workspaceId?: unknown;
+  }): Promise<{ readonly agentPreset?: string; readonly sessionId: unknown }>;
+  modelCatalog(): Promise<{
+    readonly failures: readonly {
+      readonly id: string;
+      readonly message: string;
+      readonly name: string;
+    }[];
+    readonly groups: readonly DshModelProviderGroup[];
+  }>;
+  selectModel(request: DshModelTarget & { readonly sessionId: unknown }): Promise<{
+    readonly selected: DshModelTarget;
+  }>;
+}
+
+/** Exact projection cut installed by DSH's alpha Session Controller. */
+export interface DshSessionProjectionRegistry {
+  snapshot(session: DshSession): {
+    readonly values: {
+      readonly modelSelection?: {
+        readonly lastUsed: DshModelTarget | null;
+        readonly next: DshModelTarget | null;
+      };
     };
   };
-}
-
-export interface DshApiQuestionResponse {
-  readonly type: "client-response";
-  readonly rpcId: string;
-  readonly result:
-    | {
-        readonly ok: true;
-        readonly value: {
-          readonly answer: { readonly answers: readonly DshApiQuestionAnswerItem[] };
-          readonly sessionId: unknown;
-        };
-      }
-    | { readonly ok: false; readonly error: DshApiError };
-}
-
-export type DshApiInteractionResponse = DshApiPermissionResponse | DshApiQuestionResponse;
-
-/** Public DSH gateway seam shared by Web and other interactive front doors. */
-export interface DshApiProxy {
-  readonly llm: {
-    models(request: { readonly payload: {}; readonly rpcId: string }): Promise<
-      DshApiResponse<{
-        readonly failures: readonly DshApiError[];
-        readonly groups: readonly DshModelProviderGroup[];
-      }>
-    >;
-  };
-  readonly sessions: {
-    create(request: {
-      readonly payload: {
-        readonly agentPreset?: string;
-        readonly cwd?: string;
-        readonly sessionId?: unknown;
-        readonly workspaceId?: unknown;
-      };
-      readonly rpcId: string;
-    }): Promise<
-      DshApiResponse<{
-        readonly agentPreset?: string;
-        readonly sessionId: unknown;
-      }>
-    >;
-    models(request: {
-      readonly payload: { readonly sessionId: unknown };
-      readonly rpcId: string;
-    }): Promise<DshApiResponse<{ readonly current: DshModelTarget }>>;
-    selectModel(request: {
-      readonly payload: {
-        readonly model: string;
-        readonly provider: string;
-        readonly reasoningEffort?: string;
-        readonly sessionId: unknown;
-      };
-      readonly rpcId: string;
-    }): Promise<DshApiResponse<{ readonly selected: DshModelTarget }>>;
-  };
-  /** Existing DSH mux/response carrier; no second approval waterfall is registered. */
-  readonly events?: {
-    mux(
-      request: {
-        readonly payload: { readonly since?: Readonly<Record<string, number>> };
-        readonly rpcId: string;
-      },
-      signal: AbortSignal,
-    ): AsyncIterable<DshApiMuxRequest>;
-  };
-  readonly respond?: (message: DshApiInteractionResponse) => Promise<{
-    readonly accepted: boolean;
-    readonly reason?: "not-pending" | "bad-response";
-  }>;
 }
 
 export interface DshAgent {
@@ -403,11 +339,11 @@ export interface DshAgentInboxEvent {
 }
 
 export interface DshContext {
-  /** Present when DSH's shared Web/API gateway owns session model targets. */
-  readonly apiProxy?: DshApiProxy;
   readonly agents: DshAgentRegistry;
   readonly planMode?: DshSessionModeProvider;
+  readonly sessionController: DshSessionController;
   readonly sessionPersistence: DshSessionPersistence;
+  readonly sessionProjections: DshSessionProjectionRegistry;
   readonly workspace: DshWorkspaceRegistry;
   on(
     event: "session/event",
@@ -416,5 +352,21 @@ export interface DshContext {
   on(
     event: "agent/inbox/inserted" | "agent/inbox/claimed" | "agent/inbox/discarded",
     listener: (event: DshAgentInboxEvent) => void,
+  ): () => void;
+  on(
+    event: "approval/request",
+    listener: (
+      request: DshApprovalRequest,
+      next: () => Promise<DshApprovalOutcome>,
+    ) => Promise<DshApprovalOutcome>,
+    options?: { readonly prepend?: boolean },
+  ): () => void;
+  on(
+    event: "user-questions/request",
+    listener: (
+      request: DshQuestionRequest,
+      next: () => Promise<DshQuestionAnswer>,
+    ) => Promise<DshQuestionAnswer>,
+    options?: { readonly prepend?: boolean },
   ): () => void;
 }

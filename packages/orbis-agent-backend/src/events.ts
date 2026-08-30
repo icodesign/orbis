@@ -107,7 +107,18 @@ interface AgentSessionEntryBase {
   readonly parentId: AgentEntryId | null;
   /** Host cursor, or zero before a remote host materializes the entry. */
   readonly cursor: AgentDeliveryCursor;
+  /**
+   * Durable execution ownership for transcript presentation. Drivers expose
+   * their native turn/step vocabulary through these canonical identities so a
+   * client can group process evidence without parsing driver metadata.
+   */
+  readonly scope?: AgentEntryScope;
   readonly _meta?: AgentJsonValue;
+}
+
+export interface AgentEntryScope {
+  readonly runId: AgentRunId;
+  readonly stepId?: string;
 }
 
 export interface AgentMessageEntry extends AgentSessionEntryBase {

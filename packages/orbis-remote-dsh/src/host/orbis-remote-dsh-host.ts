@@ -1,6 +1,7 @@
 import {
   AgentBackendError,
   type AgentBackendError as AgentBackendErrorValue,
+  type AgentSessionRef,
 } from "@orbisapp/orbis-agent-backend";
 import {
   NodeFileRemoteAgentV2HostStore,
@@ -63,6 +64,10 @@ export class OrbisRemoteDshHost {
   readonly requestHandler: RemoteHostRequestHandler;
 
   private closed = false;
+  private readonly availableSessionIds = new Set<string>();
+  private readonly availabilityListeners = new Set<
+    (sessionId: string, available: boolean) => void
+  >();
   private readonly detachments = new Set<() => void>();
   private readonly transport = new OrbisRemoteAgentV2HostTransport();
 
@@ -75,6 +80,13 @@ export class OrbisRemoteDshHost {
     this.nativeBackend = new DshLocalBackend({
       ...options.dsh,
       backend: { displayName: "DSH host runtime", id: "dsh-host" },
+      interactionAvailability: {
+        isAvailable: (sessionId) => this.availableSessionIds.has(sessionId),
+        subscribe: (listener) => {
+          this.availabilityListeners.add(listener);
+          return () => this.availabilityListeners.delete(listener);
+        },
+      },
     });
     this.agentHost = new OrbisRemoteAgentV2Host({
       backend: new DshRemoteV2Backend(this.nativeBackend, options.workspaceProvider),
@@ -94,6 +106,9 @@ export class OrbisRemoteDshHost {
         presence: true,
       },
       onError: options.onError,
+      onSessionSubscriberAvailabilityChanged: (nativeRef, available) => {
+        this.publishAvailability(nativeRef, available);
+      },
       store,
       transport: this.transport,
     });
@@ -118,6 +133,20 @@ export class OrbisRemoteDshHost {
     return detach;
   }
 
+  /** Development tooling uses the same live-subscriber boundary as interactive ownership. */
+  isSessionSubscribed(nativeSessionId: string): boolean {
+    return this.availableSessionIds.has(nativeSessionId);
+  }
+
+  /** Observes whether at least one authenticated client has a live sync for a session. */
+  observeSessionSubscription(
+    listener: (nativeSessionId: string, subscribed: boolean) => void,
+  ): () => void {
+    this.assertOpen();
+    this.availabilityListeners.add(listener);
+    return () => this.availabilityListeners.delete(listener);
+  }
+
   /** Explicit process shutdown is the only path that closes owned DSH controllers. */
   async close(): Promise<void> {
     if (this.closed) return;
@@ -126,11 +155,28 @@ export class OrbisRemoteDshHost {
     try {
       await this.agentHost.close();
     } finally {
+      this.availableSessionIds.clear();
       await this.nativeBackend.close();
     }
   }
 
   private assertOpen(): void {
     if (this.closed) throw new AgentBackendError("closed", "The remote DSH host is closed");
+  }
+
+  private publishAvailability(nativeRef: AgentSessionRef, available: boolean): void {
+    const sessionId = nativeRef.nativeSessionId;
+    const changed = available
+      ? !this.availableSessionIds.has(sessionId)
+      : this.availableSessionIds.delete(sessionId);
+    if (!changed) return;
+    if (available) this.availableSessionIds.add(sessionId);
+    for (const listener of this.availabilityListeners) {
+      try {
+        listener(sessionId, available);
+      } catch {
+        // Availability observers are passive and cannot break the host.
+      }
+    }
   }
 }
