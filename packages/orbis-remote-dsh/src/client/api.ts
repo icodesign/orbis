@@ -194,3 +194,5 @@ export function startRawDshEventReplay(file: File): Promise<RawDshEventReplaySta
 export function cancelRawDshEventReplay(): Promise<RawDshEventReplayStatus> {
   return request("/orbis/replay", { method: "DELETE" });
 }
+
+export const ORBIS_DIAGNOSTICS_EXPORT_URL = "/orbis/diagnostics/export";

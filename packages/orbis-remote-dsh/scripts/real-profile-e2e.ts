@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createOrbisRemoteAgentV2Connection } from "@orbisapp/remote-agent-protocol";
+import { hasSharedFileMode } from "@orbisapp/remote-agent-node-store";
 import {
   generateDeviceIdentity,
   OrbisRemoteConnection,
@@ -287,11 +288,11 @@ async function connectClient({ invitation, identity, pairing, deviceId }) {
 
 async function statePermissions(path) {
   const metadata = await stat(path);
-  if ((metadata.mode & 0o077) !== 0) {
+  if (hasSharedFileMode(metadata.mode)) {
     throw new Error(`state file ${path} is not owner-only`);
   }
   const directory = await stat(dirname(path));
-  if ((directory.mode & 0o077) !== 0) {
+  if (hasSharedFileMode(directory.mode)) {
     throw new Error(`state directory ${dirname(path)} is not owner-only`);
   }
 }

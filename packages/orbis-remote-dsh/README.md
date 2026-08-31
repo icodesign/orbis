@@ -199,7 +199,10 @@ before it can claim the same physical-device flow.
 - The host private identity uses DSH credentials under
   `ORBIS_DSH_HOST_IDENTITY_V1`.
 - Only non-secret host configuration and paired public keys are stored in
-  `$DSH_HOME/orbis/dsh-remote-host.v2.json` with owner-only permissions.
+  `$DSH_HOME/orbis/dsh-remote-host.v2.json`. The plugin enforces owner-only
+  permission bits on POSIX systems. On Windows, Node's synthesized file mode
+  does not represent the Windows ACL, so the file retains the ACL inherited
+  from the user's DSH home instead of applying the POSIX mode check.
 - The host-owned v2 cursor replica is separate:
   `$DSH_HOME/orbis/dsh-remote-agent.v2.json`. It contains session entry-id
   indexes and idempotency claims only; it is not the DSH transcript authority,

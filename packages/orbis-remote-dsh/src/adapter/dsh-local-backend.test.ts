@@ -119,6 +119,7 @@ class TestDsh {
   delegatedQuestions = 0;
   readonly sessions = new Map<string, TestSession>();
   currentPreset = "standard";
+  sessionCreateFailure = false;
 
   private readonly listeners = new Set<(session: DshSession, native: DshSessionEvent) => void>();
   private readonly inboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
@@ -147,6 +148,11 @@ class TestDsh {
       sessionController: {
         create: async (payload) => {
           this.sessionCreateCalls.push(payload);
+          if (this.sessionCreateFailure) {
+            throw Object.assign(new Error("missing workspace"), {
+              failure: { code: "workspace-not-found", message: "missing workspace" },
+            });
+          }
           const id = String(payload.sessionId);
           const workspace =
             payload.workspaceId === undefined
@@ -442,6 +448,7 @@ function createBackend(
   attachments?: DshSessionAttachmentPort,
   subagents?: DshSessionSubagentProvider,
   promptReferences?: DshPromptReferenceProvider,
+  onUpstreamError?: (error: unknown) => void,
 ): DshLocalBackend {
   return new DshLocalBackend({
     context: testDsh.context,
@@ -466,6 +473,7 @@ function createBackend(
     ...(attachments === undefined ? {} : { attachments }),
     ...(subagents === undefined ? {} : { subagents }),
     ...(promptReferences === undefined ? {} : { promptReferences }),
+    ...(onUpstreamError === undefined ? {} : { onUpstreamError }),
     toSessionId: (id) => id,
   });
 }
@@ -1907,7 +1915,18 @@ describe("DSH local backend", () => {
 
   test("keeps a pending approval visible when native DSH cancel fails", async () => {
     const testDsh = new TestDsh(true);
-    const backend = createBackend(testDsh);
+    const upstreamErrors: unknown[] = [];
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (error) => upstreamErrors.push(error),
+    );
     const record = await backend.createSession({
       driverId: agentDriverId("dsh"),
       workspaceRef: "workspace-1",
@@ -1926,6 +1945,8 @@ describe("DSH local backend", () => {
     await expect(backend.readSession(record.ref)).resolves.toMatchObject({
       pendingPermissions: [{ requestId }],
     });
+    expect(upstreamErrors).toHaveLength(1);
+    expect(upstreamErrors[0]).toMatchObject({ message: "cancel failed" });
 
     await backend.close();
     await expect(approval).resolves.toBe("rejected");
@@ -2186,6 +2207,38 @@ describe("DSH local backend", () => {
     expect(testDsh.agent("created-session").steers).toHaveLength(1);
     expect(await runtime.cancel({ keepInbox: true })).toEqual({ cancelled: true });
     expect(testDsh.agent("created-session").cancelCalls).toEqual([{ keepInbox: true }]);
+  });
+
+  test("reports a structured DSH session-create failure before public error mapping", async () => {
+    const testDsh = new TestDsh();
+    testDsh.sessionCreateFailure = true;
+    const upstreamErrors: unknown[] = [];
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (error) => upstreamErrors.push(error),
+    );
+
+    await expectCode(
+      () =>
+        backend.createSession({
+          driverId: agentDriverId("dsh"),
+          workspaceRef: "workspace-1",
+        }),
+      "not_found",
+    );
+    expect(upstreamErrors[0]).toMatchObject({
+      failure: { code: "workspace-not-found", message: "missing workspace" },
+      message: "missing workspace",
+    });
+
+    await backend.close();
   });
 
   test("reopens persisted sessions through DSH's preset-aware session gateway", async () => {

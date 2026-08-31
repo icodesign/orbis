@@ -20,6 +20,8 @@ import {
 } from "@orbisapp/remote-agent-protocol";
 import { z } from "zod";
 
+import { hasSharedFileMode } from "./file-permissions";
+
 const STORE_VERSION = 2 as const;
 const DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -349,7 +351,11 @@ export class NodeFileRemoteAgentV2HostStore implements RemoteAgentV2HostStore {
     if (this.stateValue !== undefined) return this.stateValue;
     try {
       const metadata = await stat(this.options.path);
-      if (!metadata.isFile() || metadata.size > this.maxFileBytes || (metadata.mode & 0o077) !== 0)
+      if (
+        !metadata.isFile() ||
+        metadata.size > this.maxFileBytes ||
+        hasSharedFileMode(metadata.mode)
+      )
         throw stateError();
       const parsed = normalizeState(JSON.parse(await readFile(this.options.path, "utf8")));
       if (

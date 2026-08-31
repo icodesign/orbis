@@ -88,22 +88,25 @@ describe("OrbisDshStateStore", () => {
     await expect(new OrbisDshStateStore(path).load()).rejects.toThrow(/unsupported or corrupt/u);
   });
 
-  test("refuses an existing state file that is readable by other users", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "orbis-dsh-state-"));
-    const stateDirectory = join(directory, "orbis");
-    const path = join(stateDirectory, "host.json");
-    await mkdir(stateDirectory, { recursive: true });
-    await writeFile(
-      path,
-      JSON.stringify({
-        version: 2,
-        hostId: "host-1",
-        endpointRevision: 0,
-        peers: [],
-      }),
-    );
-    await chmod(path, 0o644);
+  test.runIf(process.platform !== "win32")(
+    "refuses an existing state file that is readable by other POSIX users",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "orbis-dsh-state-"));
+      const stateDirectory = join(directory, "orbis");
+      const path = join(stateDirectory, "host.json");
+      await mkdir(stateDirectory, { recursive: true });
+      await writeFile(
+        path,
+        JSON.stringify({
+          version: 2,
+          hostId: "host-1",
+          endpointRevision: 0,
+          peers: [],
+        }),
+      );
+      await chmod(path, 0o644);
 
-    await expect(new OrbisDshStateStore(path).load()).rejects.toThrow(/must not be readable/u);
-  });
+      await expect(new OrbisDshStateStore(path).load()).rejects.toThrow(/must not be readable/u);
+    },
+  );
 });

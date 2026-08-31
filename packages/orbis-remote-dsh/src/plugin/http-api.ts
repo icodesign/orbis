@@ -4,6 +4,7 @@ import { pipeline } from "node:stream/promises";
 
 import { z } from "zod";
 
+import type { OrbisDshDiagnosticsPort } from "./diagnostics-export";
 import { type OrbisDshHostService } from "./host-service";
 import type {
   OrbisDshRawEventExportMetadata,
@@ -96,9 +97,9 @@ function send(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
-function safeDownloadFilename(value: string): string {
+function safeDownloadFilename(value: string, fallback: string): string {
   const filename = value.replace(/[^A-Za-z0-9._-]/gu, "_");
-  return filename.length > 0 ? filename : "dsh-raw-events.jsonl";
+  return filename.length > 0 ? filename : fallback;
 }
 
 async function sendRecordingExport(
@@ -109,12 +110,33 @@ async function sendRecordingExport(
   if (artifact === undefined) throw new Error("No DSH event recording is available to export");
   response.writeHead(200, {
     "cache-control": "no-store",
-    "content-disposition": `attachment; filename="${safeDownloadFilename(artifact.filename)}"`,
+    "content-disposition": `attachment; filename="${safeDownloadFilename(
+      artifact.filename,
+      "dsh-raw-events.jsonl",
+    )}"`,
     "content-length": String(artifact.bytes),
     "content-type": "application/x-ndjson; charset=utf-8",
     "x-content-type-options": "nosniff",
   });
   await pipeline(createReadStream(artifact.path), response);
+}
+
+async function sendDiagnosticsExport(
+  response: ServerResponse,
+  diagnostics: OrbisDshDiagnosticsPort,
+): Promise<void> {
+  const artifact = await diagnostics.export();
+  response.writeHead(200, {
+    "cache-control": "no-store",
+    "content-disposition": `attachment; filename="${safeDownloadFilename(
+      artifact.filename,
+      "orbis-diagnostics.json",
+    )}"`,
+    "content-length": String(Buffer.byteLength(artifact.json, "utf8")),
+    "content-type": "application/json; charset=utf-8",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(artifact.json);
 }
 
 function failure(response: ServerResponse, status: number, error: unknown): void {
@@ -160,11 +182,17 @@ function replayFilename(request: IncomingMessage): string | undefined {
 }
 
 /** Creates the privileged local management route consumed by the settings page. */
+export interface OrbisHttpRouteOptions {
+  readonly diagnostics?: OrbisDshDiagnosticsPort;
+  readonly recorder?: OrbisRawDshEventRecorderPort;
+  readonly replayer?: OrbisRawDshEventReplayerPort;
+}
+
 export function createOrbisHttpRoute(
   service: OrbisDshHostService,
-  recorder?: OrbisRawDshEventRecorderPort,
-  replayer?: OrbisRawDshEventReplayerPort,
+  options: OrbisHttpRouteOptions = {},
 ): OrbisHttpRoute {
+  const { diagnostics, recorder, replayer } = options;
   return {
     kind: "prefix",
     path: "/orbis",
@@ -175,6 +203,15 @@ export function createOrbisHttpRoute(
       }
       const pathname = new URL(request.url ?? "/", "http://orbis.local").pathname;
       try {
+        if (pathname === "/orbis/diagnostics/export") {
+          if (diagnostics === undefined) {
+            failure(response, 404, new Error("Orbis diagnostics export is unavailable"));
+            return;
+          }
+          if (request.method !== "GET") return methodNotAllowed(response);
+          await sendDiagnosticsExport(response, diagnostics);
+          return;
+        }
         if (pathname === "/orbis/replay") {
           if (replayer === undefined) {
             failure(response, 404, new Error("DSH event replay is unavailable"));

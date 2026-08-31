@@ -10,6 +10,7 @@ export type OrbisDshLogFields = Readonly<Record<string, boolean | number | strin
 export interface OrbisDshLogger {
   readonly path?: string;
   start(): Promise<void>;
+  flush(): Promise<void>;
   debug(event: string, fields?: OrbisDshLogFields): void;
   info(event: string, fields?: OrbisDshLogFields): void;
   warn(event: string, fields?: OrbisDshLogFields): void;
@@ -28,6 +29,7 @@ export interface OrbisDshErrorLogOptions {
 
 export const ORBIS_DSH_NOOP_LOGGER: OrbisDshLogger = Object.freeze({
   start: async () => undefined,
+  flush: async () => undefined,
   debug: () => undefined,
   info: () => undefined,
   warn: () => undefined,
@@ -60,13 +62,13 @@ export function orbisDshErrorFields(
   error: unknown,
   options: OrbisDshErrorLogOptions = {},
 ): OrbisDshLogFields {
+  const includeMessage = options.includeMessage ?? true;
   if (error instanceof Error) {
     const candidate = error as Error & {
       readonly code?: unknown;
       readonly retryable?: unknown;
       readonly serverCode?: unknown;
     };
-    const includeMessage = options.includeMessage ?? true;
     return {
       errorName: error.name,
       ...(includeMessage
@@ -82,8 +84,32 @@ export function orbisDshErrorFields(
       ...(typeof candidate.retryable === "boolean" ? { errorRetryable: candidate.retryable } : {}),
     };
   }
+  if (typeof error === "object" && error !== null) {
+    const candidate = error as {
+      readonly code?: unknown;
+      readonly message?: unknown;
+      readonly name?: unknown;
+      readonly retryable?: unknown;
+      readonly serverCode?: unknown;
+    };
+    const message =
+      typeof candidate.message === "string" && candidate.message.length > 0
+        ? candidate.message
+        : String(error);
+    return {
+      ...(typeof candidate.name === "string" ? { errorName: candidate.name } : {}),
+      ...(includeMessage
+        ? { errorMessage: safeText(message) }
+        : { errorMessageBytes: Buffer.byteLength(message, "utf8") }),
+      ...(typeof candidate.code === "string" ? { errorCode: candidate.code } : {}),
+      ...(typeof candidate.serverCode === "string"
+        ? { errorServerCode: candidate.serverCode }
+        : {}),
+      ...(typeof candidate.retryable === "boolean" ? { errorRetryable: candidate.retryable } : {}),
+    };
+  }
   const message = String(error);
-  return options.includeMessage === false
+  return includeMessage === false
     ? { errorMessageBytes: Buffer.byteLength(message, "utf8") }
     : { errorMessage: safeText(message) };
 }
@@ -173,6 +199,11 @@ export class OrbisDshFileLogger implements OrbisDshLogger {
 
   async close(): Promise<void> {
     this.closed = true;
+    await this.tail;
+  }
+
+  /** Waits for queued diagnostics without closing the logger. */
+  async flush(): Promise<void> {
     await this.tail;
   }
 

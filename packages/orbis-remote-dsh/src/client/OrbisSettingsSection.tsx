@@ -11,6 +11,7 @@ import {
   getRawDshEventReplayStatus,
   getStatus,
   RAW_DSH_EVENT_RECORDING_EXPORT_URL,
+  ORBIS_DIAGNOSTICS_EXPORT_URL,
   revokeDevice,
   saveConfiguration,
   startPairing,
@@ -639,6 +640,34 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
           )}
         </section>
       )}
+
+      <section style={cardStyle}>
+        <div>
+          <h3 style={{ margin: "0 0 4px" }}>{t("diagnosticsTitle")}</h3>
+          <div style={{ fontSize: 13, opacity: 0.72 }}>{t("diagnosticsIntro")}</div>
+        </div>
+        <div
+          role="note"
+          style={{
+            border: "1px solid var(--dsh-border, rgba(127, 127, 127, .28))",
+            borderRadius: 8,
+            padding: 10,
+            fontSize: 13,
+          }}
+        >
+          {t("diagnosticsWarning")}
+        </div>
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.assign(ORBIS_DIAGNOSTICS_EXPORT_URL)}
+          >
+            {t("diagnosticsExport")}
+          </Button>
+        </div>
+      </section>
 
       <section style={cardStyle}>
         <h3 style={{ margin: 0 }}>{t("about")}</h3>

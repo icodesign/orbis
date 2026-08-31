@@ -428,6 +428,8 @@ export interface DshLocalBackendOptions {
   /** DSH-owned @file/@session grammar and candidate discovery. */
   readonly promptReferences?: DshPromptReferenceProvider;
   readonly onError?: (error: AgentBackendError) => void;
+  /** Receives the original DSH failure before it is mapped to a support-safe public error. */
+  readonly onUpstreamError?: (error: unknown) => void;
   /** Optional composition seam for DSH's session permission preset service. */
   readonly permissionPresets?: DshSessionPermissionProvider;
   /** Optional composition seam for DSH's logged plan-mode service. */
@@ -465,6 +467,7 @@ interface DshLocalControllerHost {
   now(): AgentTimestamp;
   readCurrentModel(ref: AgentSessionRef): Promise<AgentModelSelection | undefined>;
   report(error: AgentBackendError): void;
+  reportUpstreamError(error: unknown): void;
   selectCurrentModel(
     ref: AgentSessionRef,
     selection: AgentModelSelection,
@@ -1702,6 +1705,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       return await operation();
     } catch (error) {
       if (isAgentBackendError(error)) throw error;
+      this.reportUpstreamError(error);
       const code = dshRemoteFailureCode(error);
       if (code === "model-unavailable" || code === "bad-request") {
         throw new AgentBackendError("invalid_argument", "The requested DSH operation is invalid");
@@ -1713,6 +1717,14 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         throw new AgentBackendError("conflict", "The DSH session is busy or conflicted");
       }
       throw publicUnavailable();
+    }
+  }
+
+  reportUpstreamError(error: unknown): void {
+    try {
+      this.options.onUpstreamError?.(error);
+    } catch {
+      // A diagnostic observer must never change public error mapping.
     }
   }
 }
@@ -2074,7 +2086,8 @@ class DshLocalSessionController {
         { kind: "user" },
         input.keepInbox === undefined ? undefined : { keepInbox: input.keepInbox },
       );
-    } catch {
+    } catch (error) {
+      this.host.reportUpstreamError(error);
       throw publicUnavailable("The DSH run could not be cancelled");
     }
     return { cancelled: true };
@@ -2202,7 +2215,8 @@ class DshLocalSessionController {
     try {
       if (input.delivery === "steer") this.agent.steer(message);
       else this.agent.followup(message);
-    } catch {
+    } catch (error) {
+      this.host.reportUpstreamError(error);
       throw publicUnavailable("The DSH run could not accept the prompt");
     }
     return { acceptedAt: this.host.now(), runId };
