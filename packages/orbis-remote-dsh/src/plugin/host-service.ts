@@ -36,6 +36,7 @@ import {
   type OrbisDshLogFields,
   type OrbisDshLogger,
 } from "./file-logger";
+import { withOrbisRemoteRequestDiagnostics } from "./request-diagnostics-context";
 import { type OrbisDshHostState, type OrbisDshPeer, OrbisDshStateStore } from "./state-store";
 
 export const ORBIS_DSH_IDENTITY_CREDENTIAL = "ORBIS_DSH_HOST_IDENTITY_V1";
@@ -925,7 +926,10 @@ export class OrbisDshHostService {
       const startedAt = Date.now();
       this.logger.debug("remote.request.started", fields);
       try {
-        const result = await handler(method, params, context);
+        const result = await withOrbisRemoteRequestDiagnostics(
+          { method, requestId: context.requestId },
+          () => handler(method, params, context),
+        );
         this.logger.debug("remote.request.succeeded", {
           ...fields,
           durationMs: Math.max(0, Date.now() - startedAt),

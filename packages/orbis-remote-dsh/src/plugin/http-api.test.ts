@@ -7,6 +7,7 @@ import { finished } from "node:stream/promises";
 
 import { describe, expect, it, vi } from "vitest";
 
+import type { OrbisDshDiagnosticsPort } from "./diagnostics-export";
 import type { OrbisDshHostService } from "./host-service";
 import {
   createOrbisHttpRoute,
@@ -89,6 +90,7 @@ function fakeReplayer(
 }
 
 async function invoke(input: {
+  readonly diagnostics?: OrbisDshDiagnosticsPort;
   readonly host?: string;
   readonly method: string;
   readonly recorder?: OrbisRawDshEventRecorderPort;
@@ -104,7 +106,11 @@ async function invoke(input: {
   request.method = input.method;
   request.url = input.url;
   const response = new TestResponse();
-  await createOrbisHttpRoute(fakeService(), input.recorder, input.replayer).handler(
+  await createOrbisHttpRoute(fakeService(), {
+    diagnostics: input.diagnostics,
+    recorder: input.recorder,
+    replayer: input.replayer,
+  }).handler(
     request,
     response as unknown as ServerResponse,
   );
@@ -252,5 +258,66 @@ describe("raw DSH event replay HTTP route", () => {
       url: "/orbis/recording",
     });
     expect(recordingResponse.responseStatus).toBe(400);
+  });
+});
+
+describe("support diagnostics HTTP route", () => {
+  it("is absent when no diagnostics exporter is composed", async () => {
+    const response = await invoke({ method: "GET", url: "/orbis/diagnostics/export" });
+
+    expect(response.responseStatus).toBe(404);
+    expect(JSON.parse(response.body().toString("utf8"))).toEqual({
+      error: "Orbis diagnostics export is unavailable",
+    });
+  });
+
+  it("keeps export behind the loopback fence", async () => {
+    const exportDiagnostics = vi.fn(async () => ({ filename: "ignored.json", json: "{}\n" }));
+
+    const response = await invoke({
+      diagnostics: { export: exportDiagnostics },
+      host: "example.test",
+      method: "GET",
+      url: "/orbis/diagnostics/export",
+    });
+
+    expect(response.responseStatus).toBe(403);
+    expect(exportDiagnostics).not.toHaveBeenCalled();
+  });
+
+  it("downloads the exporter-owned JSON snapshot without caching", async () => {
+    const json = '{"format":"orbis.remote-diagnostics"}\n';
+    const exportDiagnostics = vi.fn(async () => ({
+      filename: 'orbis diagnostics".json',
+      json,
+    }));
+
+    const response = await invoke({
+      diagnostics: { export: exportDiagnostics },
+      method: "GET",
+      url: "/orbis/diagnostics/export?ignored=1",
+    });
+
+    expect(response.responseStatus).toBe(200);
+    expect(response.responseHeaders["content-disposition"]).toBe(
+      'attachment; filename="orbis_diagnostics_.json"',
+    );
+    expect(response.responseHeaders["content-type"]).toBe("application/json; charset=utf-8");
+    expect(response.responseHeaders["cache-control"]).toBe("no-store");
+    expect(response.responseHeaders["x-content-type-options"]).toBe("nosniff");
+    expect(response.body().toString("utf8")).toBe(json);
+    expect(exportDiagnostics).toHaveBeenCalledOnce();
+  });
+
+  it("requires GET for the export", async () => {
+    const exportDiagnostics = vi.fn(async () => ({ filename: "ignored.json", json: "{}\n" }));
+    const response = await invoke({
+      diagnostics: { export: exportDiagnostics },
+      method: "POST",
+      url: "/orbis/diagnostics/export",
+    });
+
+    expect(response.responseStatus).toBe(405);
+    expect(exportDiagnostics).not.toHaveBeenCalled();
   });
 });

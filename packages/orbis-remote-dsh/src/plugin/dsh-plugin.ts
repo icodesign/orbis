@@ -38,9 +38,10 @@ import type {
 } from "../adapter";
 import { OrbisRemoteDshHost, type OrbisRemoteDshHostDshOptions } from "../host";
 import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
+import { OrbisDshDiagnosticsExporter } from "./diagnostics-export";
 import { createDshPromptReferenceProvider } from "./dsh-prompt-reference-provider";
 import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-session-catalog";
-import { OrbisDshFileLogger } from "./file-logger";
+import { OrbisDshFileLogger, orbisDshErrorFields } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
 import { createOrbisHttpRoute } from "./http-api";
 import { OrbisDshRawEventRecorder } from "./raw-dsh-event-recorder";
@@ -49,6 +50,7 @@ import {
   type OrbisDshRawEventReplayEvent,
   type OrbisDshRawEventReplayPort,
 } from "./raw-dsh-event-replayer";
+import { currentOrbisRemoteRequestDiagnostics } from "./request-diagnostics-context";
 import { OrbisDshStateStore } from "./state-store";
 import { createDshWorkspaceFolderProvider } from "./workspace-folder-provider";
 
@@ -437,6 +439,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
   });
   const dshContext = createOrbisDshContext(context);
   let activeRemoteHost: OrbisRemoteDshHost | undefined;
+  const logger = new OrbisDshFileLogger(logPath);
   const service = new OrbisDshHostService(
     new OrbisDshStateStore(statePath),
     context.credentials as unknown as OrbisDshCredentials,
@@ -456,6 +459,13 @@ export async function apply(context: Context, config?: Config): Promise<void> {
             planMode: createDshPlanModeProvider(context),
             attachments: createDshAttachmentPort(context),
             promptReferences: createDshPromptReferenceProvider(context),
+            onUpstreamError: (error) => {
+              const request = currentOrbisRemoteRequestDiagnostics();
+              logger.error("dsh.operation.failed", {
+                ...(request ?? {}),
+                ...orbisDshErrorFields(error),
+              });
+            },
             subagents: createDshSessionSubagentProvider(context),
             toSessionId: SessionId,
           },
@@ -472,8 +482,12 @@ export async function apply(context: Context, config?: Config): Promise<void> {
     },
     undefined,
     undefined,
-    new OrbisDshFileLogger(logPath),
+    logger,
   );
+  const diagnostics = new OrbisDshDiagnosticsExporter({
+    logger,
+    status: () => service.status(),
+  });
   const rawEventReplayer = rawEventRecorder
     ? new OrbisDshRawEventReplayer(createRawDshEventReplayPort(context, () => activeRemoteHost))
     : undefined;
@@ -490,7 +504,11 @@ export async function apply(context: Context, config?: Config): Promise<void> {
 
   context.effect(async () => {
     const disposeRoute = context.webServer.register(
-      createOrbisHttpRoute(service, rawEventRecorder, rawEventReplayer),
+      createOrbisHttpRoute(service, {
+        diagnostics,
+        recorder: rawEventRecorder,
+        replayer: rawEventReplayer,
+      }),
     );
     void service.connectIfConfigured().catch(() => undefined);
     return async () => {

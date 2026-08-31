@@ -40,6 +40,17 @@ describe("OrbisDshFileLogger", () => {
         errorName: "Error",
         errorMessageBytes: 14,
       });
+      expect(
+        orbisDshErrorFields({
+          code: "workspace-not-found",
+          message: "missing workspace",
+          retryable: false,
+        }),
+      ).toEqual({
+        errorCode: "workspace-not-found",
+        errorMessage: "missing workspace",
+        errorRetryable: false,
+      });
       expect(contents).not.toContain("provider-token");
       expect(contents).not.toContain("bearer-secret");
       expect(contents).not.toContain("private-secret");
