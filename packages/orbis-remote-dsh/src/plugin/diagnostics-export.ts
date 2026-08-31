@@ -1,7 +1,13 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 
+import {
+  createRemoteDiagnosticsEnvelope,
+  remoteDiagnosticsFileName,
+  remoteDiagnosticsFingerprint,
+  sanitizeRemoteDiagnosticsText,
+  serializeRemoteDiagnostics,
+} from "@orbisapp/transport";
 import { ORBIS_TRANSPORT_PROTOCOL_VERSION } from "@orbisapp/transport/protocol-version";
 
 import packageManifest from "../../package.json";
@@ -61,88 +67,81 @@ export class OrbisDshDiagnosticsExporter implements OrbisDshDiagnosticsPort {
     ];
     const latestFailure = failures.at(-1);
     const hostFingerprint = remoteDiagnosticsFingerprint(status.configuration.hostId);
-    const envelope = {
-      capturedAt: capturedAt.toISOString(),
-      correlation: {
-        hostFingerprint,
-        requestIds,
-        ...(latestFailure === undefined
-          ? {}
-          : {
-              latestFailure: {
-                at:
-                  typeof latestFailure.at === "string"
-                    ? latestFailure.at
-                    : capturedAt.toISOString(),
-                code:
-                  typeof latestFailure.errorCode === "string" ? latestFailure.errorCode : "unknown",
-                method: typeof latestFailure.method === "string" ? latestFailure.method : "unknown",
-                requestId:
-                  typeof latestFailure.requestId === "string" ? latestFailure.requestId : "unknown",
-              },
-            }),
+    const envelope = createRemoteDiagnosticsEnvelope(
+      {
+        correlation: {
+          hostFingerprint,
+          requestIds,
+          ...(latestFailure === undefined
+            ? {}
+            : {
+                latestFailure: {
+                  at:
+                    typeof latestFailure.at === "string"
+                      ? latestFailure.at
+                      : capturedAt.toISOString(),
+                  code:
+                    typeof latestFailure.errorCode === "string"
+                      ? latestFailure.errorCode
+                      : "unknown",
+                  method:
+                    typeof latestFailure.method === "string" ? latestFailure.method : "unknown",
+                  requestId:
+                    typeof latestFailure.requestId === "string"
+                      ? latestFailure.requestId
+                      : "unknown",
+                },
+              }),
+        },
+        environment: {
+          architecture: process.arch,
+          host: {
+            hostMachine: status.hostEnvironment.hostMachine,
+            isWsl: status.hostEnvironment.isWsl,
+            networkingMode: status.hostEnvironment.networkingMode,
+            ...(status.hostEnvironment.wslDistribution === undefined
+              ? {}
+              : {
+                  wslDistribution: sanitizeDiagnosticText(status.hostEnvironment.wslDistribution),
+                }),
+          },
+          node: process.version,
+          platform: process.platform,
+        },
+        logs: snapshot,
+        redaction: {
+          omitted: [
+            "access tokens and provider credentials",
+            "endpoint URLs and IP addresses",
+            "host and peer public keys",
+            "pairing invitations and secrets",
+            "prompt, transcript, and tool payloads",
+            "raw DSH event recordings",
+          ],
+          profile: "support-safe-v1",
+          truncated: snapshot.truncated ? ["server diagnostics log"] : [],
+        },
+        retention: {
+          maxEntries: MAX_EXPORTED_LOG_ENTRIES,
+          maxWindowMs: DIAGNOSTICS_WINDOW_MS,
+          rotatedFileRead: snapshot.rotatedFileRead,
+        },
+        source: "dsh-plugin",
+        status: supportSafeStatus(status),
+        versions: {
+          dshDriver: ORBIS_DSH_DRIVER_VERSION,
+          plugin: packageManifest.version,
+          protocol: String(ORBIS_TRANSPORT_PROTOCOL_VERSION),
+        },
+        window: { from: from.toISOString(), to: capturedAt.toISOString() },
       },
-      environment: hostEnvironment(),
-      format: "orbis.remote-diagnostics" as const,
-      formatVersion: 1 as const,
-      logs: snapshot,
-      redaction: {
-        omitted: [
-          "access tokens and provider credentials",
-          "endpoint URLs and IP addresses",
-          "host and peer public keys",
-          "pairing invitations and secrets",
-          "prompt, transcript, and tool payloads",
-          "raw DSH event recordings",
-        ],
-        profile: "support-safe-v1" as const,
-        truncated: snapshot.truncated ? ["server diagnostics log"] : [],
-      },
-      retention: {
-        maxEntries: MAX_EXPORTED_LOG_ENTRIES,
-        maxWindowMs: DIAGNOSTICS_WINDOW_MS,
-        rotatedFileRead: snapshot.rotatedFileRead,
-      },
-      source: "dsh-plugin" as const,
-      status: supportSafeStatus(status),
-      versions: {
-        dshDriver: ORBIS_DSH_DRIVER_VERSION,
-        plugin: packageManifest.version,
-        protocol: String(ORBIS_TRANSPORT_PROTOCOL_VERSION),
-      },
-      window: { from: from.toISOString(), to: capturedAt.toISOString() },
-    };
+      capturedAt.toISOString(),
+    );
     return {
-      filename: diagnosticsFileName("dsh-plugin", hostFingerprint, capturedAt.toISOString()),
-      json: serializeDiagnostics(envelope),
+      filename: remoteDiagnosticsFileName("dsh-plugin", hostFingerprint, capturedAt.toISOString()),
+      json: serializeRemoteDiagnostics(envelope),
     };
   }
-}
-
-function hostEnvironment(): JsonRecord {
-  const isWsl =
-    process.platform === "linux" &&
-    (typeof process.env.WSL_INTEROP === "string" ||
-      typeof process.env.WSL_DISTRO_NAME === "string");
-  const distribution = isWsl ? process.env.WSL_DISTRO_NAME?.trim() : undefined;
-  const hostMachine =
-    process.platform === "win32"
-      ? "windows"
-      : process.platform === "darwin"
-        ? "macos"
-        : process.platform === "linux"
-          ? "linux"
-          : "unknown";
-  return {
-    architecture: process.arch,
-    host: {
-      hostMachine,
-      isWsl,
-      ...(distribution ? { wslDistribution: sanitizeDiagnosticText(distribution) } : {}),
-    },
-    node: process.version,
-    platform: process.platform,
-  };
 }
 
 function supportSafeStatus(status: OrbisDshStatus): JsonRecord {
@@ -153,6 +152,7 @@ function supportSafeStatus(status: OrbisDshStatus): JsonRecord {
       endpointCount: status.configuration.endpoints.length,
       endpointKinds: status.configuration.endpoints.map((endpoint) => endpoint.kind),
       endpointRevision: status.configuration.endpointRevision,
+      networkIssue: status.configuration.networkIssue ?? null,
       ready: status.configuration.ready,
     },
     connection: {
@@ -273,58 +273,8 @@ function sanitizeLogRecord(record: JsonRecord): JsonRecord {
 function sanitizeDiagnosticText(value: string): string {
   const home = homedir();
   const temporary = tmpdir();
-  return value
-    .replaceAll(home, "<HOME>")
-    .replaceAll(temporary, "<TEMP>")
-    .replaceAll(/\b(?:wss?|https?):\/\/[^\s,)}\]]+/giu, "<URL>")
-    .replaceAll(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s,;)}\]]+/gu, "<PATH>")
-    .replaceAll(/(^|[\s('"`])\/(?:[^/\s]+\/)*[^\s,;)}\]]+/gu, "$1<PATH>")
-    .replaceAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/gu, "<IP>")
-    .replaceAll(/Bearer\s+\S+/giu, "Bearer [REDACTED]")
-    .replaceAll(
-      /((?:access[_-]?token|authorization|password|pairing[_-]?secret|private[_-]?key|secret|token)\s*[:=]\s*)[^\s,;]+/giu,
-      "$1[REDACTED]",
-    )
-    .slice(0, 4_096);
-}
-
-function remoteDiagnosticsFingerprint(value: string): string {
-  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 16)}`;
-}
-
-function diagnosticsFileName(source: string, fingerprint: string, capturedAt: string): string {
-  return `orbis-${source}-diagnostics-${safeFileNamePart(fingerprint)}-${safeFileNamePart(capturedAt)}.json`;
-}
-
-function safeFileNamePart(value: string): string {
-  const safe = value.replaceAll(/[^A-Za-z0-9_-]+/gu, "-").replaceAll(/^-+|-+$/gu, "");
-  return safe || "unknown";
-}
-
-function serializeDiagnostics(value: unknown): string {
-  const ancestors: object[] = [];
-  const serialized = JSON.stringify(
-    value,
-    function (key, candidate: unknown) {
-      if (isSensitiveDiagnosticsKey(key)) return "[REDACTED]";
-      if (typeof candidate === "bigint") return candidate.toString();
-      if (typeof candidate === "string") return sanitizeDiagnosticText(candidate);
-      if (typeof candidate === "number" && !Number.isFinite(candidate)) return String(candidate);
-      if (candidate && typeof candidate === "object") {
-        while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop();
-        if (ancestors.includes(candidate)) return "[Circular]";
-        ancestors.push(candidate);
-      }
-      return candidate;
-    },
-    2,
-  );
-  return `${serialized ?? "null"}\n`;
-}
-
-function isSensitiveDiagnosticsKey(key: string): boolean {
-  return /^(?:accessToken|authorization|hostKeyId|hostPublicKey|invitation|password|pairingSecret|privateKey|publicKey|secret|token)$/iu.test(
-    key,
+  return sanitizeRemoteDiagnosticsText(
+    value.replaceAll(home, "<HOME>").replaceAll(temporary, "<TEMP>"),
   );
 }
 

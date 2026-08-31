@@ -13,6 +13,19 @@ export interface OrbisDevice {
 }
 
 export interface OrbisStatus {
+  readonly hostEnvironment: {
+    readonly hostMachine: "linux" | "macos" | "windows" | "unknown";
+    readonly isWsl: boolean;
+    readonly networkingMode:
+      | "bridged"
+      | "mirrored"
+      | "nat"
+      | "native"
+      | "unknown"
+      | "virtioproxy"
+      | "wsl1";
+    readonly wslDistribution?: string;
+  };
   readonly configuration: {
     readonly hostId: string;
     readonly directPort: number;
@@ -29,6 +42,7 @@ export interface OrbisStatus {
       readonly expiresAt?: string;
     }[];
     readonly endpointRevision: number;
+    readonly networkIssue?: "wsl-lan-unreachable";
     readonly ready: boolean;
   };
   readonly connection: {
@@ -175,6 +189,7 @@ export function stopRawDshEventRecording(): Promise<RawDshEventRecordingStatus> 
 }
 
 export const RAW_DSH_EVENT_RECORDING_EXPORT_URL = "/orbis/recording/export";
+export const ORBIS_DIAGNOSTICS_EXPORT_URL = "/orbis/diagnostics/export";
 
 export function getRawDshEventReplayStatus(): Promise<RawDshEventReplayStatus | undefined> {
   return optionalRequest("/orbis/replay");
@@ -194,5 +209,3 @@ export function startRawDshEventReplay(file: File): Promise<RawDshEventReplaySta
 export function cancelRawDshEventReplay(): Promise<RawDshEventReplayStatus> {
   return request("/orbis/replay", { method: "DELETE" });
 }
-
-export const ORBIS_DIAGNOSTICS_EXPORT_URL = "/orbis/diagnostics/export";

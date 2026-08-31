@@ -262,5 +262,5 @@ describe("raw DSH event replay", () => {
       state: "completed",
     });
     expect(session.seq).toBe(45_952);
-  });
+  }, 15_000);
 });

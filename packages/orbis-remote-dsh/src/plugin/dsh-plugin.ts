@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-agent";
+import type {} from "@deepseek-ai/dsh-api-session-controller";
 import {
   admitEncodedImages,
   isImageAdmissionError,
@@ -19,11 +20,14 @@ import type { ContentBlock } from "@deepseek-ai/dsh-llm/types";
 import type {} from "@deepseek-ai/dsh-plan-mode";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
+import type {} from "@deepseek-ai/dsh-session-projection";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
 import type {} from "@deepseek-ai/dsh-session-query";
 import type {} from "@deepseek-ai/dsh-session-reference";
 import type { SubagentDescendantListEntry, SubagentRuntime } from "@deepseek-ai/dsh-subagent";
 import type {} from "@deepseek-ai/dsh-subagent";
+import type {} from "@deepseek-ai/dsh-user-approval";
+import type {} from "@deepseek-ai/dsh-user-questions";
 import type {} from "@deepseek-ai/dsh-workspace";
 import z from "@deepseek-ai/schemastery";
 import { AgentBackendError } from "@orbisapp/orbis-agent-backend";
@@ -327,7 +331,7 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
 interface PermissionPresetContext {
   readonly permissionPresets?: {
     readonly names: readonly string[];
-    current(events: readonly unknown[]): string;
+    current(session: { readonly events: readonly unknown[] }): string;
     optionOf(name: string): {
       readonly description?: string;
       readonly name: string;
@@ -340,16 +344,15 @@ interface PermissionPresetContext {
   };
 }
 
-function createDshPermissionProvider(context: Context): DshSessionPermissionProvider {
+export function createDshPermissionProvider(context: Context): DshSessionPermissionProvider {
   const services = context as unknown as PermissionPresetContext;
   return {
-    describe(nativeSessionId, events) {
+    describe(nativeSessionId) {
       const permissionPresets = services.permissionPresets;
       if (permissionPresets === undefined) return undefined;
       const session = services.sessions?.get(SessionId(nativeSessionId));
-      const sessionEvents = events ?? session?.events;
-      if (sessionEvents === undefined) return undefined;
-      const currentValue = permissionPresets.current(sessionEvents);
+      if (session === undefined) return undefined;
+      const currentValue = permissionPresets.current(session);
       const options = [
         ...permissionPresets.names.map((name) => permissionPresets.optionOf(name)),
         ...(permissionPresets.names.includes(currentValue)
@@ -510,7 +513,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
         replayer: rawEventReplayer,
       }),
     );
-    void service.connectIfConfigured().catch(() => undefined);
+    void service.connectIfAvailable().catch(() => undefined);
     return async () => {
       disposeRoute();
       try {

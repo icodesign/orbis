@@ -117,9 +117,9 @@ class TestDsh {
   }> = [];
   delegatedApprovals = 0;
   delegatedQuestions = 0;
+  sessionCreateFailure?: unknown;
   readonly sessions = new Map<string, TestSession>();
   currentPreset = "standard";
-  sessionCreateFailure = false;
 
   private readonly listeners = new Set<(session: DshSession, native: DshSessionEvent) => void>();
   private readonly inboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
@@ -148,8 +148,10 @@ class TestDsh {
       sessionController: {
         create: async (payload) => {
           this.sessionCreateCalls.push(payload);
-          if (this.sessionCreateFailure) {
+          if (this.sessionCreateFailure !== undefined) {
+            if (this.sessionCreateFailure !== true) throw this.sessionCreateFailure;
             throw Object.assign(new Error("missing workspace"), {
+              code: "workspace/not-found",
               failure: { code: "workspace-not-found", message: "missing workspace" },
             });
           }
@@ -541,6 +543,59 @@ function pendingQuestions(events: readonly AgentSessionEvent[]) {
 }
 
 describe("DSH local backend", () => {
+  test.each([
+    ["gateway/bad-request", "invalid_argument"],
+    ["session/model-unavailable", "invalid_argument"],
+    ["session/not-found", "not_found"],
+    ["workspace/not-found", "not_found"],
+    ["session/agent-busy", "conflict"],
+    ["session/conflict", "conflict"],
+  ])("maps alpha.2 RemoteError %s to %s", async (remoteCode, backendCode) => {
+    const dsh = new TestDsh();
+    dsh.sessionCreateFailure = Object.assign(new Error("DSH request failed"), {
+      code: remoteCode,
+    });
+    const backend = createBackend(dsh);
+
+    await expectCode(
+      () =>
+        backend.createSession({
+          driverId: agentDriverId("dsh"),
+          workspaceRef: "workspace-1",
+        }),
+      backendCode,
+    );
+  });
+
+  test("reports the original DSH failure before public error mapping", async () => {
+    const dsh = new TestDsh();
+    const upstream = Object.assign(new Error("provider unavailable"), {
+      code: "gateway/internal",
+      serverCode: "windows-provider-startup",
+    });
+    dsh.sessionCreateFailure = upstream;
+    const observed: unknown[] = [];
+    const backend = createBackend(
+      dsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (error) => observed.push(error),
+    );
+
+    await expect(
+      backend.createSession({
+        driverId: agentDriverId("dsh"),
+        workspaceRef: "workspace-1",
+      }),
+    ).rejects.toMatchObject({ code: "unavailable" });
+    expect(observed).toEqual([upstream]);
+  });
+
   test("completes draft references against the selected workspace without creating a session", async () => {
     const dsh = new TestDsh();
     let received: Parameters<DshPromptReferenceProvider["complete"]>[0] | undefined;
@@ -738,6 +793,32 @@ describe("DSH local backend", () => {
       sessionId: "root",
     });
     await expect(backend.listSessionSubagents(rootRef)).rejects.toMatchObject({ code: "protocol" });
+    await backend.close();
+  });
+
+  test("maps alpha.2 gateway cancellation to a public unavailable error", async () => {
+    const backend = createBackend(
+      new TestDsh(),
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      undefined,
+      undefined,
+      {
+        listDescendants: async () => {
+          throw { code: "gateway/cancelled" };
+        },
+      },
+    );
+    const rootRef = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "root",
+      sessionId: "root",
+    });
+    await expect(backend.listSessionSubagents(rootRef)).rejects.toMatchObject({
+      code: "unavailable",
+    });
     await backend.close();
   });
 
@@ -1774,9 +1855,9 @@ describe("DSH local backend", () => {
 
     // B is unavailable, so its request goes straight to the next handler and
     // cannot affect A's pending interaction.
-    await expect(
-      testDsh.requestApproval("write", { sessionId: "session-b" }),
-    ).resolves.toBe("rejected");
+    await expect(testDsh.requestApproval("write", { sessionId: "session-b" })).resolves.toBe(
+      "rejected",
+    );
     expect(testDsh.delegatedApprovals).toBe(1);
     expect(pendingPermissionIds(eventsA)).toHaveLength(1);
     expect(pendingPermissionIds(eventsB)).toEqual([]);

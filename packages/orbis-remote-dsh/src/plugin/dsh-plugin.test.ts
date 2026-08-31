@@ -8,6 +8,7 @@ import { expect, test, vi } from "vitest";
 import type { OrbisRemoteDshHost } from "../host";
 import {
   createDshAttachmentPort,
+  createDshPermissionProvider,
   createDshPlanModeProvider,
   createDshSessionSubagentProvider,
   createRawDshEventReplayPort,
@@ -100,6 +101,32 @@ test("uses the optional plan mode service when it is present", () => {
   expect(provider?.set(agent, false)).toBe("committed");
   expect(planMode.get).toHaveBeenCalledWith(agent);
   expect(planMode.set).toHaveBeenCalledWith(agent, false);
+});
+
+test("reads and writes alpha.2 permission presets through the live Session", async () => {
+  const session = { events: [] };
+  const current = vi.fn(() => "workspace-write");
+  const set = vi.fn();
+  const context = {
+    permissionPresets: {
+      current,
+      names: ["workspace-write", "danger-full-access"],
+      optionOf: (value: string) => ({ name: value, value }),
+      set,
+    },
+    sessions: { get: vi.fn(() => session) },
+  } as unknown as Context;
+
+  const provider = createDshPermissionProvider(context);
+
+  expect(provider.describe("session-1")).toMatchObject({
+    currentValue: "workspace-write",
+    id: "permissions",
+    options: [{ value: "workspace-write" }, { value: "danger-full-access" }],
+  });
+  expect(current).toHaveBeenCalledWith(session);
+  await provider.set("session-1", "danger-full-access");
+  expect(set).toHaveBeenCalledWith(session, "danger-full-access");
 });
 
 test("enables raw recording only for the explicit server development flag", () => {

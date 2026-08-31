@@ -142,7 +142,10 @@ test("browse rejects a tampered folder reference", async () => {
   const { provider } = await fixture();
   const roots = await provider.browse({});
   const token = roots.entries[0]!.ref;
-  await expect(provider.browse({ folderRef: `${token.slice(0, -1)}x` })).rejects.toMatchObject({
+  const signatureOffset = token.lastIndexOf(".") + 1;
+  const replacement = token[signatureOffset] === "A" ? "B" : "A";
+  const tampered = `${token.slice(0, signatureOffset)}${replacement}${token.slice(signatureOffset + 1)}`;
+  await expect(provider.browse({ folderRef: tampered })).rejects.toMatchObject({
     code: "invalid_argument",
   });
 });

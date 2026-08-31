@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { hostname, networkInterfaces, type NetworkInterfaceInfo } from "node:os";
+import { hostname } from "node:os";
 
 import { ORBIS_REMOTE_AGENT_V2_METHOD_LIST } from "@orbisapp/remote-agent-protocol";
 import {
@@ -31,6 +31,14 @@ import {
 import { ORBIS_DSH_DRIVER_VERSION, ORBIS_DSH_HARNESS_ID } from "./constants";
 import { OrbisDirectHostListener } from "./direct-listener";
 import {
+  detectOrbisDshNetworkEnvironment,
+  discoverOrbisDirectAddresses,
+  orbisDshDirectNetworkIssue,
+  type OrbisDshDirectNetworkIssue,
+  type OrbisDshDiscoveredAddress,
+  type OrbisDshNetworkEnvironment,
+} from "./direct-network";
+import {
   ORBIS_DSH_NOOP_LOGGER,
   orbisDshErrorFields,
   type OrbisDshLogFields,
@@ -57,10 +65,8 @@ export interface OrbisDshConfigurationInput {
   readonly hostName: string;
 }
 
-export interface OrbisDshDiscoveredAddress {
-  readonly kind: "lan" | "tailnet";
-  readonly address: string;
-}
+export { discoverOrbisDirectAddresses } from "./direct-network";
+export type { OrbisDshDiscoveredAddress } from "./direct-network";
 
 type PendingPairingPhase = "awaiting-device" | "connecting" | "failed";
 type HostConnectionState = "connected" | "connecting" | "disconnected";
@@ -133,6 +139,7 @@ export interface OrbisDshAgentHostFactory {
 }
 
 export interface OrbisDshStatus {
+  readonly hostEnvironment: OrbisDshNetworkEnvironment;
   readonly configuration: {
     readonly hostId: string;
     readonly directPort: number;
@@ -141,6 +148,7 @@ export interface OrbisDshStatus {
     readonly autoDirectEndpoints: readonly HostEndpoint[];
     readonly endpoints: readonly HostEndpoint[];
     readonly endpointRevision: number;
+    readonly networkIssue?: OrbisDshDirectNetworkIssue;
     readonly ready: boolean;
   };
   readonly connection: {
@@ -185,59 +193,6 @@ function directPortValue(value: number): number {
     throw new Error("Direct port must be an integer from 1024 through 65535");
   }
   return value;
-}
-
-function ipv4Parts(address: string): readonly [number, number, number, number] | undefined {
-  const parts = address.split(".").map(Number);
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return undefined;
-  }
-  return parts as [number, number, number, number];
-}
-
-function isLanAddress(address: string): boolean {
-  const parts = ipv4Parts(address);
-  if (parts === undefined) return false;
-  const [first, second] = parts;
-  return (
-    first === 10 ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
-  );
-}
-
-function isTailnetAddress(address: string): boolean {
-  const parts = ipv4Parts(address);
-  return parts !== undefined && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
-}
-
-/**
- * Discovers only private IPv4 routes that are safe to advertise as plain
- * WebSockets. Public addresses are intentionally not advertised.
- */
-export function discoverOrbisDirectAddresses(
-  interfaces: NodeJS.Dict<NetworkInterfaceInfo[] | undefined> = networkInterfaces(),
-): readonly OrbisDshDiscoveredAddress[] {
-  const discovered = new Map<string, OrbisDshDiscoveredAddress>();
-  for (const entries of Object.values(interfaces)) {
-    for (const entry of entries ?? []) {
-      if (String(entry.family) !== "IPv4" || entry.internal) continue;
-      const kind = isTailnetAddress(entry.address)
-        ? "tailnet"
-        : isLanAddress(entry.address)
-          ? "lan"
-          : undefined;
-      if (kind === undefined) continue;
-      discovered.set(`${kind}:${entry.address}`, { kind, address: entry.address });
-    }
-  }
-  return [...discovered.values()].sort((left, right) => {
-    const kindOrder = left.kind === right.kind ? 0 : left.kind === "lan" ? -1 : 1;
-    return kindOrder || left.address.localeCompare(right.address);
-  });
 }
 
 function directWebSocketUrl(address: string, port: number): string {
@@ -309,6 +264,7 @@ export class OrbisDshHostService {
     private readonly createId: () => string = randomUUID,
     private readonly logger: OrbisDshLogger = ORBIS_DSH_NOOP_LOGGER,
     discoverDirectAddresses: () => readonly OrbisDshDiscoveredAddress[] = discoverOrbisDirectAddresses,
+    private readonly hostEnvironment: OrbisDshNetworkEnvironment = detectOrbisDshNetworkEnvironment(),
   ) {
     this.discoverDirectAddresses = discoverDirectAddresses;
   }
@@ -329,8 +285,10 @@ export class OrbisDshHostService {
     const directPort = directPortValue(state.directPort ?? ORBIS_DSH_DIRECT_PORT);
     const autoDirectEndpoints = this.discoveredDirectEndpoints(directPort, MAX_HOST_ENDPOINTS);
     const configured = this.configurationFromState(state, false);
+    const networkIssue = orbisDshDirectNetworkIssue(this.hostEnvironment);
     const connectedKeys = new Set((this.connection?.peers ?? []).map((peer) => peer.keyId));
     return {
+      hostEnvironment: this.hostEnvironment,
       configuration: {
         hostId: state.hostId,
         directPort,
@@ -339,6 +297,7 @@ export class OrbisDshHostService {
         autoDirectEndpoints,
         endpoints: configured?.endpoints ?? [],
         endpointRevision: configured?.endpointRevision ?? state.endpointRevision,
+        ...(networkIssue === undefined ? {} : { networkIssue }),
         ready: configured !== undefined,
       },
       connection: {
@@ -393,9 +352,9 @@ export class OrbisDshHostService {
     return this.exclusive(async () => await this.connectLocked());
   }
 
-  async connectIfConfigured(): Promise<void> {
+  async connectIfAvailable(): Promise<void> {
     if (this.configurationFromState(await this.stateStore.load(), false) === undefined) {
-      this.logger.debug("transport.connect.skipped", { reason: "unconfigured" });
+      this.logger.debug("transport.connect.skipped", { reason: "network-unavailable" });
       return;
     }
     try {
@@ -853,23 +812,19 @@ export class OrbisDshHostService {
 
   private configurationFromState(
     state: OrbisDshHostState,
-    requireConfigured: boolean,
+    requireAvailable: boolean,
   ): ConfiguredHostState | undefined {
-    if (state.hostName === undefined) {
-      if (requireConfigured) throw new Error("Configure the Orbis host name first");
-      return undefined;
-    }
     const port = directPortValue(state.directPort ?? ORBIS_DSH_DIRECT_PORT);
     const endpoints = this.discoveredDirectEndpoints(port, MAX_HOST_ENDPOINTS);
     if (endpoints.length === 0) {
-      if (requireConfigured) {
+      if (requireAvailable) {
         throw new Error("Connect this computer to a local network or Tailscale, then try again");
       }
       return undefined;
     }
     return {
       state,
-      hostName: validHostName(state.hostName),
+      hostName: validHostName(state.hostName ?? hostname()),
       directPort: port,
       endpoints,
       endpointRevision: this.endpointRevisionFor(state, endpoints),

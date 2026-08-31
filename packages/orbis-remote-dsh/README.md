@@ -38,6 +38,10 @@ or Tailscale-style CGNAT addresses. A public direct endpoint must use WSS; the
 bundle does not expose DSH Web as a remote endpoint and does not perform NAT
 traversal.
 
+When DSH runs inside WSL, the settings page reports the Windows/WSL host environment and detected
+WSL networking mode. Follow the [WSL connection setup](docs/wsl-setup.md) to make the listener
+reachable through mirrored networking or Tailscale.
+
 ## Local installation
 
 ```sh
@@ -91,8 +95,8 @@ npm dist-tag/exact version:
 
 ```sh
 pnpm run serve:dsh --dsh local:/path/to/deepseek-harness
-pnpm run serve:dsh --dsh github:tag:dsh-v0.1.2-alpha.1
-pnpm run serve:dsh --dsh github:commit:cd5ef8148158c3a752a658978873241fdf8e2bbc
+pnpm run serve:dsh --dsh github:tag:dsh-v0.1.2-alpha.2
+pnpm run serve:dsh --dsh github:commit:0a53fb55bea101816fa226bb964ae2bed71c343b
 pnpm run serve:dsh --dsh npm:latest
 pnpm run serve:dsh --dsh-bin /path/to/dsh
 pnpm run serve:dsh --port 3090 --keep
@@ -152,10 +156,11 @@ keeping the Harness-owned peer packages visible; a package version bump is not
 required during local development.
 
 Open the address printed by `dsh web`, choose **Settings → Plugins → Orbis**, and
-save the computer name. The connection port is available under Advanced
-Settings, while LAN and Tailnet addresses are discovered automatically. Turn on
-remote access, create a pairing code, then scan it from Orbis on the phone. The
-bundle restores remote access whenever `dsh web` starts.
+create a pairing code, then scan it from Orbis on the phone. On first launch the
+plugin uses the computer's system host name and port `47000`, discovers LAN and
+Tailnet addresses automatically, and turns on remote access. Settings only need
+to be saved when you customize the computer name or connection port. The bundle
+restores remote access whenever `dsh web` starts.
 
 Keep DSH Web on its default loopback host (`127.0.0.1`). Its privileged Orbis
 management API refuses non-loopback origins and Host headers. The direct
@@ -169,10 +174,11 @@ Every candidate must complete the pinned host handshake before it can connect.
 
 1. Start DSH Web locally: `DSH_TELEMETRY_DISABLED=1 dsh web`. Keep its Web
    listener on `127.0.0.1`.
-2. In **Settings → Plugins → Orbis**, save the host name and port `47000`. LAN and Tailnet
-   addresses are discovered automatically; do not advertise `127.0.0.1` or
-   `localhost` to a physical phone. Turn on remote access and allow inbound TCP
-   `47000` through the desktop firewall when using direct routes.
+2. Open **Settings → Plugins → Orbis**. The plugin automatically uses the system
+   host name and port `47000`, discovers LAN and Tailnet addresses, and turns on
+   remote access. Save only if you customize those defaults. Do not advertise
+   `127.0.0.1` or `localhost` to a physical phone, and allow inbound TCP `47000`
+   through the desktop firewall when using direct routes.
 3. Build a fresh Orbis custom development client, not only a Metro refresh.
    iOS source configuration declares `NSAllowsLocalNetworking` and the local
    network usage description; grant the resulting iOS prompt on first use.
@@ -262,31 +268,40 @@ The runner covers driver/session discovery, opaque `workspaceRef` create/list,
 snapshot sync, model catalog discovery and selection through DSH's shared
 session gateway, short prompts, cursor-index reconnect replay, idempotent
 writes, state permissions/no-secret assertions, and a full DSH Web restart. It
-does not assert provider-generated text and it never uses a fake backend or transport.
+never uses a fake backend or transport. Without `DEEPSEEK_API_KEY`, the
+disposable profile disables the live DeepSeek adapter and mounts DSH's official
+`@deepseek-ai/dsh-llm-replay` test adapter with a checked-in deterministic
+response. The runner asserts that exact response, non-zero usage, restart
+replay, and full history through the real DSH Agent loop. Automatic LLM title
+generation is disabled only in this keyless lane so it cannot consume the
+single-call fixture outside the Orbis acceptance boundary.
 Replay is bounded by the native DSH transcript and the persisted entry-id
 index; the host does not maintain a second event log.
 
 ```sh
-# from this package; without a provider key this still runs the real
-# profile/pairing/model-selection smoke and skips only prompt/replay phases
+# deterministic keyless acceptance: real profile, Agent loop, Orbis transport,
+# prompt, durable usage, reconnect replay, and DSH restart
 ORBIS_DSH_REAL_E2E=1 pnpm run e2e:real
 
-# provider credentials extend the same fixture through real prompt/replay phases
+# optional external-provider canary: additionally validates DeepSeek auth,
+# request/stream translation, and the remote service itself
 ORBIS_DSH_REAL_E2E=1 DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" pnpm run e2e:real
 
-# fail instead of skip when dsh/provider prerequisites are absent
+# fail instead of skip when the DSH/profile prerequisites are absent
 ORBIS_DSH_REAL_E2E=1 ORBIS_DSH_REAL_E2E_STRICT=1 pnpm run e2e:real
 ```
 
 Useful controls are `ORBIS_DSH_BIN`, `ORBIS_DSH_E2E_ROOT` (a parent for the
 new disposable fixture), and `ORBIS_DSH_E2E_KEEP=1` (preserve the fixture for
-local forensics). The runner
+local forensics). An absent or empty `DEEPSEEK_API_KEY` selects deterministic
+replay; any configured value keeps the live adapter so malformed or rejected
+credentials fail visibly instead of silently falling back. The runner
 always sets an isolated `DSH_HOME`, binds DSH Web to `127.0.0.1`, and removes
 the ambient Orbis identity environment variable. The disposable runner
 discovers the local LAN endpoint. The runner never touches
 the mobile app or its integration tests.
 
-The compatibility gate checks `dsh --version` (expected `0.1.0-rc.6`), the
+The compatibility gate checks `dsh --version` (expected `0.1.2-alpha.2`), the
 launcher `--patch` flag, and Web's `--host`/`--port` flags before creating a fixture. Set
 `ORBIS_DSH_EXPECTED_VERSION` only for another explicitly reviewed DSH
 profile; an unreviewed or missing CLI is a clear skip by default and a

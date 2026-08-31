@@ -16,6 +16,7 @@ import {
 } from "@orbisapp/transport";
 import { describe, expect, test } from "vitest";
 
+import { orbisDshDirectNetworkIssue, type OrbisDshNetworkEnvironment } from "./direct-network";
 import {
   ORBIS_DSH_IDENTITY_CREDENTIAL,
   OrbisDshHostService,
@@ -76,6 +77,7 @@ function createService(
   createId?: HostServiceArguments[4],
   logger?: HostServiceArguments[5],
   discoverDirectAddresses: HostServiceArguments[6] = testDirectAddresses,
+  hostEnvironment?: HostServiceArguments[7],
 ): OrbisDshHostService {
   return new OrbisDshHostService(
     stateStore,
@@ -85,6 +87,7 @@ function createService(
     createId,
     logger,
     discoverDirectAddresses,
+    hostEnvironment,
   );
 }
 
@@ -169,54 +172,164 @@ function directConfiguration(directPort: number): OrbisDshConfigurationInput {
 
 describe("OrbisDshHostService", () => {
   test("discovers private LAN and Tailnet IPv4 addresses without advertising public interfaces", () => {
-    const discovered = discoverOrbisDirectAddresses({
-      en0: [
-        {
-          address: "192.168.50.10",
-          cidr: "192.168.50.10/24",
-          family: "IPv4",
-          internal: false,
-          mac: "00:00:00:00:00:01",
-          netmask: "255.255.255.0",
-        },
-        {
-          address: "203.0.113.10",
-          cidr: "203.0.113.10/24",
-          family: "IPv4",
-          internal: false,
-          mac: "00:00:00:00:00:02",
-          netmask: "255.255.255.0",
-        },
-      ],
-      utun0: [
-        {
-          address: "100.64.0.12",
-          cidr: "100.64.0.12/32",
-          family: "IPv4",
-          internal: false,
-          mac: "00:00:00:00:00:03",
-          netmask: "255.255.255.255",
-        },
-      ],
-    });
+    const discovered = discoverOrbisDirectAddresses(
+      {
+        en0: [
+          {
+            address: "192.168.50.10",
+            cidr: "192.168.50.10/24",
+            family: "IPv4",
+            internal: false,
+            mac: "00:00:00:00:00:01",
+            netmask: "255.255.255.0",
+          },
+          {
+            address: "203.0.113.10",
+            cidr: "203.0.113.10/24",
+            family: "IPv4",
+            internal: false,
+            mac: "00:00:00:00:00:02",
+            netmask: "255.255.255.0",
+          },
+        ],
+        utun0: [
+          {
+            address: "100.64.0.12",
+            cidr: "100.64.0.12/32",
+            family: "IPv4",
+            internal: false,
+            mac: "00:00:00:00:00:03",
+            netmask: "255.255.255.255",
+          },
+        ],
+      },
+      { hostMachine: "linux", isWsl: false, networkingMode: "native" },
+    );
     expect(discovered).toEqual([
       { kind: "lan", address: "192.168.50.10" },
       { kind: "tailnet", address: "100.64.0.12" },
     ]);
   });
 
-  test("reports a fresh host as unconfigured", async () => {
+  test("does not advertise WSL 2 NAT addresses as reachable LAN endpoints", () => {
+    const interfaces = {
+      eth0: [
+        {
+          address: "172.28.144.32",
+          cidr: "172.28.144.32/20",
+          family: "IPv4" as const,
+          internal: false,
+          mac: "00:00:00:00:00:01",
+          netmask: "255.255.240.0",
+        },
+      ],
+      tailscale0: [
+        {
+          address: "100.64.0.12",
+          cidr: "100.64.0.12/32",
+          family: "IPv4" as const,
+          internal: false,
+          mac: "00:00:00:00:00:02",
+          netmask: "255.255.255.255",
+        },
+      ],
+    };
+    const nat: OrbisDshNetworkEnvironment = {
+      hostMachine: "windows",
+      isWsl: true,
+      networkingMode: "nat",
+      wslDistribution: "Ubuntu",
+    };
+    const mirrored: OrbisDshNetworkEnvironment = {
+      hostMachine: "windows",
+      isWsl: true,
+      networkingMode: "mirrored",
+    };
+
+    expect(discoverOrbisDirectAddresses(interfaces, nat)).toEqual([
+      { kind: "tailnet", address: "100.64.0.12" },
+    ]);
+    expect(discoverOrbisDirectAddresses(interfaces, mirrored)).toEqual([
+      { kind: "lan", address: "172.28.144.32" },
+      { kind: "tailnet", address: "100.64.0.12" },
+    ]);
+    expect(
+      discoverOrbisDirectAddresses(interfaces, {
+        hostMachine: "windows",
+        isWsl: true,
+        networkingMode: "unknown",
+      }),
+    ).toEqual([{ kind: "tailnet", address: "100.64.0.12" }]);
+    expect(orbisDshDirectNetworkIssue(nat)).toBe("wsl-lan-unreachable");
+    expect(orbisDshDirectNetworkIssue(mirrored)).toBeUndefined();
+  });
+
+  test("reports the host machine and WSL network mode", async () => {
+    const { store, cleanup } = await makeFixture();
+    try {
+      const hostEnvironment: OrbisDshNetworkEnvironment = {
+        hostMachine: "windows",
+        isWsl: true,
+        networkingMode: "nat",
+        wslDistribution: "Ubuntu",
+      };
+      const service = createService(
+        store,
+        new MemoryCredentials(),
+        fakeAgentHostFactory(),
+        undefined,
+        undefined,
+        undefined,
+        testDirectAddresses,
+        hostEnvironment,
+      );
+
+      const status = await service.status();
+
+      expect(status.hostEnvironment).toEqual(hostEnvironment);
+      expect(status.configuration.networkIssue).toBe("wsl-lan-unreachable");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("uses the default host name and port for a fresh host", async () => {
     const { store, cleanup } = await makeFixture();
     try {
       const service = createService(store, new MemoryCredentials(), fakeAgentHostFactory());
       const status = await service.status();
       expect(status.configuration.hostId).toBe("host-1");
-      expect(status.configuration.ready).toBe(false);
-      expect(status.configuration.endpoints).toEqual([]);
+      expect(status.configuration.directPort).toBe(47_000);
+      expect(status.configuration.hostName).toBeUndefined();
+      expect(status.configuration.suggestedHostName).not.toBe("");
+      expect(status.configuration.ready).toBe(true);
+      expect(status.configuration.endpoints).toEqual([
+        { kind: "lan", url: "ws://127.0.0.1:47000/orbis" },
+        { kind: "tailnet", url: "ws://100.64.0.12:47000/orbis" },
+      ]);
       expect(status.configuration.endpointRevision).toBe(0);
       expect(status.devices).toEqual([]);
       expect(status.connection.state).toBe("disconnected");
     } finally {
+      await cleanup();
+    }
+  });
+
+  test("starts a fresh host with its effective default configuration", async () => {
+    const { store, cleanup } = await makeFixture();
+    const port = await freePort();
+    await store.update((state) => ({ ...state, directPort: port }));
+    const service = createService(store, new MemoryCredentials(), fakeAgentHostFactory());
+    try {
+      await service.connectIfAvailable();
+      const status = await service.status();
+      expect(status).toMatchObject({
+        configuration: { directPort: port, ready: true },
+        connection: { state: "connected" },
+      });
+      expect(status.configuration.hostName).toBeUndefined();
+    } finally {
+      await service.dispose();
       await cleanup();
     }
   });

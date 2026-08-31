@@ -36,6 +36,7 @@ export interface DshSessionCatalogEntry {
 
 export interface DshSessionEvent {
   readonly data: unknown;
+  readonly ignorable?: true;
   readonly seq: number;
   readonly time: number;
   readonly type: string;
@@ -54,10 +55,7 @@ export interface DshSessionInspection {
 
 /** Optional host-owned bridge for DSH's session permission preset service. */
 export interface DshSessionPermissionProvider {
-  describe(
-    nativeSessionId: string,
-    events?: readonly DshSessionEvent[],
-  ): AgentSessionConfigOption | undefined;
+  describe(nativeSessionId: string): AgentSessionConfigOption | undefined;
   set(nativeSessionId: string, value: string): void | Promise<void>;
 }
 
