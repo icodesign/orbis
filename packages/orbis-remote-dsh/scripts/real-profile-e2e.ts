@@ -2,9 +2,9 @@
  * Opt-in real DSH profile E2E.
  *
  * This runner deliberately talks to a real `dsh web` process. It never swaps
- * in an in-memory backend or a fake transport. The profile/model phases run
- * without provider credentials; a missing key skips only prompt/replay phases
- * by default (set ORBIS_DSH_REAL_E2E_STRICT=1 to turn that skip into a failure).
+ * in an in-memory backend or a fake transport. Without provider credentials it
+ * replaces only the LLM adapter with DSH's official deterministic replay
+ * plugin; a configured credential retains the live DeepSeek provider lane.
  */
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -24,6 +24,11 @@ import {
 } from "@orbisapp/transport";
 
 import { createNodeWebSocketFactory } from "../src/plugin/node-websocket.ts";
+import {
+  createRealProfileOverlay,
+  KEYLESS_REPLAY_TEXT,
+  realProfileProviderMode,
+} from "./real-profile-e2e-provider.ts";
 import { authenticateDshWeb, delay, fetchDshWeb, waitFor } from "./real-profile-e2e-utils.ts";
 
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,6 +49,12 @@ const PACKAGE_TSX_BIN = join(
 const DSH_COMMAND =
   process.env.ORBIS_DSH_BIN ?? (existsSync(PACKAGE_DSH_BIN) ? PACKAGE_DSH_BIN : "dsh");
 const WEB_READY_TIMEOUT_MS = 90_000;
+const LLM_REPLAY_MODULE_PATH = fileURLToPath(import.meta.resolve("@deepseek-ai/dsh-llm-replay"));
+const KEYLESS_REPLAY_FIXTURE_PATH = join(
+  PACKAGE_DIRECTORY,
+  "fixtures",
+  "keyless-llm-replay-session.jsonl",
+);
 
 function log(message) {
   process.stdout.write(`[orbis-dsh-real-e2e] ${message}\n`);
@@ -208,18 +219,15 @@ async function dshRpc(webSession, method, payload) {
 }
 
 async function readDshModelSelection(webSession, dshVersion, sessionId) {
-  if (dshVersion === "0.1.2-alpha.1") {
-    const sessions = await dshRpc(webSession, "session/list", {
-      args: { _request: {} },
-    });
-    const summary = sessions.items?.find((item) => item.sessionId === sessionId);
-    if (summary === undefined) throw new Error("session/list did not include the selected Session");
-    return summary.projections?.values?.modelSelection?.next ?? null;
+  if (dshVersion !== "0.1.2-alpha.2") {
+    throw new Error(`DSH ${dshVersion} has no reviewed model-observation contract`);
   }
-  if (dshVersion === "0.1.1-rc.2") {
-    return (await dshRpc(webSession, "session.models", { sessionId })).current ?? null;
-  }
-  throw new Error(`DSH ${dshVersion} has no reviewed model-observation contract`);
+  const sessions = await dshRpc(webSession, "session/list", {
+    args: { _request: {} },
+  });
+  const summary = sessions.items?.find((item) => item.sessionId === sessionId);
+  if (summary === undefined) throw new Error("session/list did not include the selected Session");
+  return summary.projections?.values?.modelSelection?.next ?? null;
 }
 
 /** Preserve the test phase when an encrypted remote request fails. */
@@ -359,7 +367,7 @@ async function persistedIndexEntryCount(path) {
 }
 
 async function assertDshCompatibility() {
-  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.1-rc.2";
+  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.2-alpha.2";
   const probeRoot = await mkdtemp(join(tmpdir(), "orbis-dsh-compat-"));
   const probeEnv = {
     ...process.env,
@@ -528,19 +536,17 @@ async function main() {
   const debugLog = join(stateDirectory, "server-debug.jsonl");
   const clientJournal = join(fixture, "client-delivery-journal.jsonl");
   const overlay = join(fixture, "orbis-overlay.yml");
-  await writeFile(
-    overlay,
-    [
-      "- id: orbis-remote",
-      "  config:",
-      `    statePath: ${JSON.stringify(hostState)}`,
-      `    agentStatePath: ${JSON.stringify(agentState)}`,
-      `    logPath: ${JSON.stringify(debugLog)}`,
-      "    workspaceRoots:",
-      `      - ${JSON.stringify(workspace)}`,
-      "",
-    ].join("\n"),
-  );
+  const providerMode = realProfileProviderMode(process.env.DEEPSEEK_API_KEY);
+  const overlayOptions = {
+    agentStatePath: agentState,
+    hostStatePath: hostState,
+    logPath: debugLog,
+    providerMode,
+    replayFixturePath: KEYLESS_REPLAY_FIXTURE_PATH,
+    replayModulePath: LLM_REPLAY_MODULE_PATH,
+    workspaceRoot: workspace,
+  };
+  await writeFile(overlay, createRealProfileOverlay(overlayOptions));
 
   let web;
   let agentConnection;
@@ -552,6 +558,11 @@ async function main() {
   let deliveries = [];
   const providerSecrets = [process.env.DEEPSEEK_API_KEY];
   try {
+    log(
+      providerMode === "replay"
+        ? "provider lane: official DSH keyless LLM replay"
+        : "provider lane: live DeepSeek API",
+    );
     await mkdir(workspace, { recursive: true, mode: 0o700 });
     await runCommand(
       DSH_COMMAND,
@@ -736,25 +747,6 @@ async function main() {
     ) {
       throw new Error("Orbis and DSH Web did not observe the same selected model");
     }
-    if (!process.env.DEEPSEEK_API_KEY) {
-      await activeDeliveryQueue.wait();
-      await statePermissions(hostState);
-      await statePermissions(agentState);
-      await statePermissions(debugLog);
-      await statePermissions(clientJournal);
-      await assertNoSecrets(
-        [hostState, agentState, debugLog, clientJournal],
-        [invitation.pairingSecret],
-      );
-      log(
-        "PASS: real DSH profile boot, direct pairing, workspace browse/register, session creation, model catalog, and shared model selection",
-      );
-      prerequisiteFailure(
-        "DEEPSEEK_API_KEY is required for the remaining real prompt/replay phases; no fake provider is used",
-      );
-      return;
-    }
-
     // An omitted delivery starts a new DSH run. `follow_up` and `steer` are
     // queued input modes for an already active run, so using either here would
     // correctly be rejected as a session-state conflict.
@@ -812,6 +804,14 @@ async function main() {
     ) {
       throw new Error("the real provider response did not expose non-zero assistant usage");
     }
+    if (
+      providerMode === "replay" &&
+      !assistantWithUsage.content.some(
+        (block) => block.type === "text" && block.text === KEYLESS_REPLAY_TEXT,
+      )
+    ) {
+      throw new Error("the keyless replay response did not reach the durable Orbis transcript");
+    }
     const committedCursor = Number(replay.throughCursor);
     if (committedCursor <= baselineCursor) {
       throw new Error("replay did not advance the durable client cursor");
@@ -825,16 +825,7 @@ async function main() {
     // Restart the real DSH Web process. The native transcript and the small
     // cursor index are independent, so the durable suffix remains
     // replayable without a host ACK journal or duplicated payload event log.
-    await writeFile(
-      overlay,
-      [
-        "- id: orbis-remote",
-        "  config:",
-        `    statePath: ${JSON.stringify(hostState)}`,
-        `    agentStatePath: ${JSON.stringify(agentState)}`,
-        "",
-      ].join("\n"),
-    );
+    await writeFile(overlay, createRealProfileOverlay(overlayOptions));
     replayAgent.close();
     await waitFor(() => agentConnection.connection.state === "closed", "pre-restart disconnect");
     await web.stop();
@@ -922,6 +913,19 @@ async function main() {
     if (!history.baseline || history.entries.length < 2) {
       throw new Error("the native history was not returned as a v2 snapshot");
     }
+    if (
+      providerMode === "replay" &&
+      history.entries.filter(
+        (entry) =>
+          entry.kind === "message" &&
+          entry.role === "assistant" &&
+          entry.content.some(
+            (block) => block.type === "text" && block.text === KEYLESS_REPLAY_TEXT,
+          ),
+      ).length < 2
+    ) {
+      throw new Error("keyless replay did not survive the DSH restart and full history sync");
+    }
     const historyPage = await agentStep("sessions.entries", () =>
       historyAgent.entries({
         ref: session.ref,
@@ -958,7 +962,7 @@ async function main() {
       [invitation.pairingSecret, ...providerSecrets],
     );
     log(
-      "PASS: direct pairing, v2 DSH operations, cursor-index replay, no-ACK delivery, and restart recovery",
+      `PASS: direct pairing, v2 DSH operations, cursor-index replay, no-ACK delivery, and restart recovery (${providerMode === "replay" ? "keyless replay" : "live provider"})`,
     );
     log(
       "NOTE: host identity rotation coverage is fixture-only (old pinned client rejected; new key rejected by old delivery state); production rotation still requires an explicit migration API.",

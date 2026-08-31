@@ -41,6 +41,12 @@ function status(): OrbisDshStatus {
         version: "2",
       },
     ],
+    hostEnvironment: {
+      hostMachine: "windows",
+      isWsl: true,
+      networkingMode: "nat",
+      wslDistribution: "Ubuntu",
+    },
     pairing: {
       expiresAt: "2026-08-31T10:05:00.000Z",
       invitation: "orbis://pair/private-secret",

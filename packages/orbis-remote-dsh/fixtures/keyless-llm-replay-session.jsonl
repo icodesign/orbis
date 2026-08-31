@@ -1,0 +1,6 @@
+{"type":"session","version":0,"id":"orbis-keyless-e2e","createdAt":0}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"text-delta","index":0,"text":"ORBIS_KEYLESS_E2E_OK"}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ORBIS_KEYLESS_E2E_OK"}}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":7,"outputTokens":4,"totalTokens":11}}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}

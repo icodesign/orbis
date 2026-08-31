@@ -472,10 +472,7 @@ interface DshLocalControllerHost {
     ref: AgentSessionRef,
     selection: AgentModelSelection,
   ): Promise<AgentModelSelection>;
-  permissionOptions(
-    ref: AgentSessionRef,
-    events?: readonly DshSessionEvent[],
-  ): AgentSessionConfigOption | undefined;
+  permissionOptions(ref: AgentSessionRef): AgentSessionConfigOption | undefined;
   readonly planMode?: DshSessionModeProvider;
   readPlanMode(
     agent: DshAgent,
@@ -1148,7 +1145,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
           decorated = { ...projection, metadata: { ...projection.metadata, model } };
         }
       }
-      const permissionOptions = this.permissionOptions(ref, inspection.events);
+      const permissionOptions = this.permissionOptions(ref);
       return {
         ...decorated,
         ...(permissionOptions === undefined ? {} : { configOptions: [permissionOptions] }),
@@ -1334,11 +1331,8 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return this.clock();
   }
 
-  permissionOptions(
-    ref: AgentSessionRef,
-    events?: readonly DshSessionEvent[],
-  ): AgentSessionConfigOption | undefined {
-    return this.options.permissionPresets?.describe(ref.nativeSessionId, events);
+  permissionOptions(ref: AgentSessionRef): AgentSessionConfigOption | undefined {
+    return this.options.permissionPresets?.describe(ref.nativeSessionId);
   }
 
   readPlanMode(
@@ -1707,13 +1701,27 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       if (isAgentBackendError(error)) throw error;
       this.reportUpstreamError(error);
       const code = dshRemoteFailureCode(error);
-      if (code === "model-unavailable" || code === "bad-request") {
+      if (
+        code === "gateway/bad-request" ||
+        code === "session/attachment-invalid" ||
+        code === "session/model-unavailable" ||
+        code === "session/title-invalid"
+      ) {
         throw new AgentBackendError("invalid_argument", "The requested DSH operation is invalid");
       }
-      if (code === "session-not-found" || code === "workspace-not-found") {
+      if (
+        code === "session/not-found" ||
+        code === "session/queue-item-not-found" ||
+        code === "subagent/not-found" ||
+        code === "workspace/not-found"
+      ) {
         throw new AgentBackendError("not_found", "The requested DSH resource was not found");
       }
-      if (code === "agent-busy" || code === "session-conflict") {
+      if (
+        code === "agent-preset/conflict" ||
+        code === "session/agent-busy" ||
+        code === "session/conflict"
+      ) {
         throw new AgentBackendError("conflict", "The DSH session is busy or conflicted");
       }
       throw publicUnavailable();
@@ -1731,9 +1739,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
 
 function dshRemoteFailureCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
-  const failure = (error as { readonly failure?: unknown }).failure;
-  if (typeof failure !== "object" || failure === null) return undefined;
-  const code = (failure as { readonly code?: unknown }).code;
+  const code = (error as { readonly code?: unknown }).code;
   return typeof code === "string" ? code : undefined;
 }
 
@@ -1741,7 +1747,7 @@ function isDshCancellation(error: unknown): boolean {
   if (error instanceof Error && error.name === "AbortError") return true;
   if (typeof error !== "object" || error === null) return false;
   const code = (error as { readonly code?: unknown }).code;
-  return code === "CANCELLED" || code === "cancelled";
+  return code === "CANCELLED" || code === "cancelled" || code === "gateway/cancelled";
 }
 
 function nativeSubagentId(value: unknown, label: string): string {
@@ -2305,7 +2311,7 @@ class DshLocalSessionController {
       }
 
       if (isDshPermissionConfigEvent(event)) {
-        const permissionOptions = this.host.permissionOptions(this.ref, this.agent.session.events);
+        const permissionOptions = this.host.permissionOptions(this.ref);
         if (permissionOptions !== undefined) {
           this.emitState(event, "permission-config", { configOptions: [permissionOptions] });
         }

@@ -5,6 +5,8 @@
   },
   "include": [
     "src/**/*.ts",
+    "scripts/real-profile-e2e-provider.test.ts",
+    "scripts/real-profile-e2e-provider.ts",
     "scripts/serve-dsh-source.test.ts",
     "scripts/serve-dsh-source.ts",
     "scripts/serve-dsh-web.ts"

@@ -1,4 +1,4 @@
-import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
+import { Button, IconCheckOutline16 } from "@deepseek-ai/dsh-client-ui-primitives";
 import { QRCodeSVG } from "qrcode.react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,8 +10,8 @@ import {
   getRawDshEventRecordingStatus,
   getRawDshEventReplayStatus,
   getStatus,
-  RAW_DSH_EVENT_RECORDING_EXPORT_URL,
   ORBIS_DIAGNOSTICS_EXPORT_URL,
+  RAW_DSH_EVENT_RECORDING_EXPORT_URL,
   revokeDevice,
   saveConfiguration,
   startPairing,
@@ -55,6 +55,42 @@ const inputStyle = {
   color: "inherit",
   padding: "8px 10px",
 };
+
+function hostMachineLabel(status: OrbisStatus, t: Translate): string {
+  const host = status.hostEnvironment;
+  const machine = t(
+    host.hostMachine === "macos"
+      ? "hostMacos"
+      : host.hostMachine === "windows"
+        ? "hostWindows"
+        : host.hostMachine === "linux"
+          ? "hostLinux"
+          : "hostUnknown",
+  );
+  if (!host.isWsl) return machine;
+  const runtime = host.wslDistribution
+    ? t("wslDistribution", { distribution: host.wslDistribution })
+    : t("wsl");
+  return `${machine} · ${runtime}`;
+}
+
+function networkModeLabel(status: OrbisStatus, t: Translate): string | undefined {
+  if (!status.hostEnvironment.isWsl) return undefined;
+  const mode = status.hostEnvironment.networkingMode;
+  return t(
+    mode === "bridged"
+      ? "networkModeBridged"
+      : mode === "mirrored"
+        ? "networkModeMirrored"
+        : mode === "nat"
+          ? "networkModeNat"
+          : mode === "virtioproxy"
+            ? "networkModeVirtioProxy"
+            : mode === "wsl1"
+              ? "networkModeWsl1"
+              : "networkModeUnknown",
+  );
+}
 
 function stateLabel(status: OrbisStatus | undefined, t: Translate): string {
   if (!status || status.connection.state === "disconnected") return t("accessOff");
@@ -102,6 +138,8 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
   const [replay, setReplay] = useState<RawDshEventReplayStatus>();
   const [replayFile, setReplayFile] = useState<File>();
   const replayFileInput = useRef<HTMLInputElement>(null);
+  const copyFeedbackTimer = useRef<number>();
+  const [copiedPairingLink, setCopiedPairingLink] = useState<string>();
   const [busy, setBusy] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
@@ -141,6 +179,15 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  useEffect(
+    () => () => {
+      if (copyFeedbackTimer.current !== undefined) {
+        window.clearTimeout(copyFeedbackTimer.current);
+      }
+    },
+    [],
+  );
+
   async function run(
     label: string,
     action: () => Promise<OrbisStatus>,
@@ -162,9 +209,18 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
     const link = status?.pairing?.invitation;
     if (!link) return;
     try {
+      setError(undefined);
       await navigator.clipboard.writeText(link);
-      setNotice(t("copied"));
+      setCopiedPairingLink(link);
+      if (copyFeedbackTimer.current !== undefined) {
+        window.clearTimeout(copyFeedbackTimer.current);
+      }
+      copyFeedbackTimer.current = window.setTimeout(() => {
+        setCopiedPairingLink((current) => (current === link ? undefined : current));
+        copyFeedbackTimer.current = undefined;
+      }, 2_000);
     } catch {
+      setCopiedPairingLink(undefined);
       setError(t("copyFailed"));
     }
   }
@@ -210,6 +266,8 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
     (hostName !== (status.configuration.hostName ?? status.configuration.suggestedHostName) ||
       directPort !== String(status.configuration.directPort));
   const operationDisabled = disabled || configurationDirty;
+  const pairingLinkCopied =
+    status?.pairing?.invitation !== undefined && copiedPairingLink === status.pairing.invitation;
   const availableNetworks = useMemo(
     () => [
       ...new Set(
@@ -218,6 +276,18 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
     ],
     [status?.configuration.autoDirectEndpoints],
   );
+  const networkStatus = useMemo(() => {
+    if (status === undefined) return undefined;
+    const routes = availableNetworks.map((network) =>
+      t(network === "lan" ? "localNetwork" : "tailscale"),
+    );
+    return [
+      networkModeLabel(status, t),
+      routes.length > 0 ? routes.join(" + ") : t("noAvailableRoute"),
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join(" · ");
+  }, [availableNetworks, status, t]);
 
   return (
     <div style={sectionStyle}>
@@ -250,16 +320,47 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
           />
         </label>
 
-        <div>
-          <div style={{ marginBottom: 4 }}>{t("availableOn")}</div>
-          {availableNetworks.length > 0 ? (
-            <ul style={{ margin: 0, paddingInlineStart: 20 }}>
-              {availableNetworks.map((network) => (
-                <li key={network}>{t(network === "lan" ? "localNetwork" : "tailscale")}</li>
-              ))}
-            </ul>
+        <div style={{ display: "grid", gap: 8 }}>
+          {status === undefined ? (
+            <div style={{ fontSize: 13, opacity: 0.72 }}>{t("busy")}</div>
           ) : (
-            <div style={{ fontSize: 13, opacity: 0.72 }}>{t("noNetwork")}</div>
+            <dl style={{ display: "grid", gap: 8, margin: 0 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(112px, 0.4fr) minmax(0, 1fr)",
+                  gap: 12,
+                }}
+              >
+                <dt style={{ opacity: 0.72 }}>{t("hostMachine")}</dt>
+                <dd style={{ margin: 0 }}>{hostMachineLabel(status, t)}</dd>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(112px, 0.4fr) minmax(0, 1fr)",
+                  gap: 12,
+                }}
+              >
+                <dt style={{ opacity: 0.72 }}>{t("networkStatus")}</dt>
+                <dd style={{ margin: 0 }}>{networkStatus}</dd>
+              </div>
+            </dl>
+          )}
+          {status?.configuration.networkIssue === "wsl-lan-unreachable" && (
+            <div role="alert" style={{ fontSize: 13, color: "var(--dsh-danger, #dc2626)" }}>
+              {t("wslNetworkHint", { port: status.configuration.directPort })}
+            </div>
+          )}
+          {status?.hostEnvironment.isWsl && (
+            <a
+              href={t("wslSetupGuideUrl")}
+              target="_blank"
+              rel="noreferrer"
+              style={{ fontSize: 13 }}
+            >
+              {t("wslSetupGuide")}
+            </a>
           )}
           <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6 }}>{t("networkHint")}</div>
         </div>
@@ -396,9 +497,10 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
                 variant="outline"
                 size="sm"
                 disabled={operationDisabled}
+                icon={pairingLinkCopied ? <IconCheckOutline16 /> : undefined}
                 onClick={() => void copyPairingLink()}
               >
-                {t("copy")}
+                {t(pairingLinkCopied ? "copied" : "copy")}
               </Button>
               <Button
                 type="button"
@@ -476,6 +578,34 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
             </Button>
           </div>
         ))}
+      </section>
+
+      <section style={cardStyle}>
+        <div>
+          <h3 style={{ margin: "0 0 4px" }}>{t("diagnosticsTitle")}</h3>
+          <div style={{ fontSize: 13, opacity: 0.72 }}>{t("diagnosticsIntro")}</div>
+        </div>
+        <div
+          role="note"
+          style={{
+            border: "1px solid var(--dsh-border, rgba(127, 127, 127, .28))",
+            borderRadius: 8,
+            padding: 10,
+            fontSize: 13,
+          }}
+        >
+          {t("diagnosticsWarning")}
+        </div>
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.assign(ORBIS_DIAGNOSTICS_EXPORT_URL)}
+          >
+            {t("diagnosticsExport")}
+          </Button>
+        </div>
       </section>
 
       {recording !== undefined && (
@@ -640,34 +770,6 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
           )}
         </section>
       )}
-
-      <section style={cardStyle}>
-        <div>
-          <h3 style={{ margin: "0 0 4px" }}>{t("diagnosticsTitle")}</h3>
-          <div style={{ fontSize: 13, opacity: 0.72 }}>{t("diagnosticsIntro")}</div>
-        </div>
-        <div
-          role="note"
-          style={{
-            border: "1px solid var(--dsh-border, rgba(127, 127, 127, .28))",
-            borderRadius: 8,
-            padding: 10,
-            fontSize: 13,
-          }}
-        >
-          {t("diagnosticsWarning")}
-        </div>
-        <div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => window.location.assign(ORBIS_DIAGNOSTICS_EXPORT_URL)}
-          >
-            {t("diagnosticsExport")}
-          </Button>
-        </div>
-      </section>
 
       <section style={cardStyle}>
         <h3 style={{ margin: 0 }}>{t("about")}</h3>

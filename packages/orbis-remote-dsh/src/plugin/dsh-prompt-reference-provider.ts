@@ -111,6 +111,7 @@ async function draftSessionCandidates(input: {
       createdAt: record.header.createdAt,
       ...(record.header.cwd === undefined ? {} : { cwd: record.header.cwd }),
       label,
+      sameWorkspace: record.header.cwd === input.workspacePath,
       sessionId: record.header.id,
     }));
 }
