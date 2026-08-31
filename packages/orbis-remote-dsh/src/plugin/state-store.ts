@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs
 import { dirname } from "node:path";
 
 import { remoteScopeModeSchema, type RemoteScopeMode } from "@orbisapp/transport";
+import { hasSharedFileMode } from "@orbisapp/remote-agent-node-store";
 import { z } from "zod";
 
 export interface OrbisDshPeer {
@@ -120,7 +121,7 @@ export class OrbisDshStateStore {
     if (this.stateValue !== undefined) return clone(this.stateValue);
     try {
       const metadata = await stat(this.path);
-      if ((metadata.mode & 0o077) !== 0) {
+      if (hasSharedFileMode(metadata.mode)) {
         throw new Error("Orbis host state " + this.path + " must not be readable by other users");
       }
       this.stateValue = parseState(JSON.parse(await readFile(this.path, "utf8")));
