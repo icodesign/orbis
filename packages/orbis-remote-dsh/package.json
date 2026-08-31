@@ -45,7 +45,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "typecheck:core": "tsc -p tsconfig.core.json --noEmit && tsc -p tsconfig.core.test.json --noEmit",
     "test": "vitest run src scripts/*.test.ts",
-    "test:core": "vitest run src/adapter src/host"
+    "test:core": "vitest run src/adapter src/host src/plugin/state-store.test.ts"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
