@@ -1,5 +1,30 @@
 # @orbisapp/remote-dsh
 
+## 0.2.7
+
+### Upgrade Notes
+
+The version only supports DeepSeek Harness 0.1.2-alpha.2+ and iOS app 0.1.0 (Build 25+).
+
+### New Features
+
+- Support DeepSeek Harness 0.1.2-alpha.2 and 0.1.2-alpha.3.
+- Add support-safe Remote Diagnostics export.
+
+### Patch Changes
+
+- 448e7ae: Start Orbis remote access on first install with the system host name and default port, without requiring an initial settings save.
+  
+  Show a temporary checkmark and copied label on the pairing-link button after copying succeeds.
+- 8c09dab: Add a one-click, support-safe diagnostics export to the DSH plugin settings page. Correlate recent
+  Remote requests and original DSH failures by request ID while omitting credentials, endpoints,
+  pairing material, prompts, transcripts, tool payloads, and raw event recordings.
+- 448e7ae: Avoid advertising unreachable WSL NAT addresses in pairing links. The plugin settings page now shows the host machine, WSL networking mode, reachable phone routes, and a localized link to the English or Simplified Chinese WSL connection guide.
+- 8c09dab: Fix Remote DSH startup on Windows by avoiding POSIX group and other permission checks against Node's synthesized Windows file mode.
+- 448e7ae: Support DeepSeek Harness 0.1.2-alpha.3 across the Host session, permission, error, client slot, and prompt-reference contracts.
+  
+  Run the complete real-profile prompt, durable-usage, reconnect, and restart acceptance without provider credentials through DSH's official deterministic LLM replay adapter, while preserving the credentialed live-provider canary.
+
 ## 0.2.6
 
 ### Patch Changes
