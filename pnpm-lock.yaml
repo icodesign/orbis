@@ -112,9 +112,15 @@ importers:
       '@changesets/cli':
         specifier: ^3.0.0
         version: 3.0.0
+      '@types/node':
+        specifier: 24.x
+        version: 24.13.3
       tsx:
         specifier: ^4.23.12
         version: 4.23.12
+      typescript:
+        specifier: rc
+        version: 7.0.1-rc
 
   packages/orbis-agent-backend:
     devDependencies:

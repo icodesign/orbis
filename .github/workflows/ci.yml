@@ -92,6 +92,8 @@ jobs:
 
       # Keep one draft release PR updated with every pending changeset. Merging
       # this PR is the explicit decision to publish the accumulated release.
+      # The version script prepends release-level notes to the generated
+      # changelog entry, which this action also uses for the PR description.
       - uses: changesets/action/version@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
