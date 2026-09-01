@@ -24,6 +24,12 @@ import {
 } from "@orbisapp/transport";
 
 import { createNodeWebSocketFactory } from "../src/plugin/node-websocket.ts";
+import { createDshPluginLinkSpec } from "./dsh-plugin-link.ts";
+import {
+  assertReviewedDshModelObservationContract,
+  readDshModelObservation,
+  REVIEWED_DSH_VERSION,
+} from "./real-profile-e2e-contract.ts";
 import {
   createRealProfileOverlay,
   KEYLESS_REPLAY_TEXT,
@@ -219,15 +225,11 @@ async function dshRpc(webSession, method, payload) {
 }
 
 async function readDshModelSelection(webSession, dshVersion, sessionId) {
-  if (dshVersion !== "0.1.2-alpha.2") {
-    throw new Error(`DSH ${dshVersion} has no reviewed model-observation contract`);
-  }
+  assertReviewedDshModelObservationContract(dshVersion);
   const sessions = await dshRpc(webSession, "session/list", {
     args: { _request: {} },
   });
-  const summary = sessions.items?.find((item) => item.sessionId === sessionId);
-  if (summary === undefined) throw new Error("session/list did not include the selected Session");
-  return summary.projections?.values?.modelSelection?.next ?? null;
+  return readDshModelObservation(sessions, sessionId);
 }
 
 /** Preserve the test phase when an encrypted remote request fails. */
@@ -367,7 +369,7 @@ async function persistedIndexEntryCount(path) {
 }
 
 async function assertDshCompatibility() {
-  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? "0.1.2-alpha.2";
+  const expected = process.env.ORBIS_DSH_EXPECTED_VERSION ?? REVIEWED_DSH_VERSION;
   const probeRoot = await mkdtemp(join(tmpdir(), "orbis-dsh-compat-"));
   const probeEnv = {
     ...process.env,
@@ -566,7 +568,7 @@ async function main() {
     await mkdir(workspace, { recursive: true, mode: 0o700 });
     await runCommand(
       DSH_COMMAND,
-      ["plugin", "--profile", "web", "add", `link:${PACKAGE_DIRECTORY}`],
+      ["plugin", "--profile", "web", "add", createDshPluginLinkSpec(PACKAGE_DIRECTORY)],
       {
         cwd: fixture,
         env: {

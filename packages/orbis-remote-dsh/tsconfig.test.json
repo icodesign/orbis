@@ -7,6 +7,10 @@
     "src/**/*.ts",
     "scripts/real-profile-e2e-provider.test.ts",
     "scripts/real-profile-e2e-provider.ts",
+    "scripts/dsh-plugin-link.test.ts",
+    "scripts/dsh-plugin-link.ts",
+    "scripts/real-profile-e2e-contract.test.ts",
+    "scripts/real-profile-e2e-contract.ts",
     "scripts/serve-dsh-source.test.ts",
     "scripts/serve-dsh-source.ts",
     "scripts/serve-dsh-web.ts"

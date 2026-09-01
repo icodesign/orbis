@@ -26,7 +26,7 @@ describe("addReleaseNotesToChangelog", () => {
 `;
     const releaseNotes = `### Upgrade Notes
 
-Requires DeepSeek Harness 0.1.2-alpha.2+.
+Requires DeepSeek Harness 0.1.2-alpha.3+.
 
 ### New Features
 
@@ -41,7 +41,7 @@ Requires DeepSeek Harness 0.1.2-alpha.2+.
 
 ### Upgrade Notes
 
-Requires DeepSeek Harness 0.1.2-alpha.2+.
+Requires DeepSeek Harness 0.1.2-alpha.3+.
 
 ### New Features
 

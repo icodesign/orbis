@@ -550,7 +550,7 @@ describe("DSH local backend", () => {
     ["workspace/not-found", "not_found"],
     ["session/agent-busy", "conflict"],
     ["session/conflict", "conflict"],
-  ])("maps alpha.2 RemoteError %s to %s", async (remoteCode, backendCode) => {
+  ])("maps alpha.3 RemoteError %s to %s", async (remoteCode, backendCode) => {
     const dsh = new TestDsh();
     dsh.sessionCreateFailure = Object.assign(new Error("DSH request failed"), {
       code: remoteCode,
@@ -796,7 +796,7 @@ describe("DSH local backend", () => {
     await backend.close();
   });
 
-  test("maps alpha.2 gateway cancellation to a public unavailable error", async () => {
+  test("maps alpha.3 gateway cancellation to a public unavailable error", async () => {
     const backend = createBackend(
       new TestDsh(),
       undefined,
