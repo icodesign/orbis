@@ -60,6 +60,11 @@ Changesets 会维护一个包含全部待发布 changeset 的草稿发布 PR。�
 为打开状态；准备发布完整版本时，检查合并后的版本号和 changelog，将 PR 标记为可审核并合并，
 随后自动发布。不会影响已发布包的改动不需要 changeset。
 
+版本级亮点和升级说明写入 `.changeset/.release-notes/next.md`，标题使用三级（`###`）或更低
+级别。版本脚本会将这段 Markdown 插入生成的包 changelog，因此草稿发布 PR 和最终 GitHub
+Release 都会在 Changesets 列表之前显示同一份说明。发布 PR 会消费并清空该文件，供下一版本
+重新填写。
+
 ## 社群
 
 微信交流群

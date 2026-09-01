@@ -1,25 +1,30 @@
 {
   "name": "orbis",
   "version": "0.1.0",
-  "license": "Apache-2.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "check": "pnpm run check:core",
-    "check:core": "pnpm --filter @orbisapp/orbis-agent-backend --filter @orbisapp/transport --filter @orbisapp/remote-agent-protocol --filter @orbisapp/remote-agent-node-store run check && pnpm --filter @orbisapp/remote-dsh run check:core",
+    "check:core": "pnpm run check:release && pnpm --filter @orbisapp/orbis-agent-backend --filter @orbisapp/transport --filter @orbisapp/remote-agent-protocol --filter @orbisapp/remote-agent-node-store run check && pnpm --filter @orbisapp/remote-dsh run check:core",
+    "check:release": "pnpm run typecheck:release && pnpm run test:release",
     "build:core": "pnpm --filter @orbisapp/orbis-agent-backend --filter @orbisapp/transport --filter @orbisapp/remote-agent-protocol --filter @orbisapp/remote-agent-node-store run build && pnpm --filter @orbisapp/remote-dsh run build:core",
     "typecheck:core": "pnpm --filter @orbisapp/orbis-agent-backend --filter @orbisapp/transport --filter @orbisapp/remote-agent-protocol --filter @orbisapp/remote-agent-node-store run typecheck && pnpm --filter @orbisapp/remote-dsh run typecheck:core",
+    "typecheck:release": "tsc -p tsconfig.scripts.json --noEmit",
     "test:core": "pnpm --filter @orbisapp/orbis-agent-backend --filter @orbisapp/transport --filter @orbisapp/remote-agent-protocol --filter @orbisapp/remote-agent-node-store run test && pnpm --filter @orbisapp/remote-dsh run test:core",
+    "test:release": "node --import tsx --test scripts/*.test.ts",
     "check:dsh": "pnpm --filter @orbisapp/remote-dsh run check",
     "serve:dsh": "node --import tsx packages/orbis-remote-dsh/scripts/serve-dsh-web.ts",
     "bundle": "pnpm --filter @orbisapp/remote-dsh run bundle",
     "changeset": "changeset",
-    "version:packages": "changeset version",
+    "version:packages": "tsx scripts/version-packages.ts",
     "release": "changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.0",
-    "tsx": "^4.23.12"
+    "@types/node": "24.x",
+    "tsx": "^4.23.12",
+    "typescript": "rc"
   },
   "engines": {
     "node": ">=22"
