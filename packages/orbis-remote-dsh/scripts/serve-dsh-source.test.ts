@@ -12,15 +12,15 @@ describe("parseDshSelection", () => {
       kind: "local",
       directory: "/work/deepseek-harness",
     });
-    expect(parseDshSelection("github:tag:dsh-v0.1.2-alpha.2", undefined)).toEqual({
+    expect(parseDshSelection("github:tag:dsh-v0.1.2-alpha.3", undefined)).toEqual({
       kind: "github-tag",
-      tag: "dsh-v0.1.2-alpha.2",
+      tag: "dsh-v0.1.2-alpha.3",
     });
     expect(
-      parseDshSelection("github:commit:0a53fb55bea101816fa226bb964ae2bed71c343b", undefined),
+      parseDshSelection("github:commit:dd6322d604e00eec1ba5e0c8541159906a21094a", undefined),
     ).toEqual({
       kind: "github-commit",
-      commit: "0a53fb55bea101816fa226bb964ae2bed71c343b",
+      commit: "dd6322d604e00eec1ba5e0c8541159906a21094a",
     });
     expect(parseDshSelection("npm:next", undefined)).toEqual({
       kind: "npm",

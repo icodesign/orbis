@@ -103,7 +103,7 @@ test("uses the optional plan mode service when it is present", () => {
   expect(planMode.set).toHaveBeenCalledWith(agent, false);
 });
 
-test("reads and writes alpha.2 permission presets through the live Session", async () => {
+test("reads and writes alpha.3 permission presets through the live Session", async () => {
   const session = { events: [] };
   const current = vi.fn(() => "workspace-write");
   const set = vi.fn();

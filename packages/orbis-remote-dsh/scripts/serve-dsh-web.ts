@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
+import { createDshPluginLinkSpec, ORBIS_DSH_PACKAGE_NAME } from "./dsh-plugin-link";
 import {
   type CommandSpec,
   type DshSelection,
@@ -22,7 +23,6 @@ const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const DEFAULT_DSH_HOME = join(homedir(), ".dsh");
 const DSH_PROFILE = "web";
 const OBSOLETE_PACKAGE_NAMES = ["@orbis/dsh-orbis-remote", "@orbis/remote-dsh"] as const;
-const PACKAGE_NAME = "@orbisapp/remote-dsh";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3080;
 
@@ -43,7 +43,7 @@ interface Fixture {
 function usage(): void {
   console.log(`Usage: pnpm run serve:dsh [options]
 
-Build and install ${PACKAGE_NAME} into the persistent DSH web profile,
+Build and install ${ORBIS_DSH_PACKAGE_NAME} into the persistent DSH web profile,
 then start dsh web on the loopback interface.
 
 Options:
@@ -272,7 +272,7 @@ async function main(): Promise<void> {
         environment,
       );
     }
-    for (const packageName of [...OBSOLETE_PACKAGE_NAMES, PACKAGE_NAME]) {
+    for (const packageName of [...OBSOLETE_PACKAGE_NAMES, ORBIS_DSH_PACKAGE_NAME]) {
       if (!existingDependencies?.has(packageName)) continue;
       await runCommand(
         dsh.command,
@@ -282,12 +282,12 @@ async function main(): Promise<void> {
     }
     await runCommand(
       dsh.command,
-      ["plugin", "--profile", DSH_PROFILE, "add", `link:${PACKAGE_DIRECTORY}`],
+      ["plugin", "--profile", DSH_PROFILE, "add", createDshPluginLinkSpec(PACKAGE_DIRECTORY)],
       environment,
     );
     await runCommand(
       dsh.command,
-      ["plugin", "--profile", DSH_PROFILE, "why", PACKAGE_NAME],
+      ["plugin", "--profile", DSH_PROFILE, "why", ORBIS_DSH_PACKAGE_NAME],
       environment,
     );
 
