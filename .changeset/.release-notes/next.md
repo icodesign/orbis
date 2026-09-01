@@ -4,5 +4,5 @@ The version only supports DeepSeek Harness 0.1.2-alpha.2+ and iOS app 0.1.0 (Bui
 
 ### New Features
 
-- Support DeepSeek Harness 0.1.2-alpha.2.
+- Support DeepSeek Harness 0.1.2-alpha.2 and 0.1.2-alpha.3.
 - Add support-safe Remote Diagnostics export.
