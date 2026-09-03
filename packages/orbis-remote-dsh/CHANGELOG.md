@@ -1,5 +1,16 @@
 # @orbisapp/remote-dsh
 
+## 0.2.9
+
+### Upgrade Notes
+
+The version only supports DeepSeek Harness 0.1.2-rc.1+ and iOS app 0.1.0 (Build 25+).
+
+### Patch Changes
+
+- c0a5281: Show why Orbis could not start instead of blaming the network. The settings page rendered a fixed "check the network connection" message for every access failure, so an incompatible DSH build reported itself as a network problem and retrying could never help. The status banner and the turn on/off actions now surface the real reason, keeping the generic wording only for a failure that carries no message.
+- 78cff32: Support DeepSeek Harness 0.1.2-rc.1. Upstream published rc.1 as a version bump of 0.1.2-alpha.5 with no functional change, so this moves the dependency graph, the reviewed acceptance pin, and the documented compatibility gate onto rc.1.
+
 ## 0.2.8
 
 ### Upgrade Notes
