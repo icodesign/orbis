@@ -43,9 +43,29 @@ export interface DshSessionEvent {
 }
 
 export interface DshSession {
-  readonly events: readonly DshSessionEvent[];
+  /**
+   * The event stored at one exact sequence number. Tail reads use this with
+   * {@link DshSession.seq} instead of materializing the whole log.
+   */
+  eventAt(seq: number): DshSessionEvent | undefined;
   readonly header: DshSessionHeader;
   readonly id: unknown;
+  /** The next event's sequence number, which is also the current log length. */
+  readonly seq: number;
+  /**
+   * An immutable snapshot of a half-open sequence range, defaulting to the
+   * whole log. Materializing is not free, so a caller that needs one event
+   * reads {@link DshSession.eventAt} instead.
+   */
+  snapshotEvents(fromSeq?: number, toSeqExclusive?: number): readonly DshSessionEvent[];
+}
+
+/**
+ * The last accepted event, or undefined for an empty log. Reading the tail
+ * through the exact seq keeps state publication off the full-log snapshot.
+ */
+export function lastDshSessionEvent(session: DshSession): DshSessionEvent | undefined {
+  return session.seq === 0 ? undefined : session.eventAt(session.seq - 1);
 }
 
 export interface DshSessionInspection {

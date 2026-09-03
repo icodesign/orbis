@@ -230,7 +230,7 @@ describe("raw DSH event replay", () => {
           title: "Replay validation",
         });
       },
-      prefixEvents: session.events.map((event) => {
+      prefixEvents: session.snapshotEvents().map((event) => {
         const metadata = event as typeof event & {
           readonly sourceEventSeqs?: readonly number[];
           readonly surfaceOp?: OrbisDshRawEventReplayEvent["surfaceOp"];

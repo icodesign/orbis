@@ -103,7 +103,7 @@ test("uses the optional plan mode service when it is present", () => {
   expect(planMode.set).toHaveBeenCalledWith(agent, false);
 });
 
-test("reads and writes alpha.3 permission presets through the live Session", async () => {
+test("reads and writes alpha.5 permission presets through the live Session", async () => {
   const session = { events: [] };
   const current = vi.fn(() => "workspace-write");
   const set = vi.fn();
@@ -166,13 +166,13 @@ test("creates replay sessions through the real DSH backend and appends on the li
   const append = vi.fn(() => ({ seq: 3 }));
   const session = {
     append,
-    events: [
+    id: SessionId("replay-session"),
+    seq: 3,
+    snapshotEvents: () => [
       { data: { prefix: 0 }, seq: 0, time: 1, type: "test/prefix" },
       { data: { prefix: 1 }, seq: 1, time: 2, type: "test/prefix" },
       { data: { prefix: 2 }, seq: 2, time: 3, type: "test/prefix" },
     ],
-    id: SessionId("replay-session"),
-    seq: 3,
   };
   const flush = vi.fn(async () => undefined);
   const announceCatalogChanged = vi.fn();

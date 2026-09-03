@@ -7,10 +7,10 @@ import {
 } from "./real-profile-e2e-contract";
 
 describe("DSH real-profile model observation contract", () => {
-  it("reviews alpha.3 as the current model projection contract", () => {
-    expect(REVIEWED_DSH_VERSION).toBe("0.1.2-alpha.3");
-    expect(() => assertReviewedDshModelObservationContract("0.1.2-alpha.3")).not.toThrow();
-    expect(() => assertReviewedDshModelObservationContract("0.1.2-alpha.2")).toThrow(
+  it("reviews alpha.5 as the current model projection contract", () => {
+    expect(REVIEWED_DSH_VERSION).toBe("0.1.2-alpha.5");
+    expect(() => assertReviewedDshModelObservationContract("0.1.2-alpha.5")).not.toThrow();
+    expect(() => assertReviewedDshModelObservationContract("0.1.2-alpha.4")).toThrow(
       "no reviewed model-observation contract",
     );
   });

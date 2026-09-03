@@ -4,6 +4,8 @@ import { stat } from "node:fs/promises";
 export interface DshCatalogHeader {
   readonly createdAt: number;
   readonly id: unknown;
+  /** Whether the session carries a fork-inherited event prefix. */
+  readonly isSeeded?: boolean;
   readonly origin?: "subagent";
   readonly parentSession?: unknown;
 }
@@ -30,6 +32,7 @@ export interface DshSessionCatalogEntry {
 export interface DshSessionProjectionCache {
   cachedSnapshot(
     header: DshCatalogHeader,
+    inheritedEventCount: number,
   ): { readonly values: Readonly<Record<string, unknown>> } | undefined;
 }
 
@@ -73,8 +76,13 @@ function titleFromProjectionCache(
   projectionCache: DshSessionProjectionCache,
   header: DshCatalogHeader,
 ): string | undefined {
+  // A cached record is bound to the session's exact inherited prefix length,
+  // which a header-only listing does not carry. DSH Web skips the cache for a
+  // seeded header rather than guessing a cut; Orbis makes the same call, so an
+  // unseeded row stays a hit and a forked row degrades to no title.
+  if (header.isSeeded === true) return undefined;
   try {
-    const value = projectionCache.cachedSnapshot(header)?.values.title;
+    const value = projectionCache.cachedSnapshot(header, 0)?.values.title;
     return typeof value === "string" && value.trim() ? value.trim() : undefined;
   } catch {
     // The cache is an acceleration layer. A corrupted or unavailable cache

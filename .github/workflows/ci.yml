@@ -33,13 +33,17 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # The full `check` also typechecks the DSH plugin and client entry points,
-      # which needs a DeepSeek Harness checkout that is not available on CI.
-      # `check:core` covers everything that builds from this repository alone.
+      # `check:core` covers the DSH-independent subset: the adapter and host
+      # depend on structural ports only, so they typecheck without the Harness.
       - run: pnpm run check:core
 
-      - name: Build publishable bundle
-        run: pnpm run bundle
+      # The plugin is where DSH services are cast into those ports, so it is the
+      # one place an upstream removal can pass every other gate. `check:dsh`
+      # builds the publishable bundle, then typechecks that composition and runs
+      # the full suite. The DSH wave is published to npm and installed by the
+      # frozen lockfile above, so this needs no Harness source checkout.
+      - name: Build publishable bundle and check the DSH composition
+        run: pnpm run check:dsh
 
   release_mode:
     name: Select release mode

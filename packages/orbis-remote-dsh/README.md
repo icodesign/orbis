@@ -95,8 +95,8 @@ npm dist-tag/exact version:
 
 ```sh
 pnpm run serve:dsh --dsh local:/path/to/deepseek-harness
-pnpm run serve:dsh --dsh github:tag:dsh-v0.1.2-alpha.3
-pnpm run serve:dsh --dsh github:commit:dd6322d604e00eec1ba5e0c8541159906a21094a
+pnpm run serve:dsh --dsh github:tag:dsh-v0.1.2-alpha.5
+pnpm run serve:dsh --dsh github:commit:db6bdc3576c2d4e7c965e8e3ed0c2a731eed87f5
 pnpm run serve:dsh --dsh npm:latest
 pnpm run serve:dsh --dsh-bin /path/to/dsh
 pnpm run serve:dsh --port 3090 --keep
@@ -301,7 +301,7 @@ the ambient Orbis identity environment variable. The disposable runner
 discovers the local LAN endpoint. The runner never touches
 the mobile app or its integration tests.
 
-The compatibility gate checks `dsh --version` (expected `0.1.2-alpha.3`), the
+The compatibility gate checks `dsh --version` (expected `0.1.2-alpha.5`), the
 launcher `--patch` flag, and Web's `--host`/`--port` flags before creating a fixture. Set
 `ORBIS_DSH_EXPECTED_VERSION` only for another explicitly reviewed DSH
 profile; an unreviewed or missing CLI is a clear skip by default and a
