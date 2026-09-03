@@ -286,7 +286,7 @@ export const zh: Record<OrbisLocaleKey, string> = {
   accessReady: "可以连接",
   accessStarting: "正在启动…",
   accessOff: "已关闭",
-  accessProblem: "Orbis 暂时无法启动。",
+  accessProblem: "Orbis 无法启动。",
   accessProblemDetail: "Orbis 无法启动：{reason}",
   accessFailed: "无法更改 Orbis 连接状态。",
   accessFailedDetail: "无法更改 Orbis 连接状态：{reason}",
