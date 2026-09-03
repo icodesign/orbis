@@ -1,5 +1,21 @@
 # @orbisapp/remote-dsh
 
+## 0.2.8
+
+### Upgrade Notes
+
+The version only supports DeepSeek Harness 0.1.2-alpha.5+ and iOS app 0.1.0 (Build 25+).
+
+### New Features
+
+- Support DeepSeek Harness 0.1.2-alpha.5.
+
+### Patch Changes
+
+- 2ed4730: Support DeepSeek Harness 0.1.2-alpha.5. The Session log is now read through `snapshotEvents()` and `eventAt()` after alpha.4 removed the `events` getter, and the durable projection cache is consulted with the lineage cut its identity is bound to.
+  
+  Run the complete real-profile prompt, durable-usage, reconnect, and restart acceptance without provider credentials through DSH's official deterministic LLM replay adapter, while preserving the credentialed live-provider canary.
+
 ## 0.2.7
 
 ### Upgrade Notes
