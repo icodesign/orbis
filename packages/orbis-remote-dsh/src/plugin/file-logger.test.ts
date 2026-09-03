@@ -54,8 +54,12 @@ describe("OrbisDshFileLogger", () => {
       expect(contents).not.toContain("provider-token");
       expect(contents).not.toContain("bearer-secret");
       expect(contents).not.toContain("private-secret");
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
-      expect((await stat(dirname(path))).mode & 0o777).toBe(0o700);
+      // Windows has no Unix mode bits — Node reports 0o666 for any regular
+      // file there — so the owner-only guarantee is asserted on POSIX only.
+      if (process.platform !== "win32") {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        expect((await stat(dirname(path))).mode & 0o777).toBe(0o700);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
