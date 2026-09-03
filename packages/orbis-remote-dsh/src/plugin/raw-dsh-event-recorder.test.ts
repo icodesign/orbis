@@ -110,8 +110,12 @@ describe("OrbisDshRawEventRecorder", () => {
       });
       expect(contents).toContain("raw-secret-is-intentionally-not-redacted");
       expect(Buffer.byteLength(contents, "utf8")).toBe(stopped.bytes);
-      expect((await stat(exportMetadata!.path)).mode & 0o777).toBe(0o600);
-      expect((await stat(dirname(exportMetadata!.path))).mode & 0o777).toBe(0o700);
+      // Windows has no Unix mode bits — Node reports 0o666 for any regular
+      // file there — so the owner-only guarantee is asserted on POSIX only.
+      if (process.platform !== "win32") {
+        expect((await stat(exportMetadata!.path)).mode & 0o777).toBe(0o600);
+        expect((await stat(dirname(exportMetadata!.path))).mode & 0o777).toBe(0o700);
+      }
     } finally {
       await rm(root, { force: true, recursive: true });
     }

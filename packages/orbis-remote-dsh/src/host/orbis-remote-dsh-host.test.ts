@@ -25,6 +25,7 @@ import type {
   DshQuestionRequest,
   DshSession,
   DshSessionEvent,
+  DshSessionHeader,
   DshUserMessage,
 } from "../adapter";
 import { OrbisRemoteDshHost } from "./orbis-remote-dsh-host";
@@ -73,9 +74,42 @@ async function eventually(operation: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the v2 transport event");
 }
 
+/**
+ * Builds a fake native DSH session behind the port `DshLocalBackend` reads:
+ * an `eventAt`/`seq`/`snapshotEvents` view over a mutable backing array. The
+ * array is also returned so a test can push new native events directly, the
+ * way DSH itself appends to a live session's log.
+ */
+function createTestDshSession(
+  id: string,
+  header: Omit<DshSessionHeader, "id">,
+  initialEvents: readonly DshSessionEvent[] = [],
+): { readonly events: DshSessionEvent[]; readonly session: DshSession } {
+  const events: DshSessionEvent[] = [...initialEvents];
+  const session: DshSession = {
+    eventAt: (seq) => events.find((candidate) => candidate.seq === seq),
+    header: { ...header, id },
+    id,
+    get seq() {
+      const last = events.at(-1);
+      return last === undefined ? 0 : last.seq + 1;
+    },
+    snapshotEvents: (fromSeq, toSeqExclusive) => {
+      if (fromSeq === undefined && toSeqExclusive === undefined) return events;
+      return events.filter(
+        (candidate) =>
+          (fromSeq === undefined || candidate.seq >= fromSeq) &&
+          (toSeqExclusive === undefined || candidate.seq < toSeqExclusive),
+      );
+    },
+  };
+  return { events, session };
+}
+
 test("composes a remote DSH catalog behind the v2 request handler", async () => {
   const directory = await mkdtemp(join(tmpdir(), "orbis-remote-dsh-host-"));
   const sessions = new Map<string, DshSession>();
+  const sessionEvents = new Map<string, DshSessionEvent[]>();
   const agents = new Map<string, DshAgent>();
   const selectedModels = new Map<string, { readonly model: string; readonly provider: string }>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
@@ -87,17 +121,13 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
         sessionController: {
           create: async (payload) => {
             const id = String(payload.sessionId);
-            const session: DshSession = {
-              events: [] as DshSessionEvent[],
-              header: {
-                agentPreset: payload.agentPreset ?? "standard",
-                createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
-                cwd: "/workspace",
-                id,
-              },
-              id,
-            };
+            const { events, session } = createTestDshSession(id, {
+              agentPreset: payload.agentPreset ?? "standard",
+              createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+              cwd: "/workspace",
+            });
             sessions.set(id, session);
+            sessionEvents.set(id, events);
             const inbox = { nextStep: [] as DshUserMessage[], nextTurn: [] as DshUserMessage[] };
             inboxes.set(id, inbox);
             const agent: DshAgent = {
@@ -140,12 +170,12 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
         agents: {
           create: async ({ agentOptions, sessionId }) => {
             const id = String(sessionId);
-            const session: DshSession = {
-              events: [] as DshSessionEvent[],
-              header: { createdAt: Date.parse("2026-08-10T00:00:00.000Z"), cwd: "/workspace", id },
-              id,
-            };
+            const { events, session } = createTestDshSession(id, {
+              createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+              cwd: "/workspace",
+            });
             sessions.set(id, session);
+            sessionEvents.set(id, events);
             const inbox = { nextStep: [] as DshUserMessage[], nextTurn: [] as DshUserMessage[] };
             inboxes.set(id, inbox);
             const agent: DshAgent = {
@@ -201,7 +231,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
             }
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.events, meta: session.header };
+            return { events: session.snapshotEvents(), meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -250,19 +280,22 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
     message: DshUserMessage,
   ): void => {
     const agent = agents.get(id);
+    const events = sessionEvents.get(id);
     const inbox = inboxes.get(id);
-    if (agent === undefined || inbox === undefined) throw new Error("missing test agent inbox");
+    if (agent === undefined || inbox === undefined || events === undefined) {
+      throw new Error("missing test agent inbox");
+    }
     const native: DshSessionEvent = {
       data: {
         inserted: [message],
         start: inbox[target].length,
         target: target === "nextStep" ? "next-step" : "next-turn",
       },
-      seq: agent.session.events.length + 1,
+      seq: agent.session.seq,
       time: Date.parse("2026-08-10T00:00:00.000Z"),
       type: "agent/inbox/spliced",
     };
-    (agent.session.events as DshSessionEvent[]).push(native);
+    events.push(native);
     for (const listener of nativeListeners) listener(agent.session, native);
     inbox[target].push(message);
     for (const listener of nativeInboxListeners.get("agent/inbox/inserted") ?? [])
@@ -491,9 +524,12 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
     );
     expect(duplicatePrompt).toEqual(prompted);
     const nativeSession = sessions.get("native-a");
-    if (nativeSession === undefined) throw new Error("created DSH session is missing");
+    const nativeEvents = sessionEvents.get("native-a");
+    if (nativeSession === undefined || nativeEvents === undefined) {
+      throw new Error("created DSH session is missing");
+    }
     const emitNative = (event: DshSessionEvent): void => {
-      (nativeSession.events as DshSessionEvent[]).push(event);
+      nativeEvents.push(event);
       for (const listener of nativeListeners) listener(nativeSession, event);
     };
     emitNative({
@@ -609,6 +645,7 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
 test("delivers DSH v2 live entries through the attached host transport", async () => {
   const directory = await mkdtemp(join(tmpdir(), "orbis-remote-dsh-host-transport-"));
   const sessions = new Map<string, DshSession>();
+  const sessionEvents = new Map<string, DshSessionEvent[]>();
   const agents = new Map<string, DshAgent>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
   let questionListener:
@@ -623,17 +660,13 @@ test("delivers DSH v2 live entries through the attached host transport", async (
         sessionController: {
           create: async (payload) => {
             const id = String(payload.sessionId);
-            const session: DshSession = {
-              events: [] as DshSessionEvent[],
-              header: {
-                agentPreset: payload.agentPreset ?? "standard",
-                createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
-                cwd: "/workspace",
-                id,
-              },
-              id,
-            };
+            const { events, session } = createTestDshSession(id, {
+              agentPreset: payload.agentPreset ?? "standard",
+              createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+              cwd: "/workspace",
+            });
             sessions.set(id, session);
+            sessionEvents.set(id, events);
             const agent: DshAgent = {
               cancel: () => {},
               followup: () => {},
@@ -655,12 +688,12 @@ test("delivers DSH v2 live entries through the attached host transport", async (
         agents: {
           create: async ({ agentOptions, sessionId }) => {
             const id = String(sessionId);
-            const session: DshSession = {
-              events: [] as DshSessionEvent[],
-              header: { createdAt: Date.parse("2026-08-10T00:00:00.000Z"), cwd: "/workspace", id },
-              id,
-            };
+            const { events, session } = createTestDshSession(id, {
+              createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+              cwd: "/workspace",
+            });
             sessions.set(id, session);
+            sessionEvents.set(id, events);
             const agent: DshAgent = {
               cancel: () => {},
               followup: () => {},
@@ -711,7 +744,7 @@ test("delivers DSH v2 live entries through the attached host transport", async (
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.events, meta: session.header };
+            return { events: session.snapshotEvents(), meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -782,9 +815,12 @@ test("delivers DSH v2 live entries through the attached host transport", async (
     expect(live).toMatchObject({ baseline: true, entries: [] });
 
     const nativeSession = sessions.get("native-transport");
-    if (nativeSession === undefined) throw new Error("transport test session is missing");
+    const nativeEvents = sessionEvents.get("native-transport");
+    if (nativeSession === undefined || nativeEvents === undefined) {
+      throw new Error("transport test session is missing");
+    }
     const emitNative = (event: DshSessionEvent): void => {
-      (nativeSession.events as DshSessionEvent[]).push(event);
+      nativeEvents.push(event);
       for (const listener of nativeListeners) listener(nativeSession, event);
     };
     emitNative({
@@ -921,14 +957,15 @@ test("pushes a catalog row created outside the host to a listening client", asyn
   const directory = await mkdtemp(join(tmpdir(), "orbis-remote-dsh-host-catalog-"));
   const sessions = new Map<string, DshSession>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
-  const addNativeSession = (id: string): DshSession => {
-    const session: DshSession = {
-      events: [] as DshSessionEvent[],
-      header: { createdAt: Date.parse("2026-08-10T00:00:00.000Z"), cwd: "/workspace", id },
-      id,
-    };
-    sessions.set(id, session);
-    return session;
+  const addNativeSession = (
+    id: string,
+  ): { readonly events: DshSessionEvent[]; readonly session: DshSession } => {
+    const created = createTestDshSession(id, {
+      createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
+      cwd: "/workspace",
+    });
+    sessions.set(id, created.session);
+    return created;
   };
   addNativeSession("existing-session");
   const host = new OrbisRemoteDshHost({
@@ -965,7 +1002,7 @@ test("pushes a catalog row created outside the host to a listening client", asyn
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.events, meta: session.header };
+            return { events: session.snapshotEvents(), meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -977,7 +1014,7 @@ test("pushes a catalog row created outside the host to a listening client", asyn
         [...sessions.values()].map((session) => ({
           createdAt: session.header.createdAt,
           id: session.header.id,
-          updatedAt: session.header.createdAt + session.events.length,
+          updatedAt: session.header.createdAt + session.seq,
         })),
       toSessionId: (id) => id,
     },
@@ -1027,8 +1064,8 @@ test("pushes a catalog row created outside the host to a listening client", asyn
       time: Date.parse("2026-08-10T00:00:01.000Z"),
       type: "assistant/message",
     };
-    (webSession.events as DshSessionEvent[]).push(native);
-    for (const listener of nativeListeners) listener(webSession, native);
+    webSession.events.push(native);
+    for (const listener of nativeListeners) listener(webSession.session, native);
 
     await eventually(() =>
       deliveries.some(
@@ -1054,41 +1091,40 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
   const sessions = new Map<string, DshSession>();
   const agents = new Map<string, DshAgent>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
-  const webSession: DshSession = {
-    events: [] as DshSessionEvent[],
-    header: {
-      createdAt: Date.parse("2026-08-10T00:00:00.000Z"),
-      cwd: "/workspace",
-      id: "web-only",
-    },
-    id: "web-only",
-  };
-  sessions.set("web-only", webSession);
   // DSH web already ran a full turn before any client ever connected.
-  const nativeEvents: DshSessionEvent[] = [
-    { data: { turn: 1 }, seq: 1, time: Date.parse("2026-08-10T00:00:01.000Z"), type: "turn/start" },
-    {
-      data: {
-        content: [{ text: "hello from web", type: "text" }],
-        role: "user",
-        source: { kind: "user" },
+  const { session: webSession } = createTestDshSession(
+    "web-only",
+    { createdAt: Date.parse("2026-08-10T00:00:00.000Z"), cwd: "/workspace" },
+    [
+      {
+        data: { turn: 1 },
+        seq: 1,
+        time: Date.parse("2026-08-10T00:00:01.000Z"),
+        type: "turn/start",
       },
-      seq: 2,
-      time: Date.parse("2026-08-10T00:00:02.000Z"),
-      type: "user/message",
-    },
-    {
-      data: {
-        message: { content: [{ text: "hi from dsh", type: "text" }], role: "assistant" },
-        step: 1,
-        turn: 1,
+      {
+        data: {
+          content: [{ text: "hello from web", type: "text" }],
+          role: "user",
+          source: { kind: "user" },
+        },
+        seq: 2,
+        time: Date.parse("2026-08-10T00:00:02.000Z"),
+        type: "user/message",
       },
-      seq: 3,
-      time: Date.parse("2026-08-10T00:00:03.000Z"),
-      type: "assistant/message",
-    },
-  ];
-  (webSession.events as DshSessionEvent[]).push(...nativeEvents);
+      {
+        data: {
+          message: { content: [{ text: "hi from dsh", type: "text" }], role: "assistant" },
+          step: 1,
+          turn: 1,
+        },
+        seq: 3,
+        time: Date.parse("2026-08-10T00:00:03.000Z"),
+        type: "assistant/message",
+      },
+    ],
+  );
+  sessions.set("web-only", webSession);
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
@@ -1150,7 +1186,7 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.events, meta: session.header };
+            return { events: session.snapshotEvents(), meta: session.header };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -1171,7 +1207,7 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
         [...sessions.values()].map((session) => ({
           createdAt: session.header.createdAt,
           id: session.header.id,
-          updatedAt: session.header.createdAt + session.events.length,
+          updatedAt: session.header.createdAt + session.seq,
         })),
       toSessionId: (id) => id,
     },

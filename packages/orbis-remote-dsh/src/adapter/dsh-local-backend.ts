@@ -88,6 +88,7 @@ import {
   runStartForDshEvent,
   titleForDshEvent,
 } from "./dsh-projection";
+import { lastDshSessionEvent } from "./dsh-types";
 import type {
   DshAgent,
   DshAgentInboxEvent,
@@ -659,7 +660,7 @@ function sameNativeSession(session: DshSession, nativeSessionId: string): boolea
 }
 
 function inspectionFromLiveSession(session: DshSession): DshSessionInspection {
-  return { events: session.events, meta: session.header };
+  return { events: session.snapshotEvents(), meta: session.header };
 }
 
 function summaryFromCatalogEntry(
@@ -1996,13 +1997,16 @@ class DshLocalSessionController {
     this.deltaCoalescer = new DshDeltaCoalescer({
       emit: (delta) => this.publishDelta(delta),
     });
-    const folded = dshProjectionState(agent.session.events);
+    // Snapshot once and reuse: snapshotEvents() materializes the whole log,
+    // so calling it per-field here would allocate it four times over.
+    const events = agent.session.snapshotEvents();
+    const folded = dshProjectionState(events);
     this.mode = folded.mode;
     this.workState = folded.workState;
-    this.activeRunId = activeRunId({ events: agent.session.events, meta: agent.session.header });
-    this.stateRevision = stateRevisionForEvents(agent.session.events);
+    this.activeRunId = activeRunId({ events, meta: agent.session.header });
+    this.stateRevision = stateRevisionForEvents(events);
     // Seed stateful tool-call correlation without replaying historical events.
-    for (const event of agent.session.events) {
+    for (const event of events) {
       this.recordInboxSplice(event);
       this.projector.project(event);
       this.title = titleForDshEvent(event) ?? this.title;
@@ -2253,7 +2257,7 @@ class DshLocalSessionController {
   publishPermissionState(pending: readonly AgentPermissionRequest[]): void {
     if (this.disposed || this.permissionBridge === undefined) return;
     const native =
-      this.agent.session.events.at(-1) ??
+      lastDshSessionEvent(this.agent.session) ??
       ({ data: {}, seq: 0, time: Date.now(), type: "permission/state" } satisfies DshSessionEvent);
     this.emitState(native, `permission-${this.stateRevision + 1}`, {
       pendingPermissions: pending,
@@ -2263,7 +2267,7 @@ class DshLocalSessionController {
   publishQuestionState(pending: readonly AgentQuestionRequest[]): void {
     if (this.disposed || this.questionBridge === undefined) return;
     const native =
-      this.agent.session.events.at(-1) ??
+      lastDshSessionEvent(this.agent.session) ??
       ({ data: {}, seq: 0, time: Date.now(), type: "question/state" } satisfies DshSessionEvent);
     this.emitState(native, `question-${this.stateRevision + 1}`, {
       pendingQuestions: pending,
@@ -2372,7 +2376,7 @@ class DshLocalSessionController {
   receiveInboxChanged(): void {
     if (this.disposed) return;
     const native =
-      this.agent.session.events.at(-1) ??
+      lastDshSessionEvent(this.agent.session) ??
       ({ data: {}, seq: 0, time: Date.now(), type: "agent/inbox" } satisfies DshSessionEvent);
     try {
       this.emitState(native, `inbox-${this.stateRevision + 1}`, {
@@ -2398,7 +2402,7 @@ class DshLocalSessionController {
       this.agent.session.header.createdAt,
       "session creation timestamp",
     );
-    const lastEventTime = this.agent.session.events.at(-1)?.time;
+    const lastEventTime = lastDshSessionEvent(this.agent.session)?.time;
     const title = this.title?.trim();
     return {
       createdAt,

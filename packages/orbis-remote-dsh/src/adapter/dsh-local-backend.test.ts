@@ -9,27 +9,28 @@ import {
 import { describe, expect, test } from "vitest";
 
 import { DshLocalBackend } from "./dsh-local-backend";
-import type {
-  DshAgent,
-  DshAgentHandle,
-  DshAgentInboxEvent,
-  DshAgentOptions,
-  DshApprovalOutcome,
-  DshApprovalRequest,
-  DshContext,
-  DshImageAttachmentReference,
-  DshSession,
-  DshSessionCatalogEntry,
-  DshSessionAttachmentPort,
-  DshSessionEvent,
-  DshSessionHeader,
-  DshSessionModeProvider,
-  DshQuestionAnswer,
-  DshQuestionItem,
-  DshQuestionRequest,
-  DshPromptReferenceProvider,
-  DshSessionSubagentProvider,
-  DshUserMessage,
+import {
+  lastDshSessionEvent,
+  type DshAgent,
+  type DshAgentHandle,
+  type DshAgentInboxEvent,
+  type DshAgentOptions,
+  type DshApprovalOutcome,
+  type DshApprovalRequest,
+  type DshContext,
+  type DshImageAttachmentReference,
+  type DshSession,
+  type DshSessionCatalogEntry,
+  type DshSessionAttachmentPort,
+  type DshSessionEvent,
+  type DshSessionHeader,
+  type DshSessionModeProvider,
+  type DshQuestionAnswer,
+  type DshQuestionItem,
+  type DshQuestionRequest,
+  type DshPromptReferenceProvider,
+  type DshSessionSubagentProvider,
+  type DshUserMessage,
 } from "./dsh-types";
 
 const FIXED_TIME = agentTimestamp("2026-08-10T00:00:00.000Z");
@@ -59,6 +60,24 @@ class TestSession implements DshSession {
       id,
       ...(metadata.agentPreset === undefined ? {} : { agentPreset: metadata.agentPreset }),
     };
+  }
+
+  eventAt(seq: number): DshSessionEvent | undefined {
+    return this.events.find((candidate) => candidate.seq === seq);
+  }
+
+  get seq(): number {
+    const last = this.events.at(-1);
+    return last === undefined ? 0 : last.seq + 1;
+  }
+
+  snapshotEvents(fromSeq?: number, toSeqExclusive?: number): readonly DshSessionEvent[] {
+    if (fromSeq === undefined && toSeqExclusive === undefined) return this.events;
+    return this.events.filter(
+      (candidate) =>
+        (fromSeq === undefined || candidate.seq >= fromSeq) &&
+        (toSeqExclusive === undefined || candidate.seq < toSeqExclusive),
+    );
   }
 }
 
@@ -550,7 +569,7 @@ describe("DSH local backend", () => {
     ["workspace/not-found", "not_found"],
     ["session/agent-busy", "conflict"],
     ["session/conflict", "conflict"],
-  ])("maps alpha.3 RemoteError %s to %s", async (remoteCode, backendCode) => {
+  ])("maps alpha.5 RemoteError %s to %s", async (remoteCode, backendCode) => {
     const dsh = new TestDsh();
     dsh.sessionCreateFailure = Object.assign(new Error("DSH request failed"), {
       code: remoteCode,
@@ -796,7 +815,7 @@ describe("DSH local backend", () => {
     await backend.close();
   });
 
-  test("maps alpha.3 gateway cancellation to a public unavailable error", async () => {
+  test("maps alpha.5 gateway cancellation to a public unavailable error", async () => {
     const backend = createBackend(
       new TestDsh(),
       undefined,
@@ -1943,7 +1962,7 @@ describe("DSH local backend", () => {
     const testDsh = new TestDsh();
     const planMode: DshSessionModeProvider = {
       get: (agent) => {
-        const latest = agent.session.events.at(-1);
+        const latest = lastDshSessionEvent(agent.session);
         return {
           active:
             latest?.type === "plan/mode" &&
@@ -1952,10 +1971,7 @@ describe("DSH local backend", () => {
       },
       set: (agent, active) => {
         if (agent.status === "running") return "queued";
-        testDsh.emit(
-          "created-session",
-          event("plan/mode", agent.session.events.length + 1, { active }),
-        );
+        testDsh.emit("created-session", event("plan/mode", agent.session.seq, { active }));
         return "committed";
       },
     };

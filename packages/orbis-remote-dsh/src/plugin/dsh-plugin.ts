@@ -19,6 +19,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm/types";
 import type {} from "@deepseek-ai/dsh-plan-mode";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import type { Session } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
 import type {} from "@deepseek-ai/dsh-session-projection";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
@@ -35,6 +36,7 @@ import { AgentBackendError } from "@orbisapp/orbis-agent-backend";
 import type {
   DshEncodedImageAttachment,
   DshImageAttachmentReference,
+  DshSession,
   DshSessionAttachmentPort,
   DshSessionModeProvider,
   DshSessionPermissionProvider,
@@ -118,9 +120,9 @@ export function subscribeRawDshEventRecorder(
 }
 
 interface ReplayDshSession {
-  readonly events: readonly (OrbisDshRawEventReplayEvent & { readonly time: number })[];
   readonly id: unknown;
   readonly seq: number;
+  snapshotEvents(): readonly (OrbisDshRawEventReplayEvent & { readonly time: number })[];
   append(
     type: string,
     data: unknown,
@@ -223,7 +225,7 @@ export function createRawDshEventReplayPort(
           const title = replayTitle(events);
           if (title !== undefined) sessionTitle.rename(session, title);
         },
-        prefixEvents: session.events.map((event) => ({
+        prefixEvents: session.snapshotEvents().map((event) => ({
           data: event.data,
           seq: event.seq,
           ...(event.sourceEventSeqs === undefined
@@ -311,6 +313,16 @@ function dshPlanMode(context: Context): Context["planMode"] | undefined {
   return context.get("planMode");
 }
 
+/**
+ * `createOrbisDshContext` casts DSH's Cordis services into the Orbis ports, so
+ * nothing there stops compiling when DSH drops a member the adapter reads.
+ * DSH 0.1.2-alpha.4 removed `Session.events` and only a runtime failure
+ * reported it. This declaration re-arms the compiler on the one port whose
+ * shape tracks a live DSH class, so the next such removal breaks the build.
+ */
+type SatisfiesPort<Port, Actual extends Port> = Actual;
+export type DshSessionPortConformance = SatisfiesPort<DshSession, Session>;
+
 function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["context"] {
   const planMode = dshPlanMode(context);
   return {
@@ -328,19 +340,28 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
   } as unknown as OrbisRemoteDshHostDshOptions["context"];
 }
 
+/**
+ * The live Session the preset service reads and writes. Orbis resolves it at
+ * the Cordis boundary and forwards the same object, so the identity is the
+ * whole contract — nothing here reads its log.
+ */
+interface PermissionPresetSession {
+  readonly id: unknown;
+}
+
 interface PermissionPresetContext {
   readonly permissionPresets?: {
     readonly names: readonly string[];
-    current(session: { readonly events: readonly unknown[] }): string;
+    current(session: PermissionPresetSession): string;
     optionOf(name: string): {
       readonly description?: string;
       readonly name: string;
       readonly value: string;
     };
-    set(session: { readonly events: readonly unknown[] }, name: string): void;
+    set(session: PermissionPresetSession, name: string): void;
   };
   readonly sessions?: {
-    get(id: unknown): { readonly events: readonly unknown[] } | undefined;
+    get(id: unknown): PermissionPresetSession | undefined;
   };
 }
 

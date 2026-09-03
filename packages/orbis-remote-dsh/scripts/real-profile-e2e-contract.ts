@@ -1,4 +1,4 @@
-export const REVIEWED_DSH_VERSION = "0.1.2-alpha.3" as const;
+export const REVIEWED_DSH_VERSION = "0.1.2-alpha.5" as const;
 
 interface DshSessionSummary {
   readonly sessionId?: unknown;

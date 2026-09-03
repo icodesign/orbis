@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 
 import { Session, SessionId } from "@deepseek-ai/dsh-session";
@@ -9,6 +9,26 @@ import {
   type OrbisDshRawEventReplayEvent,
   type OrbisDshRawEventReplayTarget,
 } from "./raw-dsh-event-replayer";
+
+const RAW_DEVELOPMENT_FIXTURE = new URL(
+  "../../../../fixtures/dsh-run-stream-events.jsonl",
+  import.meta.url,
+);
+
+/**
+ * The fixture is a 17 MB Git LFS object. A checkout without LFS — which is
+ * `actions/checkout`'s default — leaves a pointer file in its place, so the
+ * case below would read the pointer as JSONL and fail for a reason that has
+ * nothing to do with the replayer. Skip it there instead, and say why.
+ */
+function rawDevelopmentFixtureIsPointer(): boolean {
+  try {
+    const head = readFileSync(RAW_DEVELOPMENT_FIXTURE).subarray(0, 128).toString("utf8");
+    return head.startsWith("version https://git-lfs.github.com/spec/v1");
+  } catch {
+    return true;
+  }
+}
 
 function recordingLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
@@ -193,74 +213,76 @@ describe("raw DSH event replay", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  it("accepts the checked-in raw development fixture without bench-specific conversion", async () => {
-    const session = Session.create(SessionId("replay-validation"));
-    const append = session.append.bind(session) as (
-      type: string,
-      data: unknown,
-      options?: unknown,
-    ) => { readonly seq: number };
-    append("permission/preset", { preset: "workspace-write" });
-    append("sandbox/mode", { mode: "workspace-write" });
-    append("approval/policy", { policy: "ask" });
-    const destination: OrbisDshRawEventReplayTarget = {
-      announce: () => undefined,
-      append(event) {
-        const options =
-          event.surfaceOp === undefined && event.sourceEventSeqs === undefined
-            ? undefined
-            : {
-                ...(event.sourceEventSeqs === undefined
-                  ? {}
-                  : { sourceEventSeqs: event.sourceEventSeqs }),
-                ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
-              };
-        return options === undefined
-          ? append(event.type, event.data).seq
-          : append(event.type, event.data, options).seq;
-      },
-      flush: async () => undefined,
-      initialSeq: session.seq,
-      isSubscribed: () => true,
-      observeSubscription: () => () => undefined,
-      prepare() {
-        append("session/title", {
-          messageSeqs: [],
-          source: { kind: "user" },
-          title: "Replay validation",
-        });
-      },
-      prefixEvents: session.events.map((event) => {
-        const metadata = event as typeof event & {
-          readonly sourceEventSeqs?: readonly number[];
-          readonly surfaceOp?: OrbisDshRawEventReplayEvent["surfaceOp"];
-        };
-        return {
-          data: event.data,
-          seq: event.seq,
-          ...(metadata.sourceEventSeqs === undefined
-            ? {}
-            : { sourceEventSeqs: metadata.sourceEventSeqs }),
-          ...(metadata.surfaceOp === undefined ? {} : { surfaceOp: metadata.surfaceOp }),
-          type: event.type,
-        };
-      }),
-      sessionId: String(session.id),
-    };
-    const replayer = new OrbisDshRawEventReplayer(
-      { createSession: async () => destination },
-      { sleep: async () => undefined },
-    );
-    const fixture = createReadStream(
-      new URL("../../../../fixtures/dsh-run-stream-events.jsonl", import.meta.url),
-    );
+  it.skipIf(rawDevelopmentFixtureIsPointer())(
+    "accepts the checked-in raw development fixture without bench-specific conversion",
+    async () => {
+      const session = Session.create(SessionId("replay-validation"));
+      const append = session.append.bind(session) as (
+        type: string,
+        data: unknown,
+        options?: unknown,
+      ) => { readonly seq: number };
+      append("permission/preset", { preset: "workspace-write" });
+      append("sandbox/mode", { mode: "workspace-write" });
+      append("approval/policy", { policy: "ask" });
+      const destination: OrbisDshRawEventReplayTarget = {
+        announce: () => undefined,
+        append(event) {
+          const options =
+            event.surfaceOp === undefined && event.sourceEventSeqs === undefined
+              ? undefined
+              : {
+                  ...(event.sourceEventSeqs === undefined
+                    ? {}
+                    : { sourceEventSeqs: event.sourceEventSeqs }),
+                  ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
+                };
+          return options === undefined
+            ? append(event.type, event.data).seq
+            : append(event.type, event.data, options).seq;
+        },
+        flush: async () => undefined,
+        initialSeq: session.seq,
+        isSubscribed: () => true,
+        observeSubscription: () => () => undefined,
+        prepare() {
+          append("session/title", {
+            messageSeqs: [],
+            source: { kind: "user" },
+            title: "Replay validation",
+          });
+        },
+        prefixEvents: session.snapshotEvents().map((event) => {
+          const metadata = event as typeof event & {
+            readonly sourceEventSeqs?: readonly number[];
+            readonly surfaceOp?: OrbisDshRawEventReplayEvent["surfaceOp"];
+          };
+          return {
+            data: event.data,
+            seq: event.seq,
+            ...(metadata.sourceEventSeqs === undefined
+              ? {}
+              : { sourceEventSeqs: metadata.sourceEventSeqs }),
+            ...(metadata.surfaceOp === undefined ? {} : { surfaceOp: metadata.surfaceOp }),
+            type: event.type,
+          };
+        }),
+        sessionId: String(session.id),
+      };
+      const replayer = new OrbisDshRawEventReplayer(
+        { createSession: async () => destination },
+        { sleep: async () => undefined },
+      );
+      const fixture = createReadStream(RAW_DEVELOPMENT_FIXTURE);
 
-    await replayer.start({ data: fixture, filename: "dsh-run-stream-events.jsonl" });
-    await expect(replayer.settled()).resolves.toMatchObject({
-      eventCount: 45_948,
-      replayedEventCount: 45_948,
-      state: "completed",
-    });
-    expect(session.seq).toBe(45_952);
-  }, 15_000);
+      await replayer.start({ data: fixture, filename: "dsh-run-stream-events.jsonl" });
+      await expect(replayer.settled()).resolves.toMatchObject({
+        eventCount: 45_948,
+        replayedEventCount: 45_948,
+        state: "completed",
+      });
+      expect(session.seq).toBe(45_952);
+    },
+    15_000,
+  );
 });
