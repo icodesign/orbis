@@ -97,6 +97,19 @@ function stateLabel(status: OrbisStatus | undefined, t: Translate): string {
   return status.connection.state === "connected" ? t("accessReady") : t("accessStarting");
 }
 
+// Matches the cap host-service.ts's errorMessage() applies, so a pathological
+// error message can't blow up the settings layout.
+const MAX_REASON_LENGTH = 512;
+
+function truncateReason(reason: string): string {
+  return reason.trim().slice(0, MAX_REASON_LENGTH);
+}
+
+function accessErrorLabel(status: OrbisStatus, t: Translate): string {
+  const reason = truncateReason(status.connection.error ?? "");
+  return reason.length > 0 ? t("accessProblemDetail", { reason }) : t("accessProblem");
+}
+
 function pairingPhaseLabel(phase: string, t: Translate): string {
   if (phase === "awaiting-device") return t("pairingAwaitingDevice");
   if (phase === "connecting") return t("pairingConnecting");
@@ -191,18 +204,23 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
   async function run(
     label: string,
     action: () => Promise<OrbisStatus>,
-    failureMessage = t("operationFailed"),
+    failureMessage: string | ((reason: string) => string) = t("operationFailed"),
   ): Promise<void> {
     try {
       setBusy(label);
       setError(undefined);
       setNotice(undefined);
       adopt(await action());
-    } catch {
-      setError(failureMessage);
+    } catch (caught) {
+      const reason = caught instanceof Error ? truncateReason(caught.message) : "";
+      setError(typeof failureMessage === "function" ? failureMessage(reason) : failureMessage);
     } finally {
       setBusy(undefined);
     }
+  }
+
+  function accessFailureMessage(reason: string): string {
+    return reason.length > 0 ? t("accessFailedDetail", { reason }) : t("accessFailed");
   }
 
   async function copyPairingLink(): Promise<void> {
@@ -415,7 +433,7 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
         </div>
         {status?.connection.error && (
           <div style={{ fontSize: 13, color: "var(--dsh-danger, #dc2626)" }}>
-            {t("accessProblem")}
+            {accessErrorLabel(status, t)}
           </div>
         )}
         <div style={{ fontSize: 13, opacity: 0.72 }}>{t("remoteAccessHint")}</div>
@@ -429,7 +447,7 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
               !status?.configuration.ready ||
               status.connection.state === "connected"
             }
-            onClick={() => void run("connect", connect, t("accessFailed"))}
+            onClick={() => void run("connect", connect, accessFailureMessage)}
           >
             {busy === "connect" ? t("busy") : t("turnOn")}
           </Button>
@@ -438,7 +456,7 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
             variant="outline"
             size="sm"
             disabled={operationDisabled || status?.connection.state === "disconnected"}
-            onClick={() => void run("disconnect", disconnect, t("accessFailed"))}
+            onClick={() => void run("disconnect", disconnect, accessFailureMessage)}
           >
             {busy === "disconnect" ? t("busy") : t("turnOff")}
           </Button>
