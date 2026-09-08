@@ -10,7 +10,7 @@ Orbis 插件包含设备配对、端到端加密传输、多端实时更新等�
 
 ## 如何使用
 
-1. 下载 Orbis app. 目前在 beta 测试中。[iOS: 加入 TesFlight](https://testflight.apple.com/join/3Nqcbpns)。 Android: 正在进行中。
+1. 下载 Orbis app. 目前在 beta 测试中。[iOS: 加入 TesFlight](https://testflight.apple.com/join/3Nqcbpns)。 [Android APK](https://github.com/icodesign/orbis/releases/download/%40orbisapp%2Fremote-dsh%400.2.9/orbis-android-20260908T011113Z.apk)。
 2. 安装 Orbis 插件到 DSH。
 
 ```sh
