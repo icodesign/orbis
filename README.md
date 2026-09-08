@@ -11,7 +11,7 @@ updates across multiple devices.
 
 ## Getting Started
 
-1. Download the Orbis app. It is currently in beta. [iOS: Join TesFlight](https://testflight.apple.com/join/3Nqcbpns). Android: Working in progress.
+1. Download the Orbis app. It is currently in beta. [iOS: Join TesFlight](https://testflight.apple.com/join/3Nqcbpns). [Android APK](https://github.com/icodesign/orbis/releases/download/%40orbisapp%2Fremote-dsh%400.2.9/orbis-android-20260908T011113Z.apk).
 2. Install the Orbis plugin into DSH.
 
 ```sh
