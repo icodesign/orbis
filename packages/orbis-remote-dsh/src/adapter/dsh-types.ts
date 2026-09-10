@@ -141,7 +141,6 @@ export interface DshSessionSubagentProvider {
 export interface DshSessionPersistence {
   inspect(id: unknown, signal?: AbortSignal): Promise<DshSessionInspection>;
   list(signal?: AbortSignal): Promise<readonly DshSessionHeader[]>;
-  locate?(header: DshSessionHeader): { readonly path: string } | undefined;
 }
 
 export interface DshUserMessage {
@@ -356,6 +355,37 @@ export interface DshAgentInboxEvent {
   readonly turn?: number;
 }
 
+/** Transient attempt coordinates are independent of durable session sequence numbers. */
+export type DshAssistantStreamFrame =
+  | {
+      readonly type: "start";
+      readonly attemptId: string;
+      readonly revision: number;
+      readonly turn: number;
+      readonly step: number;
+    }
+  | {
+      readonly type: "chunk";
+      readonly attemptId: string;
+      readonly revision: number;
+      readonly index: number;
+      readonly time: number;
+      readonly chunk: unknown;
+    }
+  | {
+      readonly type: "end";
+      readonly attemptId: string;
+      readonly revision: number;
+      readonly index: number;
+      readonly outcome:
+        | {
+            readonly kind: "committed";
+            readonly eventType: "assistant/message" | "assistant/attempt";
+            readonly seq: number;
+          }
+        | { readonly kind: "abandoned" };
+    };
+
 export interface DshContext {
   readonly agents: DshAgentRegistry;
   readonly planMode?: DshSessionModeProvider;
@@ -363,6 +393,13 @@ export interface DshContext {
   readonly sessionPersistence: DshSessionPersistence;
   readonly sessionProjections: DshSessionProjectionRegistry;
   readonly workspace: DshWorkspaceRegistry;
+  on(
+    event: "agent/assistant-stream",
+    listener: (payload: {
+      readonly agent: DshAgent;
+      readonly frame: DshAssistantStreamFrame;
+    }) => void,
+  ): () => void;
   on(
     event: "session/event",
     listener: (session: DshSession, event: DshSessionEvent) => void,

@@ -26,8 +26,14 @@ describe("real-profile provider lane", () => {
     expect(overlay).toContain("- id: session-title-llm\n");
     expect(overlay).toContain("- id: orbis-e2e-llm-replay\n");
     expect(overlay).toContain("          - id: deepseek-official\n");
+    expect(overlay).toContain("              - id: deepseek-flash\n");
+    expect(overlay).toContain('                name: "DeepSeek-V41-Flash"\n');
+    expect(overlay).toContain("                contextWindow: 1000000\n");
+    expect(overlay).toContain("                inputModalities: [text, image]\n");
+    expect(overlay).toContain("                systemPromptUpdate: in-history\n");
     expect(overlay).toContain("              - id: deepseek-v4-flash\n");
     expect(overlay).toContain("              - id: deepseek-v4-pro\n");
+    expect(overlay).toContain("              - id: deepseek-v4-flash-vision-exp\n");
     expect(overlay).toContain("- id: orbis-remote\n");
     expect(overlay).toContain('    workspaceRoots:\n      - "/fixture/workspace"\n');
   });

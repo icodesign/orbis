@@ -1,18 +1,23 @@
-import { stat } from "node:fs/promises";
-
 /** The stable metadata surface exposed by DSH's durable session listing. */
 export interface DshCatalogHeader {
   readonly createdAt: number;
   readonly id: unknown;
-  /** Whether the session carries a fork-inherited event prefix. */
-  readonly isSeeded?: boolean;
+  /** Whether the session has a fork-inherited event prefix. */
+  readonly isSeeded: boolean;
   readonly origin?: "subagent";
   readonly parentSession?: unknown;
 }
 
+/** The V3 persistence observation returned by DSH's metadata-only list API. */
+export interface DshCatalogSnapshot {
+  readonly eventCount?: number;
+  readonly header: DshCatalogHeader;
+  readonly revision: unknown;
+  readonly sizeBytes?: number;
+}
+
 export interface DshCatalogPersistence {
-  list(): Promise<readonly DshCatalogHeader[]>;
-  locate?(header: DshCatalogHeader): { readonly path: string } | undefined;
+  list(): Promise<readonly DshCatalogSnapshot[]>;
 }
 
 /** Structural return shape consumed by the Orbis-local-DSH adapter. */
@@ -33,7 +38,17 @@ export interface DshSessionProjectionCache {
   cachedSnapshot(
     header: DshCatalogHeader,
     inheritedEventCount: number,
-  ): { readonly values: Readonly<Record<string, unknown>> } | undefined;
+    keys?: readonly string[],
+  ): DshProjectionSnapshot | undefined;
+  /** Read a predecessor title when the current checkpoint uses an older schema. */
+  cachedPredecessorTitle?(
+    header: DshCatalogHeader,
+    inheritedEventCount: number,
+  ): DshProjectionSnapshot | undefined;
+}
+
+interface DshProjectionSnapshot {
+  readonly values: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -46,47 +61,59 @@ export async function listDshSessionCatalog(
   persistence: DshCatalogPersistence,
   projectionCache: DshSessionProjectionCache,
 ): Promise<readonly DshSessionCatalogEntry[]> {
-  const headers = (await persistence.list()).filter((header) => header.origin !== "subagent");
+  const snapshots = (await persistence.list()).filter(({ header }) => header.origin !== "subagent");
   return await Promise.all(
-    headers.map(async (header) => {
-      let updatedAt = header.createdAt;
-      const path = persistence.locate?.(header)?.path;
-      if (path !== undefined) {
-        try {
-          updatedAt = (await stat(path)).mtimeMs;
-        } catch {
-          // A concurrent cleanup can remove a materialized log after list().
-          // The durable header remains a valid catalog row, ordered by creation.
-        }
-      }
-      const title = titleFromProjectionCache(projectionCache, header);
+    snapshots.map(async ({ header }) => {
+      const projection = projectionForListing(projectionCache, header);
+      const title = titleFromProjection(projection);
       return {
         createdAt: header.createdAt,
         id: header.id,
         ...(header.origin === undefined ? {} : { origin: header.origin }),
         ...(header.parentSession === undefined ? {} : { parentSession: header.parentSession }),
         ...(title === undefined ? {} : { title }),
-        updatedAt,
+        updatedAt: updatedAtFromProjection(header, projection),
       };
     }),
   );
 }
 
-function titleFromProjectionCache(
+function projectionForListing(
   projectionCache: DshSessionProjectionCache,
   header: DshCatalogHeader,
-): string | undefined {
+): DshProjectionSnapshot | undefined {
   // A cached record is bound to the session's exact inherited prefix length,
   // which a header-only listing does not carry. DSH Web skips the cache for a
   // seeded header rather than guessing a cut; Orbis makes the same call, so an
   // unseeded row stays a hit and a forked row degrades to no title.
-  if (header.isSeeded === true) return undefined;
+  if (header.isSeeded) return undefined;
   try {
-    const value = projectionCache.cachedSnapshot(header, 0)?.values.title;
-    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+    return (
+      projectionCache.cachedSnapshot(header, 0) ??
+      projectionCache.cachedPredecessorTitle?.(header, 0)
+    );
   } catch {
     // The cache is an acceleration layer. A corrupted or unavailable cache
     // row must not turn `sessions.list` into a transcript load or failure.
     return undefined;
   }
+}
+
+function titleFromProjection(projection: DshProjectionSnapshot | undefined): string | undefined {
+  const value = projection?.values.title;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function updatedAtFromProjection(
+  header: DshCatalogHeader,
+  projection: DshProjectionSnapshot | undefined,
+): number {
+  const metadata = projection?.values.sessionListMetadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    return header.createdAt;
+  }
+  const lastPromptAt = (metadata as { readonly lastPromptAt?: unknown }).lastPromptAt;
+  return Number.isSafeInteger(lastPromptAt) && (lastPromptAt as number) >= 0
+    ? Math.max(header.createdAt, lastPromptAt as number)
+    : header.createdAt;
 }

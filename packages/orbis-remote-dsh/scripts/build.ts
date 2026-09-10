@@ -21,6 +21,7 @@ const hostExternals = [
   "@deepseek-ai/dsh-permission-presets",
   "@deepseek-ai/dsh-home-paths",
   "@deepseek-ai/dsh-session",
+  "@deepseek-ai/dsh-scope",
   "@deepseek-ai/dsh-session-persistence",
   "@deepseek-ai/dsh-workspace",
 ];

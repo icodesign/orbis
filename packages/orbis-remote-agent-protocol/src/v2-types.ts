@@ -187,6 +187,7 @@ export interface RemoteAgentV2Overlay {
     /** Indexed blocks preserve thinking/text interleaving across snapshots. */
     readonly blocks: readonly {
       readonly blockIndex: number;
+      readonly blockComplete?: true;
       readonly content: RemoteAgentV2StreamingContentBlock;
     }[];
     readonly chunkSeq: number;
@@ -450,6 +451,8 @@ export type RemoteAgentV2SessionEvent =
       readonly part: "text" | "thinking" | "tool_input" | "tool_output";
       readonly blockIndex: number;
       readonly chunkSeq: number;
+      /** Explicitly closes this content block; delta may be empty. */
+      readonly blockComplete?: true;
       readonly delta: string;
     })
   | (RemoteAgentV2EventBase & {

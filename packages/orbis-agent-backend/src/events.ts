@@ -389,6 +389,8 @@ export interface AgentSessionStateChangedEvent extends AgentTransientEventBase {
 
 export interface AgentEntryDeltaEvent extends AgentTransientEventBase {
   readonly payload: {
+    /** This delta closes its content block; an empty delta can carry completion alone. */
+    readonly blockComplete?: true;
     readonly blockIndex: number;
     readonly chunkSeq: number;
     readonly delta: string;

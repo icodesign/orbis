@@ -15,6 +15,7 @@ import {
   type DshAgentHandle,
   type DshAgentInboxEvent,
   type DshAgentOptions,
+  type DshAssistantStreamFrame,
   type DshApprovalOutcome,
   type DshApprovalRequest,
   type DshContext,
@@ -38,6 +39,36 @@ const EPOCH = Date.parse(FIXED_TIME);
 
 function event(type: string, seq: number, data: unknown, offset = seq): DshSessionEvent {
   return { data, seq, time: EPOCH + offset, type };
+}
+
+function streamStart(
+  attemptId: string,
+  revision = 1,
+  turn = 1,
+  step = 1,
+): Extract<DshAssistantStreamFrame, { readonly type: "start" }> {
+  return { attemptId, revision, step, turn, type: "start" };
+}
+
+function streamChunk(
+  attemptId: string,
+  revision: number,
+  index: number,
+  chunk: unknown,
+  offset = revision,
+): Extract<DshAssistantStreamFrame, { readonly type: "chunk" }> {
+  return { attemptId, chunk, index, revision, time: EPOCH + offset, type: "chunk" };
+}
+
+function streamEnd(
+  attemptId: string,
+  revision: number,
+  index: number,
+  outcome: Extract<DshAssistantStreamFrame, { readonly type: "end" }>["outcome"] = {
+    kind: "abandoned",
+  },
+): Extract<DshAssistantStreamFrame, { readonly type: "end" }> {
+  return { attemptId, index, outcome, revision, type: "end" };
 }
 
 function asUserMessage(text: string): DshUserMessage {
@@ -141,6 +172,9 @@ class TestDsh {
   currentPreset = "standard";
 
   private readonly listeners = new Set<(session: DshSession, native: DshSessionEvent) => void>();
+  private readonly streamListeners = new Set<
+    (payload: { readonly agent: DshAgent; readonly frame: DshAssistantStreamFrame }) => void
+  >();
   private readonly inboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
   private approvalListener:
     | ((
@@ -263,6 +297,14 @@ class TestDsh {
         },
       },
       on: ((event: string, listener: unknown) => {
+        if (event === "agent/assistant-stream") {
+          const streamListener = listener as (payload: {
+            readonly agent: DshAgent;
+            readonly frame: DshAssistantStreamFrame;
+          }) => void;
+          this.streamListeners.add(streamListener);
+          return () => this.streamListeners.delete(streamListener);
+        }
         if (event === "session/event") {
           const sessionListener = listener as (
             session: DshSession,
@@ -363,6 +405,11 @@ class TestDsh {
     session.events.push(native);
     this.materialized.add(id);
     for (const listener of this.listeners) listener(session, native);
+  }
+
+  emitStream(id: string, frame: DshAssistantStreamFrame): void {
+    const agent = this.agent(id);
+    for (const listener of this.streamListeners) listener({ agent, frame });
   }
 
   emitInbox(id: string, target: "nextStep" | "nextTurn", message: DshUserMessage): void {
@@ -1304,7 +1351,7 @@ describe("DSH local backend", () => {
     });
   });
 
-  test("projects scoped system prompts only at visible request-series boundaries", async () => {
+  test("projects scoped system messages at visible request-series boundaries", async () => {
     const testDsh = new TestDsh();
     testDsh.addPersistedSession("system-prompts", [
       event("turn/start", 0, { turn: 1 }),
@@ -1315,12 +1362,13 @@ describe("DSH local backend", () => {
         source: { kind: "user" },
       }),
       event("step/start", 2, { step: 1, turn: 1 }),
-      event("request/header", 3, {
-        header: {
-          config: { model: "model-a", provider: "provider-a" },
-          system: "First line\nSecond line",
+      event("system/message", 3, {
+        message: {
+          content: [{ text: "First line\nSecond line", type: "text" }],
+          role: "system",
         },
-        reason: "initial",
+        step: 1,
+        turn: 1,
       }),
       event("assistant/message", 4, {
         message: { content: [{ text: "Working", type: "text" }], role: "assistant" },
@@ -1332,7 +1380,6 @@ describe("DSH local backend", () => {
       event("request/header", 7, {
         header: {
           config: { model: "model-b", provider: "provider-a" },
-          system: "First line\nSecond line",
         },
         reason: "change",
       }),
@@ -1351,12 +1398,13 @@ describe("DSH local backend", () => {
         source: { kind: "user" },
       }),
       event("step/start", 13, { step: 1, turn: 2 }),
-      event("request/header", 14, {
-        header: {
-          config: { model: "model-b", provider: "provider-a" },
-          system: "First line\nSecond line",
+      event("system/message", 14, {
+        message: {
+          content: [{ text: "First line\nSecond line", type: "text" }],
+          role: "system",
         },
-        reason: "series",
+        step: 1,
+        turn: 2,
       }),
       event("assistant/message", 15, {
         message: { content: [{ text: "Second answer", type: "text" }], role: "assistant" },
@@ -1465,18 +1513,15 @@ describe("DSH local backend", () => {
     runtime.subscribe((native) => events.push(native));
 
     testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
-    testDsh.emit(
+    testDsh.emitStream("created-session", streamStart("attempt-tool"));
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 1, {
-        chunk: {
-          argumentsDelta: '{"path":"/workspace/demo.ts"}',
-          id: "tool-1",
-          index: 2,
-          name: "read",
-          type: "tool-call-delta",
-        },
-        step: 1,
-        turn: 1,
+      streamChunk("attempt-tool", 2, 0, {
+        argumentsDelta: '{"path":"/workspace/demo.ts"}',
+        id: "tool-1",
+        index: 2,
+        name: "read",
+        type: "tool-call-delta",
       }),
     );
     testDsh.emit(
@@ -1561,42 +1606,39 @@ describe("DSH local backend", () => {
     runtime.subscribe((native) => events.push(native));
 
     testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
-    testDsh.emit(
+    testDsh.emitStream("created-session", streamStart("attempt-coalesced"));
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 1, {
-        chunk: { index: 0, text: "a", type: "text-delta" },
-        step: 1,
-        turn: 1,
-      }),
+      streamChunk("attempt-coalesced", 2, 0, { index: 0, text: "a", type: "text-delta" }),
     );
-    testDsh.emit(
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 2, {
-        chunk: { index: 0, text: "b", type: "text-delta" },
-        step: 1,
-        turn: 1,
-      }),
+      streamChunk("attempt-coalesced", 3, 1, { index: 0, text: "b", type: "text-delta" }),
     );
 
     expect(events.filter((native) => native.type === "entry.delta")).toEqual([]);
 
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-coalesced", 4, 2, { index: 1, text: "c", type: "text-delta" }),
+    );
     testDsh.emit(
       "created-session",
-      event("assistant/message", 3, {
+      event("assistant/message", 4, {
         message: {
-          content: [{ text: "ab", type: "text" }],
+          content: [{ text: "abc", type: "text" }],
           role: "assistant",
         },
         step: 1,
         turn: 1,
       }),
     );
-    testDsh.emit(
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 4, {
-        chunk: { index: 0, text: "c", type: "text-delta" },
-        step: 1,
-        turn: 1,
+      streamEnd("attempt-coalesced", 5, 3, {
+        kind: "committed",
+        eventType: "assistant/message",
+        seq: 4,
       }),
     );
     testDsh.emit(
@@ -1605,9 +1647,166 @@ describe("DSH local backend", () => {
     );
 
     expect(events.filter((native) => native.type === "entry.delta")).toMatchObject([
-      { payload: { chunkSeq: 1, delta: "ab", entryId: "message-1-1" } },
-      { payload: { chunkSeq: 2, delta: "c", entryId: "message-1-1" } },
+      { payload: { chunkSeq: 1, delta: "ab", entryId: "attempt-attempt-coalesced" } },
+      { payload: { chunkSeq: 2, delta: "c", entryId: "attempt-attempt-coalesced" } },
     ]);
+
+    await backend.close();
+  });
+
+  test("keeps retry attempts distinct from their durable settlements", async () => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
+    testDsh.emitStream("created-session", streamStart("attempt-retry-1"));
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-retry-1", 2, 0, {
+        index: 0,
+        text: "partial",
+        type: "text-delta",
+      }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("assistant/attempt", 2, {
+        step: 1,
+        stream: [
+          {
+            chunk: { blockType: "text", index: 0, type: "block-start" },
+            time: EPOCH + 2,
+            type: "chunk",
+          },
+          {
+            chunk: { index: 0, text: "partial", type: "text-delta" },
+            time: EPOCH + 3,
+            type: "chunk",
+          },
+          {
+            chunk: {
+              reason: { failure: { code: "SERVER", message: "failed" }, kind: "error" },
+              type: "finish",
+            },
+            time: EPOCH + 4,
+            type: "chunk",
+          },
+        ],
+        turn: 1,
+      }),
+    );
+    testDsh.emitStream(
+      "created-session",
+      streamEnd("attempt-retry-1", 3, 1, {
+        eventType: "assistant/attempt",
+        kind: "committed",
+        seq: 2,
+      }),
+    );
+
+    testDsh.emitStream("created-session", streamStart("attempt-retry-2", 4));
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-retry-2", 5, 0, {
+        index: 0,
+        text: "recovered",
+        type: "text-delta",
+      }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("assistant/message", 3, {
+        message: {
+          content: [{ text: "recovered", type: "text" }],
+          role: "assistant",
+        },
+        step: 1,
+        turn: 1,
+      }),
+    );
+    testDsh.emitStream(
+      "created-session",
+      streamEnd("attempt-retry-2", 6, 1, {
+        eventType: "assistant/message",
+        kind: "committed",
+        seq: 3,
+      }),
+    );
+    testDsh.emit(
+      "created-session",
+      event("turn/end", 4, { reason: { kind: "completed" }, turn: 1 }),
+    );
+
+    expect(events.filter((native) => native.type === "entry.delta")).toMatchObject([
+      { payload: { delta: "partial", entryId: "attempt-attempt-retry-1", chunkSeq: 1 } },
+      { payload: { delta: "recovered", entryId: "attempt-attempt-retry-2", chunkSeq: 1 } },
+    ]);
+    expect(events.filter((native) => native.type === "entry.appended")).toMatchObject([
+      {
+        payload: {
+          entry: {
+            content: [{ text: "partial", type: "text" }],
+            id: "event-2",
+            role: "assistant",
+            stopReason: "error",
+          },
+          settlesEntryId: "attempt-attempt-retry-1",
+        },
+      },
+      {
+        payload: {
+          entry: { content: [{ text: "recovered", type: "text" }], id: "message-1-1" },
+          settlesEntryId: "attempt-attempt-retry-2",
+        },
+      },
+    ]);
+
+    await backend.close();
+  });
+
+  test("ignores duplicate assistant stream frames", async () => {
+    const testDsh = new TestDsh();
+    const errors: { readonly code: string }[] = [];
+    const backend = createBackend(
+      testDsh,
+      undefined,
+      () => FIXED_TIME,
+      undefined,
+      (error) => errors.push(error),
+    );
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    testDsh.emitStream("created-session", streamStart("attempt-duplicate"));
+    const chunk = streamChunk("attempt-duplicate", 2, 0, {
+      index: 0,
+      text: "once",
+      type: "text-delta",
+    });
+    testDsh.emitStream("created-session", chunk);
+    testDsh.emitStream("created-session", chunk);
+    testDsh.emitStream("created-session", streamEnd("attempt-duplicate", 3, 1));
+
+    expect(events.filter((native) => native.type === "entry.delta")).toMatchObject([
+      { payload: { chunkSeq: 1, delta: "once", entryId: "attempt-attempt-duplicate" } },
+    ]);
+    expect(events.filter((native) => native.type === "entry.delta")).toHaveLength(1);
+    expect(errors).toEqual([]);
+    expect(testDsh.agent("created-session").session.events).not.toContainEqual(
+      expect.objectContaining({ type: "assistant/chunk" }),
+    );
 
     await backend.close();
   });
@@ -1624,13 +1823,10 @@ describe("DSH local backend", () => {
     runtime.subscribe((native) => events.push(native));
 
     testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
-    testDsh.emit(
+    testDsh.emitStream("created-session", streamStart("attempt-reconnect"));
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 1, {
-        chunk: { index: 0, text: "a", type: "text-delta" },
-        step: 1,
-        turn: 1,
-      }),
+      streamChunk("attempt-reconnect", 2, 0, { index: 0, text: "a", type: "text-delta" }),
     );
     expect(events.filter((native) => native.type === "entry.delta")).toEqual([]);
 
@@ -1642,22 +1838,171 @@ describe("DSH local backend", () => {
     const reconnected = await backend.connectRuntime(record.ref);
     const reconnectEvents: AgentSessionEvent[] = [];
     reconnected.subscribe((native) => reconnectEvents.push(native));
+    expect(reconnected.streamSnapshot()).toMatchObject([
+      {
+        payload: { chunkSeq: 1, delta: "a", entryId: "attempt-attempt-reconnect" },
+        type: "entry.delta",
+      },
+    ]);
+    reconnectEvents.length = 0;
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-reconnect", 3, 1, { index: 0, text: "b", type: "text-delta" }),
+    );
     testDsh.emit(
       "created-session",
-      event("assistant/chunk", 2, {
-        chunk: { index: 0, text: "b", type: "text-delta" },
+      event("assistant/message", 1, {
+        message: {
+          content: [{ text: "ab", type: "text" }],
+          role: "assistant",
+        },
         step: 1,
         turn: 1,
       }),
     );
+    testDsh.emitStream(
+      "created-session",
+      streamEnd("attempt-reconnect", 4, 2, {
+        kind: "committed",
+        eventType: "assistant/message",
+        seq: 1,
+      }),
+    );
     testDsh.emit(
       "created-session",
-      event("turn/end", 3, { reason: { kind: "completed" }, turn: 1 }),
+      event("turn/end", 2, { reason: { kind: "completed" }, turn: 1 }),
     );
 
     expect(reconnectEvents.filter((native) => native.type === "entry.delta")).toMatchObject([
-      { payload: { chunkSeq: 2, delta: "b" } },
+      { payload: { chunkSeq: 2, delta: "b", entryId: "attempt-attempt-reconnect" } },
     ]);
+
+    await backend.close();
+  });
+
+  test("replays an active assistant prefix when a runtime attaches late", async () => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+
+    testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
+    testDsh.emitStream("created-session", streamStart("attempt-late-attach"));
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-late-attach", 2, 0, {
+        index: 0,
+        text: "prefix",
+        type: "text-delta",
+      }),
+    );
+
+    const runtime = await backend.connectRuntime(record.ref);
+    const events: AgentSessionEvent[] = [];
+    runtime.subscribe((native) => events.push(native));
+
+    expect(runtime.streamSnapshot()).toMatchObject([
+      {
+        payload: { chunkSeq: 1, delta: "prefix", entryId: "attempt-attempt-late-attach" },
+        type: "entry.delta",
+      },
+    ]);
+    expect(events.filter((native) => native.type === "entry.delta")).toMatchObject([
+      { payload: { chunkSeq: 1, delta: "prefix", entryId: "attempt-attempt-late-attach" } },
+    ]);
+    expect(testDsh.agent("created-session").session.events).not.toContainEqual(
+      expect.objectContaining({ type: "assistant/chunk" }),
+    );
+
+    await backend.close();
+  });
+
+  test("replays pending streamed tool state and input across runtime reconnect", async () => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const record = await backend.createSession({
+      driverId: agentDriverId("dsh"),
+      workspaceRef: "workspace-1",
+    });
+
+    testDsh.emitStream("created-session", streamStart("attempt-tool-prefix"));
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-tool-prefix", 2, 0, {
+        argumentsDelta: '{"path":"/workspace',
+        id: "tool-prefix",
+        index: 2,
+        name: "read",
+        type: "tool-call-delta",
+      }),
+    );
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-tool-prefix", 3, 1, {
+        argumentsDelta: '/demo.ts"}',
+        id: "tool-prefix",
+        index: 2,
+        type: "tool-call-delta",
+      }),
+    );
+
+    const runtime = await backend.connectRuntime(record.ref);
+    const snapshot = runtime.streamSnapshot();
+    expect(snapshot.map((native) => native.type)).toEqual(["tool.state.changed", "entry.delta"]);
+    expect(snapshot).toMatchObject([
+      {
+        payload: {
+          tool: {
+            callId: "tool-prefix",
+            entryId: "tool-tool-prefix",
+            name: "read",
+            status: "pending",
+          },
+        },
+        type: "tool.state.changed",
+      },
+      {
+        payload: {
+          blockIndex: 2,
+          chunkSeq: 1,
+          delta: '{"path":"/workspace/demo.ts"}',
+          entryId: "tool-tool-prefix",
+          part: "tool_input",
+        },
+        type: "entry.delta",
+      },
+    ]);
+
+    await runtime.close();
+    const reconnected = await backend.connectRuntime(record.ref);
+    expect(reconnected.streamSnapshot()).toMatchObject([
+      {
+        payload: {
+          tool: {
+            callId: "tool-prefix",
+            entryId: "tool-tool-prefix",
+            name: "read",
+            status: "pending",
+          },
+        },
+        type: "tool.state.changed",
+      },
+      {
+        payload: {
+          blockIndex: 2,
+          chunkSeq: 1,
+          delta: '{"path":"/workspace/demo.ts"}',
+          entryId: "tool-tool-prefix",
+          part: "tool_input",
+        },
+        type: "entry.delta",
+      },
+    ]);
+
+    testDsh.emitStream("created-session", streamEnd("attempt-tool-prefix", 4, 2));
+    expect(reconnected.streamSnapshot()).toEqual([]);
 
     await backend.close();
   });
@@ -1675,7 +2020,16 @@ describe("DSH local backend", () => {
 
     testDsh.emit("created-session", event("turn/start", 0, { turn: 1 }));
     testDsh.emit("created-session", event("step/start", 1, { step: 1, turn: 1 }));
-    testDsh.emit("created-session", event("assistant/chunk", 2, { step: 1, turn: 1 }));
+    testDsh.emitStream("created-session", streamStart("attempt-activity"));
+    testDsh.emitStream(
+      "created-session",
+      streamChunk("attempt-activity", 2, 0, {
+        index: 0,
+        text: "activity",
+        type: "text-delta",
+      }),
+    );
+    testDsh.emitStream("created-session", streamEnd("attempt-activity", 3, 1));
     testDsh.emit("created-session", event("llm/retry-started", 3, { retry: 1, step: 1, turn: 1 }));
     testDsh.emit(
       "created-session",
@@ -1718,7 +2072,7 @@ describe("DSH local backend", () => {
     expect(
       events.some(
         (native) =>
-          native.type === "run.activity" && native.source.nativeType === "assistant/chunk",
+          native.type === "run.activity" && native.source.nativeType === "agent/assistant-stream",
       ),
     ).toBe(false);
 
@@ -2158,20 +2512,17 @@ describe("DSH local backend", () => {
     const reconnected = await backend.connectRuntime(record.ref);
     const reconnectedEvents: AgentSessionEvent[] = [];
     reconnected.subscribe((native) => reconnectedEvents.push(native));
-    testDsh.emit(
+    testDsh.emitStream("created-session", streamStart("attempt-running"));
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 1, {
-        chunk: { type: "block-start" },
-        step: 1,
-        turn: 1,
-      }),
+      streamChunk("attempt-running", 2, 0, { type: "block-start" }),
     );
-    testDsh.emit(
+    testDsh.emitStream(
       "created-session",
-      event("assistant/chunk", 2, {
-        chunk: { index: 2, text: "Still running after the page changed.", type: "text-delta" },
-        step: 1,
-        turn: 1,
+      streamChunk("attempt-running", 3, 1, {
+        index: 2,
+        text: "Still running after the page changed.",
+        type: "text-delta",
       }),
     );
     testDsh.emit(
@@ -2183,6 +2534,14 @@ describe("DSH local backend", () => {
         },
         step: 1,
         turn: 1,
+      }),
+    );
+    testDsh.emitStream(
+      "created-session",
+      streamEnd("attempt-running", 4, 2, {
+        eventType: "assistant/message",
+        kind: "committed",
+        seq: 3,
       }),
     );
     testDsh.agent("created-session").status = "idle";

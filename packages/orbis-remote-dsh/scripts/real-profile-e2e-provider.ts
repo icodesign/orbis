@@ -37,10 +37,21 @@ export function createRealProfileOverlay(options: RealProfileOverlayOptions): st
           "          - id: deepseek-official",
           '            name: "DeepSeek Replay"',
           "            models:",
+          "              - id: deepseek-flash",
+          '                name: "DeepSeek-V41-Flash"',
+          "                contextWindow: 1000000",
+          "                inputModalities: [text, image]",
+          "                systemPromptUpdate: in-history",
           "              - id: deepseek-v4-flash",
-          "                contextWindow: 128000",
+          '                name: "DeepSeek-V4-Flash"',
+          "                contextWindow: 1000000",
           "              - id: deepseek-v4-pro",
-          "                contextWindow: 128000",
+          '                name: "DeepSeek-V4-Pro"',
+          "                contextWindow: 1000000",
+          "              - id: deepseek-v4-flash-vision-exp",
+          '                name: "DeepSeek-V4-Flash-Vision-Exp"',
+          "                contextWindow: 1000000",
+          "                inputModalities: [text, image]",
         ]
       : [];
   lines.push(

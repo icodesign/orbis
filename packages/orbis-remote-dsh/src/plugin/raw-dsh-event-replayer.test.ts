@@ -1,7 +1,6 @@
 import { createReadStream, readFileSync } from "node:fs";
 import { Readable } from "node:stream";
 
-import { Session, SessionId } from "@deepseek-ai/dsh-session";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -86,8 +85,60 @@ function recording(
   throw new Error("test recording footer did not converge");
 }
 
+function recordingFromEvents(
+  events: readonly OrbisDshRawEventReplayEvent[],
+  input: {
+    readonly capturedAt?: readonly string[];
+    readonly nativeSessionIds?: readonly string[];
+  } = {},
+): Buffer {
+  const recordingId = "recording-1";
+  const capturedAt =
+    input.capturedAt ??
+    events.map((_, index) => `2026-08-30T01:00:00.${String(index).padStart(3, "0")}Z`);
+  const nativeSessionIds = input.nativeSessionIds ?? events.map(() => "source-session");
+  if (capturedAt.length !== events.length || nativeSessionIds.length !== events.length) {
+    throw new Error("test recording metadata does not match its event count");
+  }
+  const prefix = [
+    recordingLine({
+      format: "orbis-dsh-raw-events",
+      kind: "header",
+      recordingId,
+      startedAt: "2026-08-30T00:59:59.000Z",
+      version: 1,
+    }),
+    ...events.map((event, index) =>
+      recordingLine({
+        capturedAt: capturedAt[index],
+        event: { ...event, time: Date.parse(capturedAt[index]!) },
+        kind: "event",
+        nativeSessionId: nativeSessionIds[index],
+        recordingId,
+        sequence: index + 1,
+      }),
+    ),
+  ].join("");
+  const footerBase = {
+    eventCount: events.length,
+    kind: "footer",
+    recordingId,
+    status: "stopped",
+    stoppedAt: "2026-08-30T01:00:01.000Z",
+  } as const;
+  let bytes = Buffer.byteLength(prefix, "utf8");
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const footer = recordingLine({ ...footerBase, bytes });
+    const next = Buffer.byteLength(prefix + footer, "utf8");
+    if (next === bytes) return Buffer.from(prefix + footer);
+    bytes = next;
+  }
+  throw new Error("test recording footer did not converge");
+}
+
 function target(
   options: {
+    readonly appendSeqs?: readonly number[];
     readonly initialSeq?: number;
     readonly prefixEvents?: readonly OrbisDshRawEventReplayEvent[];
     readonly prepare?: (events: readonly OrbisDshRawEventReplayEvent[]) => void;
@@ -100,9 +151,10 @@ function target(
   const flush = vi.fn(async () => undefined);
   const value: OrbisDshRawEventReplayTarget = {
     announce: vi.fn(),
+    stream: vi.fn(),
     append(event) {
       events.push(event);
-      return event.seq;
+      return options.appendSeqs?.[events.length - 1] ?? event.seq;
     },
     flush,
     initialSeq: options.initialSeq ?? 3,
@@ -213,75 +265,106 @@ describe("raw DSH event replay", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
+  it("requires V3 surface replacement coordinates", async () => {
+    const createSession = vi.fn(async () => target().target);
+    const replayer = new OrbisDshRawEventReplayer({ createSession });
+    const event = {
+      data: { content: [{ type: "text", text: "replacement" }] },
+      seq: 3,
+      sourceEventSeqs: [0],
+      surfaceOp: {
+        end: 0,
+        op: "replace",
+        start: 0,
+      } as unknown as OrbisDshRawEventReplayEvent["surfaceOp"],
+      type: "user/message",
+    } satisfies OrbisDshRawEventReplayEvent;
+
+    await expect(replayer.start(replayInput(recordingFromEvents([event])))).rejects.toThrow(
+      "invalid startSeq",
+    );
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects assistant provenance because V3 embeds its source stream", async () => {
+    const createSession = vi.fn(async () => target().target);
+    const replayer = new OrbisDshRawEventReplayer({ createSession });
+    const event = {
+      data: { message: { content: [] }, stream: [], step: 1, turn: 1 },
+      seq: 3,
+      sourceEventSeqs: [0],
+      surfaceOp: "append",
+      type: "assistant/message",
+    } satisfies OrbisDshRawEventReplayEvent;
+
+    await expect(replayer.start(replayInput(recordingFromEvents([event])))).rejects.toThrow(
+      "assistant/message cannot carry sourceEventSeqs",
+    );
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("maps V3 source references and replacement coordinates into target sequences", async () => {
+    const destination = target({ appendSeqs: [10, 11, 12], initialSeq: 2 });
+    const replayer = new OrbisDshRawEventReplayer(
+      { createSession: async () => destination.target },
+      { sleep: async () => undefined },
+    );
+    const events = [
+      {
+        data: { message: { content: [] }, stream: [], step: 1, turn: 1 },
+        seq: 2,
+        surfaceOp: "append",
+        type: "assistant/message",
+      },
+      {
+        data: { content: [{ type: "text", text: "replacement" }] },
+        seq: 3,
+        surfaceOp: "append",
+        type: "user/message",
+      },
+      {
+        data: { content: [{ type: "text", text: "replacement" }] },
+        seq: 4,
+        sourceEventSeqs: [2, 3],
+        surfaceOp: { endSeq: 2, op: "replace", startSeq: 3 },
+        type: "user/message",
+      },
+    ] satisfies readonly OrbisDshRawEventReplayEvent[];
+
+    await replayer.start(replayInput(recordingFromEvents(events)));
+    await expect(replayer.settled()).resolves.toMatchObject({
+      replayedEventCount: 3,
+      state: "completed",
+    });
+    expect(destination.target.stream).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "end",
+        outcome: { kind: "committed", eventType: "assistant/message", seq: 10 },
+      }),
+    );
+    expect(destination.events).toMatchObject([
+      { seq: 2, surfaceOp: "append", type: "assistant/message" },
+      { seq: 3, surfaceOp: "append", type: "user/message" },
+      {
+        seq: 4,
+        sourceEventSeqs: [10, 11],
+        surfaceOp: { endSeq: 10, op: "replace", startSeq: 11 },
+        type: "user/message",
+      },
+    ]);
+  });
+
   it.skipIf(rawDevelopmentFixtureIsPointer())(
-    "accepts the checked-in raw development fixture without bench-specific conversion",
+    "rejects the pre-V3 fixture instead of silently converting assistant provenance",
     async () => {
-      const session = Session.create(SessionId("replay-validation"));
-      const append = session.append.bind(session) as (
-        type: string,
-        data: unknown,
-        options?: unknown,
-      ) => { readonly seq: number };
-      append("permission/preset", { preset: "workspace-write" });
-      append("sandbox/mode", { mode: "workspace-write" });
-      append("approval/policy", { policy: "ask" });
-      const destination: OrbisDshRawEventReplayTarget = {
-        announce: () => undefined,
-        append(event) {
-          const options =
-            event.surfaceOp === undefined && event.sourceEventSeqs === undefined
-              ? undefined
-              : {
-                  ...(event.sourceEventSeqs === undefined
-                    ? {}
-                    : { sourceEventSeqs: event.sourceEventSeqs }),
-                  ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
-                };
-          return options === undefined
-            ? append(event.type, event.data).seq
-            : append(event.type, event.data, options).seq;
-        },
-        flush: async () => undefined,
-        initialSeq: session.seq,
-        isSubscribed: () => true,
-        observeSubscription: () => () => undefined,
-        prepare() {
-          append("session/title", {
-            messageSeqs: [],
-            source: { kind: "user" },
-            title: "Replay validation",
-          });
-        },
-        prefixEvents: session.snapshotEvents().map((event) => {
-          const metadata = event as typeof event & {
-            readonly sourceEventSeqs?: readonly number[];
-            readonly surfaceOp?: OrbisDshRawEventReplayEvent["surfaceOp"];
-          };
-          return {
-            data: event.data,
-            seq: event.seq,
-            ...(metadata.sourceEventSeqs === undefined
-              ? {}
-              : { sourceEventSeqs: metadata.sourceEventSeqs }),
-            ...(metadata.surfaceOp === undefined ? {} : { surfaceOp: metadata.surfaceOp }),
-            type: event.type,
-          };
-        }),
-        sessionId: String(session.id),
-      };
-      const replayer = new OrbisDshRawEventReplayer(
-        { createSession: async () => destination },
-        { sleep: async () => undefined },
-      );
+      const createSession = vi.fn(async () => target().target);
+      const replayer = new OrbisDshRawEventReplayer({ createSession });
       const fixture = createReadStream(RAW_DEVELOPMENT_FIXTURE);
 
-      await replayer.start({ data: fixture, filename: "dsh-run-stream-events.jsonl" });
-      await expect(replayer.settled()).resolves.toMatchObject({
-        eventCount: 45_948,
-        replayedEventCount: 45_948,
-        state: "completed",
-      });
-      expect(session.seq).toBe(45_952);
+      await expect(
+        replayer.start({ data: fixture, filename: "dsh-run-stream-events.jsonl" }),
+      ).rejects.toThrow("assistant/message cannot carry sourceEventSeqs");
+      expect(createSession).not.toHaveBeenCalled();
     },
     15_000,
   );

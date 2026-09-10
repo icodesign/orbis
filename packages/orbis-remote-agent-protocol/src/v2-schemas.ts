@@ -558,6 +558,7 @@ export const v2OverlaySchema = z
         blocks: z.array(
           z
             .object({
+              blockComplete: z.literal(true).optional(),
               blockIndex: nonNegativeInteger,
               content: v2StreamingContentBlockSchema,
             })
@@ -990,6 +991,7 @@ export const v2SessionEventSchema = z.union([
     .passthrough(),
   z
     .object({
+      blockComplete: z.literal(true).optional(),
       blockIndex: nonNegativeInteger,
       channel: z.literal("transient"),
       chunkSeq: positiveInteger,

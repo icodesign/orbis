@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 
 import type { Context } from "@deepseek-ai/cordis";
-import type { Agent } from "@deepseek-ai/dsh-agent";
+import type { Agent, AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-agent";
 import type {} from "@deepseek-ai/dsh-api-session-controller";
 import {
@@ -18,6 +18,7 @@ import type {} from "@deepseek-ai/dsh-host-webserver";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm/types";
 import type {} from "@deepseek-ai/dsh-plan-mode";
+import { scopeTarget } from "@deepseek-ai/dsh-scope";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type { Session } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
@@ -34,6 +35,8 @@ import z from "@deepseek-ai/schemastery";
 import { AgentBackendError } from "@orbisapp/orbis-agent-backend";
 
 import type {
+  DshAgent,
+  DshAssistantStreamFrame,
   DshEncodedImageAttachment,
   DshImageAttachmentReference,
   DshSession,
@@ -47,6 +50,7 @@ import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
 import { OrbisDshDiagnosticsExporter } from "./diagnostics-export";
 import { createDshPromptReferenceProvider } from "./dsh-prompt-reference-provider";
 import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-session-catalog";
+import { createDshSessionPersistence } from "./dsh-session-persistence";
 import { OrbisDshFileLogger, orbisDshErrorFields } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
 import { createOrbisHttpRoute } from "./http-api";
@@ -197,6 +201,14 @@ export function createRawDshEventReplayPort(
       }
       return {
         announce: () => activeHost.nativeBackend.announceCatalogChanged(record.ref),
+        stream(frame) {
+          const agent = context.agents.get(SessionId(nativeSessionId));
+          if (agent === undefined) throw new Error("The replay agent is no longer attached");
+          context.emit(scopeTarget(agent, agent), "agent/assistant-stream", {
+            agent,
+            frame: frame as AssistantStreamFrame,
+          });
+        },
         append(event: OrbisDshRawEventReplayEvent): number {
           const options =
             event.surfaceOp === undefined && event.sourceEventSeqs === undefined
@@ -322,6 +334,8 @@ function dshPlanMode(context: Context): Context["planMode"] | undefined {
  */
 type SatisfiesPort<Port, Actual extends Port> = Actual;
 export type DshSessionPortConformance = SatisfiesPort<DshSession, Session>;
+export type DshAgentPortConformance = SatisfiesPort<DshAgent, Agent>;
+export type DshStreamPortConformance = SatisfiesPort<DshAssistantStreamFrame, AssistantStreamFrame>;
 
 function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["context"] {
   const planMode = dshPlanMode(context);
@@ -331,7 +345,7 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
     on: context.on.bind(context),
     sessionController: (context as unknown as { readonly sessionController: unknown })
       .sessionController,
-    sessionPersistence: context.sessionPersistence,
+    sessionPersistence: createDshSessionPersistence(context.sessionPersistence),
     sessionProjections: (context as unknown as { readonly sessionProjections: unknown })
       .sessionProjections,
     // The generic Orbis backend keeps its own narrow DSH port named
@@ -476,7 +490,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
             driver: { version: ORBIS_DSH_DRIVER_VERSION },
             listSessionCatalog: () =>
               listDshSessionCatalog(
-                dshContext.sessionPersistence,
+                context.sessionPersistence,
                 context.sessionProjectionCache as DshSessionProjectionCache,
               ),
             permissionPresets: createDshPermissionProvider(context),

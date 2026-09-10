@@ -15,8 +15,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createOrbisRemoteAgentV2Connection } from "@orbisapp/remote-agent-protocol";
 import { hasSharedFileMode } from "@orbisapp/remote-agent-node-store";
+import { createOrbisRemoteAgentV2Connection } from "@orbisapp/remote-agent-protocol";
 import {
   generateDeviceIdentity,
   OrbisRemoteConnection,
@@ -770,6 +770,26 @@ async function main() {
       "first real prompt run",
     );
     await activeDeliveryQueue.wait();
+    if (providerMode === "replay") {
+      const streamed = deliveries.filter(
+        ({ event }) => event.type === "entry.delta" && event.part === "text",
+      );
+      if (streamed.map(({ event }) => event.delta).join("") !== KEYLESS_REPLAY_TEXT) {
+        throw new Error("V3 live assistant frames did not reach Orbis exactly once");
+      }
+      const settlementIndex = deliveries.findIndex(
+        ({ event }) =>
+          event.type === "entry.appended" && event.settlesEntryId === streamed[0]?.event.entryId,
+      );
+      if (
+        settlementIndex < 0 ||
+        streamed.some((delivery) => deliveries.indexOf(delivery) >= settlementIndex)
+      ) {
+        throw new Error(
+          `V3 assistant settlement did not follow and settle the streamed attempt: ${JSON.stringify(deliveries.map(({ event }) => ({ type: event.type, entryId: event.entryId ?? event.entry?.id, settlesEntryId: event.settlesEntryId, nativeType: event.source?.nativeType })))}`,
+        );
+      }
+    }
     await waitFor(
       async () => (await persistedIndexEntryCount(agentState)) > 0,
       "durable cursor index persistence",
@@ -964,7 +984,7 @@ async function main() {
       [invitation.pairingSecret, ...providerSecrets],
     );
     log(
-      `PASS: direct pairing, v2 DSH operations, cursor-index replay, no-ACK delivery, and restart recovery (${providerMode === "replay" ? "keyless replay" : "live provider"})`,
+      `PASS: direct pairing, v2 DSH operations, live streaming and settlement, cursor-index replay, no-ACK delivery, and restart recovery (${providerMode === "replay" ? "keyless replay" : "live provider"})`,
     );
     log(
       "NOTE: host identity rotation coverage is fixture-only (old pinned client rejected; new key rejected by old delivery state); production rotation still requires an explicit migration API.",
