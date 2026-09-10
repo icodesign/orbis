@@ -1,4 +1,9 @@
 import {
+  BlockAssembler,
+  expandAssistantStream,
+  type AssistantStreamRecord,
+} from "@deepseek-ai/dsh-llm";
+import {
   AgentBackendError,
   agentDeliveryCursor,
   agentEntryId,
@@ -351,7 +356,6 @@ function projectAssistantMessage(
   // DSH permits an empty assistant message to carry usage at a max-token
   // boundary. Preserve that accounting as a contentless canonical entry so a
   // run-level presentation can include it without inventing provider totals.
-  if (content.length === 0 && usage === undefined) return undefined;
   return {
     content,
     createdAt: dshTimestamp(event.time),
@@ -448,42 +452,39 @@ function lifecycleNumber(event: DshSessionEvent, key: "step" | "turn", label: st
   return value as number;
 }
 
-function projectRequestSystemPrompt(
-  event: DshSessionEvent,
-  previousSystem: string | undefined,
-  hasPreviousHeader: boolean,
-): { readonly entry?: AgentMessageEntry; readonly system: string } {
-  const data = record(event.data, "request header");
-  const header = record(data.header, "request header payload");
-  const systemValue = header.system;
-  if (systemValue !== undefined && typeof systemValue !== "string") {
-    throw new AgentBackendError("protocol", "DSH request system prompt is invalid");
-  }
-  const system = systemValue ?? "";
-  const reason = data.reason;
-  if (reason !== "initial" && reason !== "resume" && reason !== "change" && reason !== "series") {
-    throw new AgentBackendError("protocol", "DSH request header reason is invalid");
-  }
-  if (data.startsSeries !== undefined && data.startsSeries !== true) {
-    throw new AgentBackendError("protocol", "DSH request header series marker is invalid");
-  }
-  const showsPrompt =
-    !hasPreviousHeader ||
-    reason !== "change" ||
-    data.startsSeries === true ||
-    previousSystem !== system;
-  if (!showsPrompt || system.length === 0) return { system };
+function projectSystemMessage(event: DshSessionEvent): AgentMessageEntry {
+  const data = record(record(event.data, "system event").message, "system message");
+  if (data.role !== "system") throw new AgentBackendError("protocol", "Invalid DSH system role");
   return {
-    entry: {
-      content: [{ text: system, type: "text" }],
-      createdAt: dshTimestamp(event.time),
-      cursor: agentDeliveryCursor(0),
-      id: dshEntryId(event),
-      kind: "message",
-      parentId: null,
-      role: "system",
-    },
-    system,
+    content: contentBlocks(data.content, new Map()),
+    createdAt: dshTimestamp(event.time),
+    cursor: agentDeliveryCursor(0),
+    id: dshEntryId(event),
+    kind: "message",
+    parentId: null,
+    role: "system",
+  };
+}
+
+/** Failed attempts are durable too; use DSH's canonical safe-prefix assembly. */
+function projectAssistantAttempt(event: DshSessionEvent): AgentMessageEntry {
+  const data = record(event.data, "assistant attempt");
+  if (!Array.isArray(data.stream))
+    throw new AgentBackendError("protocol", "Invalid DSH attempt stream");
+  const assembler = new BlockAssembler();
+  for (const { chunk } of expandAssistantStream(data.stream as AssistantStreamRecord[]))
+    assembler.push(chunk);
+  const usage = usageFromDsh(assembler.usage);
+  return {
+    content: contentBlocks(assembler.interruptedBlocks(), new Map()),
+    createdAt: dshTimestamp(event.time),
+    cursor: agentDeliveryCursor(0),
+    id: dshEntryId(event),
+    kind: "message",
+    parentId: null,
+    role: "assistant",
+    stopReason: assembler.finish.kind === "aborted" ? "aborted" : "error",
+    ...(usage === undefined ? {} : { usage }),
   };
 }
 
@@ -492,8 +493,6 @@ export class DshSessionEntryProjector {
   private readonly toolCalls = new Map<string, DshToolCall>();
   private activeRunId: AgentEntryScope["runId"] | undefined;
   private activeStepId: string | undefined;
-  private hasRequestHeader = false;
-  private requestSystem: string | undefined;
 
   project(event: DshSessionEvent): AgentSessionEntry | undefined {
     if (event.type === "turn/start") {
@@ -517,17 +516,12 @@ export class DshSessionEntryProjector {
       case "tool/result":
         entry = projectToolResult(event, this.toolCalls);
         break;
-      case "request/header": {
-        const projected = projectRequestSystemPrompt(
-          event,
-          this.requestSystem,
-          this.hasRequestHeader,
-        );
-        this.hasRequestHeader = true;
-        this.requestSystem = projected.system;
-        entry = projected.entry;
+      case "system/message":
+        entry = projectSystemMessage(event);
         break;
-      }
+      case "assistant/attempt":
+        entry = projectAssistantAttempt(event);
+        break;
     }
 
     const scope =

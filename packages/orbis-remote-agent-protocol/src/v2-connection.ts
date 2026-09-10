@@ -524,6 +524,7 @@ function parseStreaming(value: unknown): NonNullable<RemoteAgentV2Overlay["strea
     entryId: agentEntryId(input.entryId),
     blocks: input.blocks.map((block) => ({
       blockIndex: block.blockIndex,
+      ...(block.blockComplete === undefined ? {} : { blockComplete: block.blockComplete }),
       content: parseStreamingContent(block.content),
     })),
     chunkSeq: input.chunkSeq,
@@ -687,6 +688,7 @@ function parseEvent(value: unknown): RemoteAgentV2SessionEvent | RemoteAgentV2De
       part: parsed.part,
       blockIndex: parsed.blockIndex,
       chunkSeq: parsed.chunkSeq,
+      ...(parsed.blockComplete === undefined ? {} : { blockComplete: parsed.blockComplete }),
       delta: parsed.delta,
     };
   }

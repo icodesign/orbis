@@ -212,6 +212,9 @@ function transientDelta(
   return {
     ...baseEvent(ref, event),
     blockIndex: event.payload.blockIndex,
+    ...(event.payload.blockComplete === undefined
+      ? {}
+      : { blockComplete: event.payload.blockComplete }),
     channel: "transient",
     chunkSeq: event.payload.chunkSeq,
     delta: event.payload.delta,
@@ -307,6 +310,15 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
       (projection.activeRun === undefined
         ? undefined
         : { runId: projection.activeRun.id, runningTools: [] });
+    // A newly attached facade rebuilds the active attempt from its authoritative
+    // local prefix, including chunks delivered while no facade was connected.
+    const stream = native.streamSnapshot();
+    if (this.overlay !== undefined)
+      this.overlay = { ...this.overlay, streaming: undefined, runningTools: [] };
+    for (const event of stream) {
+      if (event.type === "tool.state.changed") this.updateToolState(event);
+      else if (event.type === "entry.delta") this.appendMessageOverlay(event);
+    }
     this.setOverlay(this.overlay);
     this.removeNative = native.subscribe((event) => {
       const mapped = this.mapEvent(event);
@@ -477,23 +489,33 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     }
     const current = this.overlay;
     if (current === undefined) return;
-    const streaming = current.streaming ?? {
-      blocks: [],
-      entryId: event.payload.entryId,
-      chunkSeq: 0,
-    };
+    const streaming =
+      current.streaming?.entryId === event.payload.entryId
+        ? current.streaming
+        : {
+            blocks: [],
+            entryId: event.payload.entryId,
+            chunkSeq: 0,
+          };
     const blocks = [...streaming.blocks];
     const type = event.payload.part === "thinking" ? "thinking" : "text";
     const index = blocks.findIndex((block) => block.blockIndex === event.payload.blockIndex);
-    const previous = index === -1 ? undefined : blocks[index]?.content;
+    const previousBlock = index === -1 ? undefined : blocks[index];
+    const previous = previousBlock?.content;
     if (previous !== undefined && previous.type !== type) return;
     if (previous?.type === type) {
       blocks[index] = {
+        ...(previousBlock?.blockComplete === true || event.payload.blockComplete === true
+          ? { blockComplete: true as const }
+          : {}),
         blockIndex: event.payload.blockIndex,
         content: { ...previous, text: `${previous.text}${event.payload.delta}` },
       };
     } else {
       blocks.push({
+        ...(event.payload.blockComplete === undefined
+          ? {}
+          : { blockComplete: event.payload.blockComplete }),
         blockIndex: event.payload.blockIndex,
         content: { text: event.payload.delta, type },
       });

@@ -170,10 +170,16 @@ interface RemoteAgentV2Subscriber {
   readonly since: AgentTimestamp;
 }
 
+type PendingEntryMetadata = Pick<
+  Extract<RemoteAgentV2SessionEvent, { readonly type: "entry.appended" }>,
+  "eventId" | "occurredAt" | "source" | "settlesEntryId"
+>;
+
 interface Owner {
   readonly nativeRef: AgentSessionRef;
   readonly ref: AgentSessionRef;
   readonly subscribers: Map<string, RemoteAgentV2Subscriber>;
+  readonly pendingEntries: Map<string, PendingEntryMetadata>;
   initializing: Promise<void>;
   index?: RemoteAgentV2StoredSessionIndex;
   runtime?: RemoteAgentV2Runtime;
@@ -2032,6 +2038,7 @@ export class OrbisRemoteAgentV2Host {
         nativeRef: nativeRef(this.backend.hostId, ref),
         ref,
         subscribers: new Map(),
+        pendingEntries: new Map(),
         tail: Promise.resolve(),
         transientTail: Promise.resolve(),
         presenceSeq: 0,
@@ -2056,10 +2063,32 @@ export class OrbisRemoteAgentV2Host {
     const runtime = await this.backend.connectRuntime(owner.nativeRef);
     owner.runtime = runtime;
     owner.unsubscribe = runtime.subscribe((event) => {
+      try {
+        this.assertNativeEventSession(owner, event);
+      } catch (error) {
+        this.report(error);
+        return;
+      }
+      // A queued refresh can observe entries from later native events. Capture
+      // their delivery metadata before any asynchronous reconciliation begins.
+      if (event.type === "entry.appended" && event.channel === "replayable") {
+        owner.pendingEntries.set(event.entry.id, {
+          eventId: event.eventId,
+          occurredAt: event.occurredAt,
+          source: event.source,
+          ...(event.settlesEntryId === undefined ? {} : { settlesEntryId: event.settlesEntryId }),
+        });
+      }
       const task =
         event.channel === "transient"
           ? this.enqueueTransientEvent(owner, event)
-          : this.enqueue(owner, () => this.receiveNativeEvent(owner, event));
+          : this.enqueue(owner, async () => {
+              try {
+                await this.receiveNativeEvent(owner, event);
+              } finally {
+                if (event.type === "entry.appended") owner.pendingEntries.delete(event.entry.id);
+              }
+            });
       if (task !== undefined) void task.catch((error) => this.report(error));
     });
     await this.enqueue(owner, async () => {
@@ -2120,25 +2149,20 @@ export class OrbisRemoteAgentV2Host {
     const previousEntryIds = new Set(previous?.entries.map((candidate) => candidate.id) ?? []);
     const newEntries = current.entries.filter((candidate) => !previousEntryIds.has(candidate.id));
     for (const entry of newEntries) {
-      const isTriggeredEntry =
-        event.type === "entry.appended" &&
-        event.channel === "replayable" &&
-        event.entry.id === entry.id;
+      const metadata = owner.pendingEntries.get(entry.id);
       await this.deliverLive(
         owner,
         entryEvent(
           owner.ref,
           entry,
-          isTriggeredEntry ? event.eventId : `entry:${entry.id}`,
-          isTriggeredEntry ? event.occurredAt : entry.createdAt,
-          isTriggeredEntry
-            ? event.source
-            : {
-                backendId: owner.ref.backendId,
-                driverId: owner.ref.driverId,
-                nativeType: "reconciled",
-              },
-          isTriggeredEntry ? event.settlesEntryId : undefined,
+          metadata?.eventId ?? `entry:${entry.id}`,
+          metadata?.occurredAt ?? entry.createdAt,
+          metadata?.source ?? {
+            backendId: owner.ref.backendId,
+            driverId: owner.ref.driverId,
+            nativeType: "reconciled",
+          },
+          metadata?.settlesEntryId,
         ),
         [...owner.subscribers.values()],
       );
@@ -2209,6 +2233,7 @@ export class OrbisRemoteAgentV2Host {
       ...(event.type === "entry.delta"
         ? {
             blockIndex: event.blockIndex,
+            ...(event.blockComplete === undefined ? {} : { blockComplete: event.blockComplete }),
             chunkSeq: event.chunkSeq,
             delta: event.delta,
             entryId: event.entryId,

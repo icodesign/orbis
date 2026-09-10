@@ -268,6 +268,7 @@ function toolInputDeltaEvent(): TransportEvent {
   const occurredAt = agentTimestamp("2026-08-11T00:00:04.000Z");
   const event = {
     blockIndex: 0,
+    blockComplete: true,
     channel: "transient",
     chunkSeq: 1,
     delta: '{"path":"/workspace/demo.ts"}',
@@ -466,6 +467,7 @@ test("v2 connection decodes tool state and tool input events", async () => {
     },
     {
       event: {
+        blockComplete: true,
         entryId: "tool-call-a",
         part: "tool_input",
         type: "entry.delta",

@@ -56,6 +56,7 @@ function delta(
   options: {
     readonly blockIndex?: number;
     readonly entryId?: string;
+    readonly blockComplete?: true;
     readonly part?: DshDeltaInput["payload"]["part"];
     readonly occurredAt?: AgentTimestamp;
   } = {},
@@ -65,6 +66,7 @@ function delta(
     occurredAt: options.occurredAt ?? FIXED_TIME,
     payload: {
       blockIndex: options.blockIndex ?? 0,
+      ...(options.blockComplete === undefined ? {} : { blockComplete: options.blockComplete }),
       delta: value,
       entryId: agentEntryId(options.entryId ?? "entry-1"),
       part: options.part ?? "text",
@@ -165,6 +167,23 @@ describe("DshDeltaCoalescer", () => {
         ...second,
         payload: { ...second.payload, delta: "ab" },
       },
+    ]);
+  });
+
+  test("keeps an explicit completion marker from an empty coalesced delta", () => {
+    const scheduler = new ManualScheduler();
+    const emitted: DshDeltaInput[] = [];
+    const coalescer = new DshDeltaCoalescer({
+      emit: (item) => emitted.push(item),
+      scheduler,
+    });
+
+    coalescer.push(delta(1, "answer"));
+    coalescer.push(delta(2, "", { blockComplete: true }));
+    scheduler.runNext();
+
+    expect(emitted).toMatchObject([
+      { payload: { blockComplete: true, delta: "answer", entryId: "entry-1" } },
     ]);
   });
 

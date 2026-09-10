@@ -939,6 +939,95 @@ test("v2 host replays native entries from its cursor index without ACK state", a
   }
 });
 
+test("v2 host preserves appended metadata when a state refresh reads ahead", async () => {
+  const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
+  const appended = entry("entry-race");
+  let current = snapshot([]);
+  const backendBase = presenceBackend(runtimeListeners);
+  const backend: RemoteAgentV2Backend = {
+    ...backendBase,
+    readSession: async () => current,
+  };
+  const delivered: RemoteAgentV2SessionEvent[] = [];
+  const host = new OrbisRemoteAgentV2Host({
+    backend,
+    backendId: "remote:host-a",
+    store: new MemoryStore(),
+    transport: {
+      send: async (_target, frame) => {
+        const event = sessionEventFromTransport(frame);
+        if (event !== undefined) delivered.push(event);
+      },
+    },
+  });
+  try {
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.hello,
+      { device: { name: "Test", platform: "node" }, supportedVersions: [2] },
+      context(),
+    );
+    await host.handleRequest(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
+      params({ mode: "live", ref: publicRef }),
+      context(),
+    );
+
+    const source = {
+      backendId: nativeRef.backendId,
+      driverId: nativeRef.driverId,
+      nativeType: "agent/assistant-stream",
+      version: "0.1.5-rc.1",
+    };
+    const appendedEvent: RemoteAgentV2SessionEvent = {
+      channel: "replayable",
+      cursor: agentDeliveryCursor(0),
+      entry: appended,
+      eventId: agentEventId("native-entry-race"),
+      occurredAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
+      sessionId: nativeRef.sessionId,
+      settlesEntryId: agentEntryId("stream-placeholder"),
+      source,
+      type: "entry.appended",
+    };
+    const stateEvent: RemoteAgentV2SessionEvent = {
+      channel: "state",
+      eventId: agentEventId("native-state-race"),
+      occurredAt: agentTimestamp("2026-08-11T00:00:01.000Z"),
+      patch: { runState: "running" },
+      revision: 1,
+      sessionId: nativeRef.sessionId,
+      source,
+      type: "session.state.changed",
+    };
+
+    // The snapshot is already ahead when the runtime emits the state hint.
+    // Emit both notifications synchronously so the state refresh queues before
+    // the append callback can reconcile the entry.
+    current = snapshot([appended], 1, { runState: "running" });
+    for (const listener of runtimeListeners) {
+      listener(stateEvent);
+      listener(appendedEvent);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(delivered.filter((event) => event.type === "entry.appended")).toHaveLength(1);
+    const deliveredAppend = delivered.find((event) => event.type === "entry.appended");
+    expect(deliveredAppend).toMatchObject({
+      eventId: appendedEvent.eventId,
+      occurredAt: appendedEvent.occurredAt,
+      settlesEntryId: appendedEvent.settlesEntryId,
+      source: {
+        backendId: publicRef.backendId,
+        driverId: publicRef.driverId,
+        nativeType: source.nativeType,
+        version: source.version,
+      },
+    });
+  } finally {
+    await host.close();
+  }
+});
+
 test("v2 sync continuation with no pending work is empty, and a stale afterEntryId falls back to baseline", async () => {
   const store = new MemoryStore();
   const runtimeListeners = new Set<(event: RemoteAgentV2SessionEvent) => void>();
@@ -1156,11 +1245,16 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
       },
     },
   });
-  const emit = (chunkSeq: number, sessionId = nativeRef.sessionId): void => {
+  const emit = (
+    chunkSeq: number,
+    sessionId = nativeRef.sessionId,
+    blockComplete = false,
+  ): void => {
     const event: RemoteAgentV2SessionEvent = {
       blockIndex: 0,
       channel: "transient",
       chunkSeq,
+      ...(blockComplete ? { blockComplete: true as const } : {}),
       delta: String(chunkSeq),
       entryId: streamEntryId,
       eventId: agentEventId(`delta-${chunkSeq}`),
@@ -1199,6 +1293,7 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
         blocks: [
           {
             blockIndex: 0,
+            blockComplete: true as const,
             content: { text: String(preSyncChunkCount), type: "text" as const },
           },
         ],
@@ -1235,6 +1330,7 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
         blocks: [
           {
             blockIndex: 0,
+            blockComplete: true as const,
             content: { text: String(queuedAfterSyncChunkSeq), type: "text" as const },
           },
         ],
@@ -1276,7 +1372,7 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
     });
     expect(readSessionCalls).toBe(1);
 
-    emit(postSyncChunkSeq);
+    emit(postSyncChunkSeq, nativeRef.sessionId, true);
     await Promise.all([ownerPostSyncDelivered, postSyncDelivered]);
 
     const eventsFor = (transportId: string) =>
@@ -1286,6 +1382,14 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
     expect(eventsFor(peer.transportId)).toEqual([1, 2, 3, 4, 5]);
     expect(eventsFor(peerB.transportId)).toEqual([]);
     expect(eventsFor(peerBReconnect.transportId)).toEqual([postSyncChunkSeq]);
+    expect(
+      delivered.find(
+        ({ transportId, event }) =>
+          transportId === peerBReconnect.transportId &&
+          event.type === "entry.delta" &&
+          event.chunkSeq === postSyncChunkSeq,
+      )?.event,
+    ).toMatchObject({ blockComplete: true });
     expect(readSessionCalls).toBe(1);
     expect(firstTransient).toBe(false);
 

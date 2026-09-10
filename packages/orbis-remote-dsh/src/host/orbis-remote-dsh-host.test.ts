@@ -20,6 +20,7 @@ import { expect, test } from "vitest";
 import type {
   DshAgent,
   DshAgentInboxEvent,
+  DshAssistantStreamFrame,
   DshContext,
   DshQuestionAnswer,
   DshQuestionRequest,
@@ -113,6 +114,9 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
   const agents = new Map<string, DshAgent>();
   const selectedModels = new Map<string, { readonly model: string; readonly provider: string }>();
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
+  const streamListeners = new Set<
+    (payload: { readonly agent: DshAgent; readonly frame: DshAssistantStreamFrame }) => void
+  >();
   const inboxes = new Map<string, { nextStep: DshUserMessage[]; nextTurn: DshUserMessage[] }>();
   const nativeInboxListeners = new Map<string, Set<(event: DshAgentInboxEvent) => void>>();
   const host = new OrbisRemoteDshHost({
@@ -218,6 +222,14 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
             nativeListeners.add(sessionListener);
             return () => nativeListeners.delete(sessionListener);
           }
+          if (event === "agent/assistant-stream") {
+            const streamListener = listener as (payload: {
+              readonly agent: DshAgent;
+              readonly frame: DshAssistantStreamFrame;
+            }) => void;
+            streamListeners.add(streamListener);
+            return () => streamListeners.delete(streamListener);
+          }
           const inboxListener = listener as (event: DshAgentInboxEvent) => void;
           const listeners = nativeInboxListeners.get(event) ?? new Set();
           listeners.add(inboxListener);
@@ -300,6 +312,11 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
     inbox[target].push(message);
     for (const listener of nativeInboxListeners.get("agent/inbox/inserted") ?? [])
       listener({ agent, message });
+  };
+  const emitStream = (id: string, frame: DshAssistantStreamFrame): void => {
+    const agent = agents.get(id);
+    if (agent === undefined) throw new Error("missing test agent stream");
+    for (const listener of streamListeners) listener({ agent, frame });
   };
   try {
     const result = await host.requestHandler(
@@ -532,23 +549,35 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
       nativeEvents.push(event);
       for (const listener of nativeListeners) listener(nativeSession, event);
     };
+    const attemptId = "native-a:test";
     emitNative({
       data: { turn: 1 },
       seq: 1,
       time: Date.parse("2026-08-10T00:00:01.000Z"),
       type: "turn/start",
     });
-    emitNative({
-      data: { chunk: { type: "block-start" }, step: 1, turn: 1 },
-      seq: 2,
-      time: Date.parse("2026-08-10T00:00:02.000Z"),
-      type: "assistant/chunk",
+    emitStream("native-a", {
+      attemptId,
+      revision: 1,
+      step: 1,
+      turn: 1,
+      type: "start",
     });
-    emitNative({
-      data: { chunk: { index: 0, text: "streaming", type: "text-delta" }, step: 1, turn: 1 },
-      seq: 3,
+    emitStream("native-a", {
+      attemptId,
+      chunk: { type: "block-start" },
+      index: 0,
+      revision: 2,
+      time: Date.parse("2026-08-10T00:00:02.000Z"),
+      type: "chunk",
+    });
+    emitStream("native-a", {
+      attemptId,
+      chunk: { index: 0, text: "streaming", type: "text-delta" },
+      index: 1,
+      revision: 3,
       time: Date.parse("2026-08-10T00:00:03.000Z"),
-      type: "assistant/chunk",
+      type: "chunk",
     });
     const liveSnapshot = await host.requestHandler(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
@@ -567,25 +596,23 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
         streaming: {
           chunkSeq: 1,
           blocks: [{ blockIndex: 0, content: { text: "streaming", type: "text" } }],
-          entryId: "message-1-1",
+          entryId: `attempt-${attemptId}`,
         },
       },
     });
-    emitNative({
-      data: {
-        chunk: {
-          argumentsDelta: '{"path":"/workspace/demo.ts"}',
-          id: "call-1",
-          index: 1,
-          name: "read",
-          type: "tool-call-delta",
-        },
-        step: 1,
-        turn: 1,
+    emitStream("native-a", {
+      attemptId,
+      chunk: {
+        argumentsDelta: '{"path":"/workspace/demo.ts"}',
+        id: "call-1",
+        index: 1,
+        name: "read",
+        type: "tool-call-delta",
       },
-      seq: 4,
+      index: 2,
+      revision: 4,
       time: Date.parse("2026-08-10T00:00:03.500Z"),
-      type: "assistant/chunk",
+      type: "chunk",
     });
     const toolSnapshot = await host.requestHandler(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,
@@ -616,9 +643,16 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
         step: 1,
         turn: 1,
       },
-      seq: 5,
+      seq: 2,
       time: Date.parse("2026-08-10T00:00:04.000Z"),
       type: "assistant/message",
+    });
+    emitStream("native-a", {
+      attemptId,
+      index: 3,
+      outcome: { eventType: "assistant/message", kind: "committed", seq: 2 },
+      revision: 5,
+      type: "end",
     });
     const settledSnapshot = await host.requestHandler(
       ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync,

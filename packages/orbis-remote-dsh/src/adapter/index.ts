@@ -9,6 +9,7 @@ export {
 } from "./dsh-local-backend";
 export type {
   DshAgent,
+  DshAssistantStreamFrame,
   DshEncodedImageAttachment,
   DshImageAttachmentReference,
   DshAgentInboxEvent,

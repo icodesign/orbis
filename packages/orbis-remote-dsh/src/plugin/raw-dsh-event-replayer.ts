@@ -1,7 +1,20 @@
 import { randomUUID } from "node:crypto";
 
+import type { DshAssistantStreamFrame } from "../adapter/dsh-types";
+import {
+  dshReplayTimeline,
+  type DshCapturedReplayEvent,
+  type DshReplayTimelineItem,
+} from "./dsh-replay-timeline";
+
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;
 const MAX_REPLAY_LINE_BYTES = 16 * 1024 * 1024;
+const SURFACE_EVENT_TYPES = new Set([
+  "assistant/message",
+  "system/message",
+  "tool/result",
+  "user/message",
+]);
 
 export type OrbisDshRawEventReplayState =
   | "cancelled"
@@ -35,7 +48,11 @@ export interface OrbisDshRawEventReplayEvent {
   readonly sourceEventSeqs?: readonly number[];
   readonly surfaceOp?:
     | "append"
-    | { readonly end: number; readonly op: "replace"; readonly start: number };
+    | {
+        readonly endSeq: number;
+        readonly op: "replace";
+        readonly startSeq: number;
+      };
   readonly type: string;
 }
 
@@ -46,6 +63,7 @@ export interface OrbisDshRawEventReplayTarget {
   announce(): void;
   append(event: OrbisDshRawEventReplayEvent): number;
   flush(): Promise<void>;
+  stream(frame: DshAssistantStreamFrame): void;
   isSubscribed(): boolean;
   observeSubscription(listener: (subscribed: boolean) => void): () => void;
   prepare(events: readonly OrbisDshRawEventReplayEvent[]): void;
@@ -61,10 +79,7 @@ export interface OrbisDshRawEventReplayerOptions {
   readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
 }
 
-interface CapturedEvent {
-  readonly capturedAtMs: number;
-  readonly event: OrbisDshRawEventReplayEvent;
-}
+type CapturedEvent = DshCapturedReplayEvent;
 
 interface ParsedRecording {
   readonly events: readonly CapturedEvent[];
@@ -100,7 +115,7 @@ function requiredInteger(
   label: string,
 ): number {
   const candidate = value[key];
-  if (!Number.isSafeInteger(candidate) || (candidate as number) < 0) {
+  if (!Number.isSafeInteger(candidate) || Object.is(candidate, -0) || (candidate as number) < 0) {
     throw new Error(`The replay JSONL ${label} has an invalid ${key}`);
   }
   return candidate as number;
@@ -125,9 +140,15 @@ function sequenceList(
   if (value === undefined) return undefined;
   if (
     !Array.isArray(value) ||
+    value.length === 0 ||
     value.some(
-      (candidate) => !Number.isSafeInteger(candidate) || candidate < 0 || candidate >= eventSeq,
-    )
+      (candidate) =>
+        !Number.isSafeInteger(candidate) ||
+        Object.is(candidate, -0) ||
+        candidate < 0 ||
+        candidate >= eventSeq,
+    ) ||
+    new Set(value).size !== value.length
   ) {
     throw new Error(`The replay JSONL ${label} has invalid sourceEventSeqs`);
   }
@@ -141,12 +162,17 @@ function surfaceOperation(
 ): OrbisDshRawEventReplayEvent["surfaceOp"] {
   if (value === undefined || value === "append") return value;
   const candidate = record(value, `${label} surfaceOp`);
-  const start = requiredInteger(candidate, "start", `${label} surfaceOp`);
-  const end = requiredInteger(candidate, "end", `${label} surfaceOp`);
-  if (candidate.op !== "replace" || start > end || end >= eventSeq) {
+  const startSeq = requiredInteger(candidate, "startSeq", `${label} surfaceOp`);
+  const endSeq = requiredInteger(candidate, "endSeq", `${label} surfaceOp`);
+  if (
+    Object.keys(candidate).length !== 3 ||
+    candidate.op !== "replace" ||
+    startSeq >= eventSeq ||
+    endSeq >= eventSeq
+  ) {
     throw new Error(`The replay JSONL ${label} has an invalid surfaceOp`);
   }
-  return { end, op: "replace", start };
+  return { endSeq, op: "replace", startSeq };
 }
 
 function parseEvent(value: unknown, label: string): OrbisDshRawEventReplayEvent {
@@ -167,6 +193,16 @@ function parseEvent(value: unknown, label: string): OrbisDshRawEventReplayEvent 
   }
   const sourceEventSeqs = sequenceList(candidate.sourceEventSeqs, seq, label);
   const surfaceOp = surfaceOperation(candidate.surfaceOp, seq, label);
+  const surface = SURFACE_EVENT_TYPES.has(type);
+  if (surface && surfaceOp === undefined) {
+    throw new Error(`The replay JSONL ${label} ${type} requires a surfaceOp marker`);
+  }
+  if (type === "assistant/message" && sourceEventSeqs !== undefined) {
+    throw new Error(`The replay JSONL ${label} assistant/message cannot carry sourceEventSeqs`);
+  }
+  if (!surface && (sourceEventSeqs !== undefined || surfaceOp !== undefined)) {
+    throw new Error(`The replay JSONL ${label} ${type} cannot carry surface metadata`);
+  }
   return {
     data: candidate.data,
     seq,
@@ -254,7 +290,11 @@ async function parseRecording(input: AsyncIterable<Uint8Array>): Promise<ParsedR
         `The replay JSONL native sequence is ${event.seq}; expected ${previousEventSeq + 1}`,
       );
     }
-    events.push({ capturedAtMs, event });
+    events.push({
+      capturedAtMs,
+      event,
+      eventTime: record(candidate.event, "event").time as number,
+    });
     expectedSequence += 1;
     previousCapturedAt = capturedAtMs;
     previousEventSeq = event.seq;
@@ -461,9 +501,13 @@ function mappedReplayEvent(
     typeof event.surfaceOp !== "object"
       ? event.surfaceOp
       : {
-          end: mappedSequence(event.surfaceOp.end, sequences, "surface replacement end"),
+          endSeq: mappedSequence(event.surfaceOp.endSeq, sequences, "surface replacement end"),
           op: "replace" as const,
-          start: mappedSequence(event.surfaceOp.start, sequences, "surface replacement start"),
+          startSeq: mappedSequence(
+            event.surfaceOp.startSeq,
+            sequences,
+            "surface replacement start",
+          ),
         };
   return {
     data: mappedEventData(event, sequences),
@@ -521,6 +565,7 @@ export class OrbisDshRawEventReplayer {
       const target = await this.port.createSession();
       if (this.controller.signal.aborted) throw this.controller.signal.reason;
       const startIndex = replayStartIndex(recording.events, target);
+      const timeline = dshReplayTimeline(recording.events.slice(startIndex), this.replayId);
       target.prepare(recording.events.map((record) => record.event));
       this.eventCount = recording.events.length;
       this.replayedEventCount = startIndex;
@@ -528,7 +573,7 @@ export class OrbisDshRawEventReplayer {
       target.announce();
       this.state = "waiting";
       const operation = this.run(
-        recording.events.slice(startIndex),
+        timeline,
         recording.events[0]!.capturedAtMs,
         target,
         this.controller.signal,
@@ -584,7 +629,7 @@ export class OrbisDshRawEventReplayer {
   }
 
   private async run(
-    events: readonly CapturedEvent[],
+    timeline: readonly DshReplayTimelineItem[],
     firstCapturedAt: number,
     target: OrbisDshRawEventReplayTarget,
     signal: AbortSignal,
@@ -598,15 +643,34 @@ export class OrbisDshRawEventReplayer {
       const targetSequences = new Map<number, number>(
         target.prefixEvents.map((event) => [event.seq, event.seq]),
       );
-      for (const record of events) {
-        const dueAt = replayStartedAt + record.capturedAtMs - firstCapturedAt;
+      let revision = 0;
+      for (const item of timeline) {
+        const dueAt = replayStartedAt + item.at - firstCapturedAt;
         await this.sleep(Math.max(0, dueAt - Date.now()), signal);
         if (signal.aborted) throw signal.reason;
-        const appendedSeq = target.append(mappedReplayEvent(record.event, targetSequences));
+        if (item.kind === "frame") {
+          target.stream({ ...item.frame, revision: ++revision });
+          continue;
+        }
+        if (item.kind === "end") {
+          target.stream({
+            type: "end",
+            attemptId: item.attemptId,
+            revision: ++revision,
+            index: item.index,
+            outcome: {
+              kind: "committed",
+              eventType: item.eventType,
+              seq: mappedSequence(item.seq, targetSequences, "assistant settlement"),
+            },
+          });
+          continue;
+        }
+        const appendedSeq = target.append(mappedReplayEvent(item.event, targetSequences));
         if (!Number.isSafeInteger(appendedSeq) || appendedSeq < 0) {
           throw new Error("DSH appended the replay event with an invalid sequence");
         }
-        targetSequences.set(record.event.seq, appendedSeq);
+        targetSequences.set(item.event.seq, appendedSeq);
         this.replayedEventCount += 1;
       }
       await target.flush();

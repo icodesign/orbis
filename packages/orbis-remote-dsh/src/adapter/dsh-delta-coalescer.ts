@@ -25,6 +25,7 @@ const defaultScheduler: DshDeltaScheduler = {
 };
 
 interface PendingDelta {
+  blockComplete: boolean;
   readonly first: DshDeltaInput;
   readonly chunks: string[];
   latest: DshDeltaInput;
@@ -60,19 +61,30 @@ export class DshDeltaCoalescer {
 
     const pending = this.pending;
     if (pending === undefined) {
-      this.pending = { chunks: [delta.payload.delta], first: delta, latest: delta };
+      this.pending = {
+        blockComplete: delta.payload.blockComplete === true,
+        chunks: [delta.payload.delta],
+        first: delta,
+        latest: delta,
+      };
       this.scheduleWindowFlush();
       return;
     }
 
     if (sameDeltaKey(pending.latest, delta)) {
       pending.chunks.push(delta.payload.delta);
+      pending.blockComplete ||= delta.payload.blockComplete === true;
       pending.latest = delta;
       return;
     }
 
     this.flush();
-    this.pending = { chunks: [delta.payload.delta], first: delta, latest: delta };
+    this.pending = {
+      blockComplete: delta.payload.blockComplete === true,
+      chunks: [delta.payload.delta],
+      first: delta,
+      latest: delta,
+    };
     this.scheduleWindowFlush();
   }
 
@@ -97,7 +109,11 @@ export class DshDeltaCoalescer {
       ...pending.first,
       occurredAt: pending.latest.occurredAt,
       eventId: pending.latest.eventId,
-      payload: { ...pending.first.payload, delta: pending.chunks.join("") },
+      payload: {
+        ...pending.first.payload,
+        ...(pending.blockComplete ? { blockComplete: true as const } : {}),
+        delta: pending.chunks.join(""),
+      },
       source: pending.latest.source,
     });
   }

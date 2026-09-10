@@ -71,6 +71,7 @@ import {
   type AgentTimestamp,
 } from "@orbisapp/orbis-agent-backend";
 
+import { DshAssistantStreamBuffer } from "./dsh-assistant-stream";
 import { DshDeltaCoalescer, type DshDeltaInput } from "./dsh-delta-coalescer";
 import {
   DshSessionEntryProjector,
@@ -92,6 +93,7 @@ import { lastDshSessionEvent } from "./dsh-types";
 import type {
   DshAgent,
   DshAgentInboxEvent,
+  DshAssistantStreamFrame,
   DshApprovalOutcome,
   DshApprovalRequest,
   DshImageAttachmentReference,
@@ -114,6 +116,16 @@ import type {
   DshWorkspace,
   DshWorkspaceId,
 } from "./dsh-types";
+
+interface DshStreamOrigin {
+  readonly identity: string;
+  readonly time: number;
+  readonly type: "agent/assistant-stream";
+}
+
+function emissionIdentity(native: DshSessionEvent | DshStreamOrigin, suffix: string): string {
+  return "identity" in native ? `${native.identity}-${suffix}` : dshEventIdentity(native, suffix);
+}
 
 export const DSH_LOCAL_DRIVER_ID = "dsh";
 
@@ -465,6 +477,7 @@ interface DshLocalControllerHost {
     signal?: AbortSignal,
   ): Promise<AgentAttachmentReadResult>;
   isCurrentAgent(agent: DshAgent): boolean;
+  streamFrames(agent: DshAgent): readonly DshAssistantStreamFrame[];
   now(): AgentTimestamp;
   readCurrentModel(ref: AgentSessionRef): Promise<AgentModelSelection | undefined>;
   report(error: AgentBackendError): void;
@@ -789,10 +802,12 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   }
 
   private closed = false;
+  private readonly streams = new WeakMap<DshAgent, DshAssistantStreamBuffer>();
   private readonly controllers = new Map<string, DshLocalSessionController>();
   private readonly opening = new Map<string, Promise<DshLocalSessionController>>();
   private readonly sessionWorkspaceRefs = new Map<string, string>();
   private readonly removeEventListener: () => void;
+  private readonly removeStreamListener: () => void;
   private readonly removeInboxEventListeners: readonly (() => void)[];
   private readonly removeInteractionListeners: readonly (() => void)[];
   private readonly removeAvailabilityListener: (() => void) | undefined;
@@ -839,6 +854,17 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     this.removeEventListener = options.context.on("session/event", (session, event) => {
       this.forwardNativeEvent(session, event);
     });
+    this.removeStreamListener = options.context.on("agent/assistant-stream", ({ agent, frame }) => {
+      let buffer = this.streams.get(agent);
+      if (buffer === undefined) {
+        buffer = new DshAssistantStreamBuffer();
+        this.streams.set(agent, buffer);
+      }
+      buffer.accept(frame);
+      const ref = this.refForNativeId(String(agent.id));
+      const controller = this.controllers.get(agentSessionLocatorKey(ref));
+      if (!this.closed && controller?.accepts(agent.session)) controller.receiveStream(frame);
+    });
     const inboxEvents = [
       "agent/inbox/inserted",
       "agent/inbox/claimed",
@@ -878,6 +904,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     this.removeAvailabilityListener?.();
     for (const remove of this.removeInteractionListeners) remove();
     this.removeEventListener();
+    this.removeStreamListener();
     for (const remove of this.removeInboxEventListeners) remove();
     this.catalogListeners.clear();
     await Promise.all([...this.controllers.values()].map((controller) => controller.dispose()));
@@ -1322,6 +1349,10 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       ...(stored.reference.name === undefined ? {} : { name: stored.reference.name }),
       width: stored.reference.width,
     };
+  }
+
+  streamFrames(agent: DshAgent): readonly DshAssistantStreamFrame[] {
+    return this.streams.get(agent)?.snapshot() ?? [];
   }
 
   isCurrentAgent(agent: DshAgent): boolean {
@@ -1863,6 +1894,11 @@ export class DshLocalSessionRuntime implements AgentSessionRuntime {
     this.controller.disconnect(this);
   }
 
+  streamSnapshot(): readonly AgentSessionEvent[] {
+    this.assertOpen();
+    return this.controller.streamSnapshot();
+  }
+
   getStatus(): AgentRuntimeStatus {
     return this.closed ? "closed" : this.controller.runtimeStatus();
   }
@@ -1969,6 +2005,17 @@ class DshLocalSessionController {
   private runtime: DshLocalSessionRuntime | undefined;
   private readonly projector = new DshSessionEntryProjector();
   private readonly deltaSequence = new Map<string, number>();
+  private readonly streamToolIds = new Set<string>();
+  private readonly streamDeltas = new Map<
+    string,
+    Extract<AgentSessionEvent, { type: "entry.delta" }>
+  >();
+  private streamRevision = 0;
+  private readonly activeToolStates = new Map<
+    string,
+    Extract<AgentSessionEvent, { type: "tool.state.changed" }>
+  >();
+  private stream: { attemptId: string; turn: number; step: number; index: number } | undefined;
   private readonly deltaCoalescer: DshDeltaCoalescer;
   private readonly pendingInboxIds: Record<DshInboxTarget, string[]> = {
     "next-step": [],
@@ -2008,9 +2055,20 @@ class DshLocalSessionController {
     // Seed stateful tool-call correlation without replaying historical events.
     for (const event of events) {
       this.recordInboxSplice(event);
-      this.projector.project(event);
+      const entry = this.projector.project(event);
+      if (event.type === "tool/call") this.emitToolCallState(event);
+      if (entry?.kind === "tool") {
+        this.activeToolStates.delete(`tool-${entry.callId}`);
+        this.overlayTools.delete(`tool-${entry.callId}`);
+      }
       this.title = titleForDshEvent(event) ?? this.title;
     }
+    for (const frame of host.streamFrames(agent)) this.receiveStream(frame);
+  }
+
+  streamSnapshot(): readonly AgentSessionEvent[] {
+    this.deltaCoalescer.flush();
+    return [...this.activeToolStates.values(), ...this.streamDeltas.values()];
   }
 
   currentStateRevision(): number {
@@ -2277,7 +2335,7 @@ class DshLocalSessionController {
   receive(event: DshSessionEvent): void {
     if (this.disposed) return;
     try {
-      if (event.type !== "assistant/chunk") this.deltaCoalescer.flush();
+      this.deltaCoalescer.flush();
       const folded = reduceDshProjectionState(
         { mode: this.mode, workState: this.workState },
         event,
@@ -2321,6 +2379,13 @@ class DshLocalSessionController {
         }
       }
 
+      if (
+        event.type === "assistant/attempt" ||
+        (event.type === "assistant/message" &&
+          (event.data as { interrupted?: boolean }).interrupted === true)
+      ) {
+        this.cancelStreamTools(event);
+      }
       const entry = this.projector.project(event);
       if (event.type === "tool/call") this.emitToolCallState(event);
       if (entry !== undefined) {
@@ -2339,13 +2404,16 @@ class DshLocalSessionController {
         const settlesEntryId =
           entry.kind === "tool"
             ? agentEntryId(`tool-${entry.callId}`)
-            : entry.kind === "message" && event.type === "assistant/message"
-              ? entry.id
+            : entry.kind === "message" &&
+                (event.type === "assistant/message" || event.type === "assistant/attempt")
+              ? this.stream === undefined
+                ? undefined
+                : agentEntryId(`attempt-${this.stream.attemptId}`)
               : undefined;
         this.emitDurable(event, entry, settlesEntryId);
+        if (event.type === "assistant/message" || event.type === "assistant/attempt")
+          this.streamDeltas.clear();
       }
-
-      if (event.type === "assistant/chunk") this.emitChunkEvents(event);
 
       const finished = runFinishForDshEvent(event);
       if (finished !== undefined) {
@@ -2506,7 +2574,7 @@ class DshLocalSessionController {
   }
 
   private emitDelta(
-    native: DshSessionEvent,
+    native: DshStreamOrigin,
     suffix: string,
     entryId: ReturnType<typeof agentEntryId>,
     part: "text" | "thinking" | "tool_input" | "tool_output",
@@ -2514,7 +2582,7 @@ class DshLocalSessionController {
     blockIndex: number,
   ): void {
     this.deltaCoalescer.push({
-      eventId: agentEventId(dshEventIdentity(native, suffix)),
+      eventId: agentEventId(emissionIdentity(native, suffix)),
       occurredAt: dshTimestamp(native.time),
       payload: { blockIndex, delta, entryId, part },
       sessionId: this.ref.sessionId,
@@ -2524,16 +2592,28 @@ class DshLocalSessionController {
 
   private publishDelta(delta: DshDeltaInput): void {
     const runtime = this.runtime;
-    if (runtime === undefined) return;
     const key = String(delta.payload.entryId);
     const chunkSeq = (this.deltaSequence.get(key) ?? 0) + 1;
     this.deltaSequence.set(key, chunkSeq);
-    runtime.publish({
+    const event: Extract<AgentSessionEvent, { type: "entry.delta" }> = {
       ...delta,
       durability: "transient",
       payload: { ...delta.payload, chunkSeq },
       type: "entry.delta",
+    };
+    const blockKey = `${key}:${delta.payload.part}:${delta.payload.blockIndex}`;
+    const previous = this.streamDeltas.get(blockKey);
+    this.streamDeltas.set(blockKey, {
+      ...event,
+      payload: {
+        ...event.payload,
+        ...(previous?.payload.blockComplete === true || event.payload.blockComplete === true
+          ? { blockComplete: true as const }
+          : {}),
+        delta: `${previous?.payload.delta ?? ""}${event.payload.delta}`,
+      },
     });
+    runtime?.publish(event);
   }
 
   private emitToolCallState(event: DshSessionEvent): void {
@@ -2564,7 +2644,7 @@ class DshLocalSessionController {
   }
 
   private emitToolState(
-    native: DshSessionEvent,
+    native: DshSessionEvent | DshStreamOrigin,
     suffix: string,
     tool: {
       readonly callId: string;
@@ -2576,15 +2656,21 @@ class DshLocalSessionController {
     },
   ): void {
     this.deltaCoalescer.flush();
-    this.runtime?.publish({
+    const event: Extract<AgentSessionEvent, { type: "tool.state.changed" }> = {
       durability: "transient",
-      eventId: agentEventId(dshEventIdentity(native, suffix)),
+      eventId: agentEventId(emissionIdentity(native, suffix)),
       occurredAt: dshTimestamp(native.time),
       payload: { tool },
       sessionId: this.ref.sessionId,
       source: this.source(native.type),
       type: "tool.state.changed",
-    });
+    };
+    if (tool.status === "pending" || tool.status === "running") {
+      this.activeToolStates.set(String(tool.entryId), event);
+    } else {
+      this.activeToolStates.delete(String(tool.entryId));
+    }
+    this.runtime?.publish(event);
   }
 
   private emitState(native: DshSessionEvent, suffix: string, patch: AgentSessionStatePatch): void {
@@ -2592,7 +2678,7 @@ class DshLocalSessionController {
     this.stateRevision += 1;
     this.runtime?.publish({
       durability: "transient",
-      eventId: agentEventId(dshEventIdentity(native, suffix)),
+      eventId: agentEventId(emissionIdentity(native, suffix)),
       occurredAt: dshTimestamp(native.time),
       payload: { patch, revision: this.stateRevision },
       sessionId: this.ref.sessionId,
@@ -2646,28 +2732,68 @@ class DshLocalSessionController {
     };
   }
 
-  private emitChunkEvents(event: DshSessionEvent): void {
-    const data = event.data;
-    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+  private cancelStreamTools(origin: DshSessionEvent | DshStreamOrigin): void {
+    for (const id of this.streamToolIds) {
+      const tool = this.overlayTools.get(id);
+      if (tool !== undefined)
+        this.emitToolState(origin, `tool-cancel-${id}`, {
+          ...tool,
+          entryId: agentEntryId(id),
+          status: "cancelled",
+        });
+      this.overlayTools.delete(id);
+    }
+    this.streamToolIds.clear();
+  }
+
+  receiveStream(frame: DshAssistantStreamFrame): void {
+    if (this.disposed || frame.revision <= this.streamRevision) return;
+    this.streamRevision = frame.revision;
+    if (frame.type === "start") {
+      this.deltaCoalescer.flush();
+      this.streamDeltas.clear();
+      this.streamToolIds.clear();
+      this.stream = { attemptId: frame.attemptId, turn: frame.turn, step: frame.step, index: 0 };
+      return;
+    }
+    const stream = this.stream;
+    // A controller attached during an attempt has no prefix. Its final durable
+    // settlement remains authoritative; never expose a misleading partial tail.
+    if (stream === undefined || stream.attemptId !== frame.attemptId) return;
+    if (frame.index !== stream.index) {
+      this.host.report(new AgentBackendError("protocol", "DSH assistant stream has a frame gap"));
+      return;
+    }
+    if (frame.type === "end") {
+      this.deltaCoalescer.flush();
+      if (frame.outcome.kind === "abandoned")
+        this.cancelStreamTools({
+          identity: `attempt-${frame.attemptId}-${frame.revision}`,
+          type: "agent/assistant-stream",
+          time: Date.parse(this.host.now()),
+        });
+      this.stream = undefined;
+      this.streamDeltas.clear();
+      return;
+    }
+    stream.index += 1;
+    const origin: DshStreamOrigin = {
+      identity: `attempt-${frame.attemptId}-${frame.revision}`,
+      time: frame.time,
+      type: "agent/assistant-stream",
+    };
+    this.emitChunkEvents(origin, frame.chunk, agentEntryId(`attempt-${frame.attemptId}`));
+  }
+
+  private emitChunkEvents(
+    event: DshStreamOrigin,
+    chunk: unknown,
+    messageId: ReturnType<typeof agentEntryId>,
+  ): void {
+    if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk)) {
       this.deltaCoalescer.flush();
       return;
     }
-    const payload = data as Record<string, unknown>;
-    const turn = payload.turn;
-    const step = payload.step;
-    const chunk = payload.chunk;
-    if (
-      !Number.isSafeInteger(turn) ||
-      !Number.isSafeInteger(step) ||
-      typeof chunk !== "object" ||
-      chunk === null ||
-      Array.isArray(chunk)
-    ) {
-      this.deltaCoalescer.flush();
-      return;
-    }
-    const turnNumber = turn as number;
-    const stepNumber = step as number;
     const chunkValue = chunk as Record<string, unknown>;
     const blockIndex =
       typeof chunkValue.index === "number" &&
@@ -2675,7 +2801,6 @@ class DshLocalSessionController {
       chunkValue.index >= 0
         ? chunkValue.index
         : undefined;
-    const messageId = `message-${turnNumber}-${stepNumber}`;
     switch (chunkValue.type) {
       case "block-start":
         this.deltaCoalescer.flush();
@@ -2713,6 +2838,7 @@ class DshLocalSessionController {
           return;
         }
         const entryId = agentEntryId(`tool-${callId}`);
+        this.streamToolIds.add(String(entryId));
         const previous = this.overlayTools.get(String(entryId));
         const name = chunkValue.name;
         if (typeof name === "string" && name.length > 0) {
