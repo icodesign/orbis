@@ -73,7 +73,8 @@ describe("OrbisDshRawEventRecorder", () => {
         kind: "header",
         recordingId: "recording-1",
         startedAt: "2026-08-29T01:02:03.000Z",
-        version: 1,
+        version: 2,
+        sessionFormatVersion: 4,
       });
       expect(records[1]).toEqual({
         capturedAt: "2026-08-29T01:02:03.001Z",

@@ -1,4 +1,4 @@
-import { Button, IconCheckOutline16 } from "@deepseek-ai/dsh-client-ui-primitives";
+import { Button, IconCheckOutlineRegular } from "@deepseek-ai/dsh-client-ui-primitives";
 import { QRCodeSVG } from "qrcode.react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -515,7 +515,7 @@ export function OrbisSettingsSection({ t }: OrbisSettingsSectionInjected) {
                 variant="outline"
                 size="sm"
                 disabled={operationDisabled}
-                icon={pairingLinkCopied ? <IconCheckOutline16 /> : undefined}
+                icon={pairingLinkCopied ? <IconCheckOutlineRegular size={16} /> : undefined}
                 onClick={() => void copyPairingLink()}
               >
                 {t(pairingLinkCopied ? "copied" : "copy")}

@@ -17,10 +17,18 @@ handshake. The host advertises the canonical v2 protocol rather than legacy
   `orbis.sessions.prompt`, `orbis.sessions.update`, and `orbis.sessions.cancel`;
 - replayable terminal `entry.appended` events with host-assigned cursors,
   transient deltas, and ordered session-state updates;
-- DSH `sessionPersistence` and the native harness runtime as catalog/transcript
-  authority, with the node state storing only host identity, cursor indexes,
+- DSH `sessionPersistence` for catalog identity and `sessionQuery.observeSession`
+  for consistent live/cold history and native projection state, with the node state storing only host identity, cursor indexes,
   and idempotency claims. There is no host transcript copy, ACK journal, or
   retention overlay.
+
+Plan, goal, todos, and inbox state use native DSH projections. The plugin keeps
+plan/todo read units registered on the host so a cold read works before a Web
+preset opens an Agent. Todo's native plugin runs with private tool and prompt
+services; preset tools and policies keep their own ownership. Orbis retains only
+its enqueue timestamps and protocol revisions. Observation
+leases are released after each read, and projection-only reads never expand the
+transcript.
 
 The initial release supports two automatically discovered connection paths:
 
@@ -65,7 +73,8 @@ pnpm --filter @orbisapp/remote-dsh exec dsh plugin --profile web add "@orbisapp/
 DSH_TELEMETRY_DISABLED=1 pnpm --filter @orbisapp/remote-dsh exec dsh web
 ```
 
-Adapter and host tests do not require the DSH SDK:
+Adapter and host production code use structural ports. Their tests use native
+DSH projection definitions so fixtures follow upstream domain behavior:
 
 ```sh
 pnpm --filter @orbisapp/remote-dsh run check:core
@@ -95,7 +104,7 @@ npm dist-tag/exact version:
 
 ```sh
 pnpm run serve:dsh --dsh local:/path/to/deepseek-harness
-pnpm run serve:dsh --dsh github:tag:dsh-v0.1.5-rc.1
+pnpm run serve:dsh --dsh github:tag:dsh-v0.2.0-rc.2
 pnpm run serve:dsh --dsh github:commit:a66e4702047846cdaa10c66c9d3df3951f5ea70d
 pnpm run serve:dsh --dsh npm:latest
 pnpm run serve:dsh --dsh-bin /path/to/dsh
@@ -142,6 +151,9 @@ through the normal DSH session log, Orbis adapter, coalescer, encrypted transpor
 UI. Replay currently accepts one native session per file and requires the recording's first native
 sequence to match a fresh session boundary, so a partial mid-session capture fails explicitly rather
 than producing a corrupt transcript. Recording and replay cannot run simultaneously.
+
+Replay requires raw recording format version 2 with Session format 4. Older raw exports are
+rejected before creating a session; native historical Session migration remains owned by DSH.
 
 Raw recordings are intentionally not redacted. They can contain prompts, model output, tool
 arguments and results, workspace paths, and provider metadata. Treat every export as sensitive test
@@ -271,10 +283,12 @@ writes, state permissions/no-secret assertions, and a full DSH Web restart. It
 never uses a fake backend or transport. Without `DEEPSEEK_API_KEY`, the
 disposable profile disables the live DeepSeek adapter and mounts DSH's official
 `@deepseek-ai/dsh-llm-replay` test adapter with a checked-in deterministic
-response. The runner asserts that exact response, non-zero usage, restart
-replay, and full history through the real DSH Agent loop. Automatic LLM title
+tool call followed by a response. It executes a real Bash `printf` command
+inside the disposable workspace with the fixture's native permission preset,
+then asserts the V4 tool result, exact response, non-zero usage, native scoped
+plan commands, live/cold projection recovery, restart replay, and full history through the real DSH Agent loop. Automatic LLM title
 generation is disabled only in this keyless lane so it cannot consume the
-single-call fixture outside the Orbis acceptance boundary.
+two-call fixture outside the Orbis acceptance boundary.
 Replay is bounded by the native DSH transcript and the persisted entry-id
 index; the host does not maintain a second event log.
 
@@ -301,7 +315,7 @@ the ambient Orbis identity environment variable. The disposable runner
 discovers the local LAN endpoint. The runner never touches
 the mobile app or its integration tests.
 
-The compatibility gate checks `dsh --version` (expected `0.1.5-rc.1`), the
+The compatibility gate checks `dsh --version` (expected `0.2.0-rc.2`), the
 launcher `--patch` flag, and Web's `--host`/`--port` flags before creating a fixture. Set
 `ORBIS_DSH_EXPECTED_VERSION` only for another explicitly reviewed DSH
 profile; an unreviewed or missing CLI is a clear skip by default and a

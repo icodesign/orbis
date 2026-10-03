@@ -7,7 +7,6 @@ import {
   createAgentDriverDescriptor,
   type AgentJsonValue,
   type AgentQueuedInput,
-  type AgentContentBlock,
   type AgentPromptContentBlock,
   type AgentPromptReferenceCompletionInput,
   type AgentPromptReferenceCompletionResult,
@@ -25,7 +24,6 @@ import {
 } from "@orbisapp/orbis-agent-backend";
 import type {
   RemoteAgentV2Backend,
-  RemoteAgentV2ContentBlock,
   RemoteAgentV2Entry,
   RemoteAgentV2ModelSelection,
   RemoteAgentV2Overlay,
@@ -443,7 +441,9 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
           ...baseEvent(this.ref, event),
           channel: "state",
           patch,
-          revision: this.backend.nextStateRevision(this.ref.sessionId),
+          // The controller owns revisions for both events and snapshots.
+          // Events and sync responses must describe the same revision.
+          revision: event.payload.revision,
           type: "session.state.changed",
         };
       }
@@ -657,7 +657,6 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
   private readonly overlays = new Map<string, RemoteAgentV2Overlay>();
   private readonly pendingInputs = new Map<string, readonly AgentQueuedInput[]>();
   private readonly runtimes = new Map<string, DshV2Runtime>();
-  private readonly stateRevisions = new Map<string, number>();
   private readonly sessionCwds = new Map<string, string | null>();
 
   constructor(
@@ -677,7 +676,6 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     const nativeRuntime = await this.native.connectRuntime(ref);
     this.pendingInputs.set(ref.sessionId, nativeRuntime.pendingInputs());
     const projection = await this.native.readSession(ref);
-    this.setStateRevision(ref.sessionId, await this.native.readStateRevision(ref));
     const runtime = new DshV2Runtime(
       this,
       nativeRuntime,
@@ -833,7 +831,6 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     this.runtimes.get(ref.sessionId)?.flushPendingDeltas();
     const projection = await this.native.readSession(ref);
     const stateRevision = await this.native.readStateRevision(ref);
-    this.setStateRevision(ref.sessionId, stateRevision);
     const cwd = await this.cwdFor(ref);
     return v2Snapshot(ref, projection, this.overlays.get(ref.sessionId), stateRevision, {
       cwd,
@@ -851,21 +848,11 @@ export class DshRemoteV2Backend implements RemoteAgentV2Backend {
     if (this.runtimes.get(sessionId) === runtime) this.runtimes.delete(sessionId);
   }
 
-  nextStateRevision(sessionId: AgentSessionRef["sessionId"]): number {
-    const revision = (this.stateRevisions.get(sessionId) ?? 0) + 1;
-    this.stateRevisions.set(sessionId, revision);
-    return revision;
-  }
-
   updatePendingInputs(
     sessionId: AgentSessionRef["sessionId"],
     pendingInputs: readonly AgentQueuedInput[],
   ): void {
     this.pendingInputs.set(sessionId, pendingInputs);
-  }
-
-  private setStateRevision(sessionId: AgentSessionRef["sessionId"], revision: number): void {
-    this.stateRevisions.set(sessionId, Math.max(this.stateRevisions.get(sessionId) ?? 0, revision));
   }
 
   private async cwdFor(ref: AgentSessionRef): Promise<string | null> {

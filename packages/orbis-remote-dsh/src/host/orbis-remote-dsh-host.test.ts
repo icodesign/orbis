@@ -29,6 +29,7 @@ import type {
   DshSessionHeader,
   DshUserMessage,
 } from "../adapter";
+import { nativeWorkStateValues } from "../testkit/native-projections";
 import { OrbisRemoteDshHost } from "./orbis-remote-dsh-host";
 
 const peer: RemoteHostPeer = {
@@ -236,14 +237,25 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
           nativeInboxListeners.set(event, listeners);
           return () => listeners.delete(inboxListener);
         },
-        sessionPersistence: {
+        sessionReader: {
+          projections: async (id) => {
+            const next = selectedModels.get(String(id)) ?? {
+              model: "test-model",
+              provider: "test-provider",
+            };
+            return { modelSelection: { lastUsed: next, next } };
+          },
           inspect: async (id) => {
             if (String(id) === "legacy") {
               throw new Error("A catalog request must not inspect this historic transcript");
             }
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.snapshotEvents(), meta: session.header };
+            return {
+              events: session.snapshotEvents(),
+              meta: session.header,
+              projections: nativeWorkStateValues(session.snapshotEvents()),
+            };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -774,17 +786,28 @@ test("delivers DSH v2 live entries through the attached host transport", async (
           nativeListeners.add(sessionListener);
           return () => nativeListeners.delete(sessionListener);
         }) as DshContext["on"],
-        sessionPersistence: {
+        sessionReader: {
+          projections: async () => ({
+            modelSelection: {
+              lastUsed: { model: "test-model", provider: "test-provider" },
+              next: { model: "test-model", provider: "test-provider" },
+            },
+          }),
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.snapshotEvents(), meta: session.header };
+            return {
+              events: session.snapshotEvents(),
+              meta: session.header,
+              projections: nativeWorkStateValues(session.snapshotEvents()),
+            };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
         sessionProjections: {
-          snapshot: () => ({
+          snapshot: (session) => ({
             values: {
+              ...nativeWorkStateValues(session.snapshotEvents()),
               modelSelection: {
                 lastUsed: { model: "test-model", provider: "test-provider" },
                 next: { model: "test-model", provider: "test-provider" },
@@ -951,6 +974,12 @@ test("delivers DSH v2 live entries through the attached host transport", async (
     // Keep the session live while reading this snapshot: an intentional once
     // sync removes the last subscriber and delegates pending interactions.
     const snapshot = await client.sync({ mode: "live", ref: created.ref });
+    // State events must use the controller revision returned by sync and update.
+    const questionState = deliveries.find(
+      ({ event }) =>
+        event.type === "session.state.changed" && event.patch.pendingQuestions?.length === 1,
+    );
+    expect(questionState?.event).toMatchObject({ revision: snapshot.state.revision });
     expect(snapshot).toMatchObject({
       state: {
         mode: "plan",
@@ -1032,11 +1061,21 @@ test("pushes a catalog row created outside the host to a listening client", asyn
           nativeListeners.add(sessionListener);
           return () => nativeListeners.delete(sessionListener);
         },
-        sessionPersistence: {
+        sessionReader: {
+          projections: async () => ({
+            modelSelection: {
+              lastUsed: { model: "test-model", provider: "test-provider" },
+              next: { model: "test-model", provider: "test-provider" },
+            },
+          }),
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.snapshotEvents(), meta: session.header };
+            return {
+              events: session.snapshotEvents(),
+              meta: session.header,
+              projections: nativeWorkStateValues(session.snapshotEvents()),
+            };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
@@ -1216,17 +1255,28 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
           nativeListeners.add(sessionListener);
           return () => nativeListeners.delete(sessionListener);
         },
-        sessionPersistence: {
+        sessionReader: {
+          projections: async () => ({
+            modelSelection: {
+              lastUsed: { model: "test-model", provider: "test-provider" },
+              next: { model: "test-model", provider: "test-provider" },
+            },
+          }),
           inspect: async (id) => {
             const session = sessions.get(String(id));
             if (session === undefined) throw new Error("session not found");
-            return { events: session.snapshotEvents(), meta: session.header };
+            return {
+              events: session.snapshotEvents(),
+              meta: session.header,
+              projections: nativeWorkStateValues(session.snapshotEvents()),
+            };
           },
           list: async () => [...sessions.values()].map((session) => session.header),
         },
         sessionProjections: {
-          snapshot: () => ({
+          snapshot: (session) => ({
             values: {
+              ...nativeWorkStateValues(session.snapshotEvents()),
               modelSelection: {
                 lastUsed: { model: "test-model", provider: "test-provider" },
                 next: { model: "test-model", provider: "test-provider" },

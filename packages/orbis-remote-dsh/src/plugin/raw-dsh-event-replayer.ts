@@ -12,6 +12,7 @@ const MAX_REPLAY_LINE_BYTES = 16 * 1024 * 1024;
 const SURFACE_EVENT_TYPES = new Set([
   "assistant/message",
   "system/message",
+  "developer/message",
   "tool/result",
   "user/message",
 ]);
@@ -245,9 +246,10 @@ async function parseRecording(input: AsyncIterable<Uint8Array>): Promise<ParsedR
       if (
         candidate.kind !== "header" ||
         candidate.format !== "orbis-dsh-raw-events" ||
-        candidate.version !== 1
+        candidate.version !== 2 ||
+        candidate.sessionFormatVersion !== 4
       ) {
-        throw new Error("The selected file is not an Orbis raw DSH event recording");
+        throw new Error("Replay requires an Orbis V4 DSH event recording (format version 2)");
       }
       recordingId = requiredString(candidate, "recordingId", "header");
       return;
@@ -468,6 +470,15 @@ function mappedEventData(
     return event.data;
   }
   const data = event.data as Readonly<Record<string, unknown>>;
+  if (event.type === "developer/message" && data.headerSeq !== undefined) {
+    if (!Number.isSafeInteger(data.headerSeq) || (data.headerSeq as number) < 0) {
+      throw new Error("The developer message has an invalid request header reference");
+    }
+    return {
+      ...data,
+      headerSeq: mappedSequence(data.headerSeq as number, sequences, "developer request header"),
+    };
+  }
   if (event.type === "session/title" || event.type === "session/title-llm-request") {
     return {
       ...data,

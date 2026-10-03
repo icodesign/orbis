@@ -32,7 +32,12 @@ import {
   type AgentUsage,
 } from "@orbisapp/orbis-agent-backend";
 
-import type { DshSessionEvent, DshSessionInspection } from "./dsh-types";
+import type {
+  DshSessionEvent,
+  DshSessionInspection,
+  DshSessionProjectionValues,
+  DshModelTarget,
+} from "./dsh-types";
 
 type JsonRecord = Readonly<Record<string, unknown>>;
 
@@ -288,8 +293,6 @@ function contextProvenance(source: JsonRecord | undefined): {
     // the producer far better than the plugin that assembled them.
     case "workspace-instructions":
       return { label: producerName(source, "changes", "path") ?? kind, origin: "inject" };
-    case "plugin":
-      return { label: optionalString(source, "plugin") ?? kind, origin: "inject" };
     default:
       return { label: kind, origin: "inject" };
   }
@@ -329,6 +332,42 @@ function projectUserMessage(
     kind: "context",
     ...(provenance.label === undefined ? {} : { label: provenance.label }),
     origin: provenance.origin,
+  };
+}
+
+/** Dynamic tool changes are model context; retain the native blocks for driver-aware clients. */
+function projectDeveloperMessage(event: DshSessionEvent): AgentContextEntry {
+  const data = record(event.data, "developer message");
+  const message = record(data.message, "developer message payload");
+  if (message.role !== "developer" || !Array.isArray(message.content)) {
+    throw new AgentBackendError("protocol", "DSH developer message is invalid");
+  }
+  const content = message.content.map((raw): AgentContentBlock => {
+    const block = record(raw, "developer content block");
+    if (block.type !== "tool-addition" && block.type !== "tool-removal") {
+      throw new AgentBackendError("protocol", "DSH developer tool change is invalid");
+    }
+    const name = requiredString(block, "toolName", "developer tool name");
+    return {
+      type: "text",
+      text: `${block.type === "tool-addition" ? "Added" : "Removed"} tool: ${name}`,
+    };
+  });
+  const source = messageSource(message);
+  const meta = dshJson({
+    ...(source === undefined ? {} : { dsh: source }),
+    dshDeveloper: data,
+  });
+  return {
+    content,
+    createdAt: dshTimestamp(event.time),
+    cursor: agentDeliveryCursor(0),
+    id: dshEntryId(event),
+    kind: "context",
+    label: "Tools",
+    origin: "inject",
+    parentId: null,
+    ...(meta === undefined ? {} : { _meta: meta }),
   };
 }
 
@@ -417,18 +456,16 @@ function projectToolResult(
   const message = record(data.message, "tool result message");
   const source = record(message.source, "tool result source");
   const callId = requiredString(source, "callId", "tool result call id");
-  const content = message.content;
-  if (!Array.isArray(content) || content.length !== 1) {
-    throw new AgentBackendError("protocol", "DSH tool result content is invalid");
-  }
-  const toolResult = record(content[0], "tool result block");
-  if (toolResult.type !== "tool-result" || toolResult.toolCallId !== callId) {
+  if (message.role !== "tool" || message.toolCallId !== callId || source.kind !== "tool") {
     throw new AgentBackendError("protocol", "DSH tool result is not paired with its call");
   }
+  if (!Array.isArray(message.content)) {
+    throw new AgentBackendError("protocol", "DSH tool result content is invalid");
+  }
   const call = toolCalls.get(callId);
-  const output = dshJson(toolResult.content);
-  const contentBlocks = toolResultContentBlocks(toolResult.content);
-  const isError = toolResult.isError === true || data.error !== undefined;
+  const output = dshJson(message.content);
+  const contentBlocks = toolResultContentBlocks(message.content);
+  const isError = message.isError === true;
   return {
     callId,
     ...(call?.input === undefined ? {} : { input: call.input }),
@@ -519,6 +556,9 @@ export class DshSessionEntryProjector {
       case "system/message":
         entry = projectSystemMessage(event);
         break;
+      case "developer/message":
+        entry = projectDeveloperMessage(event);
+        break;
       case "assistant/attempt":
         entry = projectAssistantAttempt(event);
         break;
@@ -541,6 +581,20 @@ export class DshSessionEntryProjector {
     }
     return scopedEntry;
   }
+}
+
+export function modelSelectionFromTarget(target: DshModelTarget): AgentModelSelection {
+  const provider = target.provider.trim();
+  const modelId = target.model.trim();
+  if (!provider || !modelId) {
+    throw new AgentBackendError("protocol", "DSH returned an invalid model selection");
+  }
+  const thinkingLevel = target.reasoningEffort?.trim();
+  return {
+    modelId,
+    provider,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
+  };
 }
 
 function modelFromRequestHeader(event: DshSessionEvent): AgentModelSelection | undefined {
@@ -574,10 +628,10 @@ function metadataForInspection(inspection: DshSessionInspection): AgentSessionMe
   if (!Number.isFinite(inspection.meta.createdAt)) {
     throw new AgentBackendError("protocol", "DSH session creation timestamp is invalid");
   }
-  let model: AgentModelSelection | undefined;
+  const target = inspection.projections.modelSelection?.next;
+  const model = target == null ? undefined : modelSelectionFromTarget(target);
   let title: string | undefined;
   for (const event of inspection.events) {
-    model = modelFromRequestHeader(event) ?? model;
     title = titleForDshEvent(event) ?? title;
   }
   const updatedAt = inspection.events.at(-1)?.time ?? inspection.meta.createdAt;
@@ -599,108 +653,27 @@ function protocolStateError(message: string, cause?: unknown): AgentBackendError
   return new AgentBackendError("protocol", message);
 }
 
-function goalFromDshChange(data: JsonRecord): AgentWorkState["goal"] {
-  if (data.kind !== "goal/change" || data.version !== 1) {
-    throw new AgentBackendError("protocol", "DSH goal change is invalid");
-  }
-  const operation = data.operation;
-  if (operation === "clear") {
-    const cleared = record(data.cleared, "goal clear tombstone");
-    if (
-      typeof cleared.id !== "string" ||
-      !cleared.id.trim() ||
-      !Number.isSafeInteger(cleared.revision) ||
-      (cleared.revision as number) < 1 ||
-      !Number.isSafeInteger(data.clearedAt) ||
-      (data.clearedAt as number) < 0
-    ) {
-      throw new AgentBackendError("protocol", "DSH goal clear tombstone is invalid");
-    }
-    return null;
-  }
-  if (
-    operation !== "create" &&
-    operation !== "edit" &&
-    operation !== "pause" &&
-    operation !== "resume" &&
-    operation !== "complete" &&
-    operation !== "block"
-  ) {
-    throw new AgentBackendError("protocol", "DSH goal change operation is invalid");
-  }
-  const nativeGoal = record(data.goal, "goal change goal");
-  if (
-    !Number.isSafeInteger(data.roundsStarted) ||
-    (data.roundsStarted as number) < 0 ||
-    !Number.isSafeInteger(data.createdAt) ||
-    (data.createdAt as number) < 0 ||
-    !Number.isSafeInteger(data.updatedAt) ||
-    (data.updatedAt as number) < 0
-  ) {
-    throw new AgentBackendError("protocol", "DSH goal change counters are invalid");
-  }
-  const blocked = nativeGoal.blockedReason;
-  const goal = {
-    ...(blocked === undefined ? {} : { blockedReason: blocked }),
-    createdAt: dshTimestamp(data.createdAt as number, "goal created timestamp"),
-    id: nativeGoal.id,
-    maxGoalRounds: nativeGoal.maxGoalRounds,
-    objective: nativeGoal.objective,
-    phase: nativeGoal.phase,
-    revision: nativeGoal.revision,
-    roundsStarted: data.roundsStarted,
-    updatedAt: dshTimestamp(data.updatedAt as number, "goal updated timestamp"),
-  };
+/** Converts native wire values; DSH owns all log folding and domain validation. */
+export function dshProjectionState(values: DshSessionProjectionValues): DshNativeProjectionState {
   try {
-    return validateAgentWorkState({ goal, todos: [] }).goal;
-  } catch (error) {
-    throw protocolStateError("DSH goal change snapshot is invalid", error);
-  }
-}
-
-export function reduceDshProjectionState(
-  state: DshNativeProjectionState,
-  event: DshSessionEvent,
-): DshNativeProjectionState {
-  try {
-    if (event.type === "plan/mode") {
-      const data = record(event.data, "plan mode");
-      if (typeof data.active !== "boolean") {
-        throw new AgentBackendError("protocol", "DSH plan mode state is invalid");
-      }
-      return { ...state, mode: data.active ? "plan" : null };
-    }
-    if (event.type === "goal/change") {
-      return {
-        ...state,
-        workState: {
-          goal: goalFromDshChange(record(event.data, "goal change")),
-          todos: state.workState.todos,
-        },
+    let goal: unknown = null;
+    if (values.goal !== undefined && values.goal !== null) {
+      const projection = record(values.goal, "goal projection");
+      const nativeGoal = record(projection.goal, "goal projection snapshot");
+      goal = {
+        ...nativeGoal,
+        createdAt: dshTimestamp(projection.createdAt as number, "goal created timestamp"),
+        updatedAt: dshTimestamp(projection.updatedAt as number, "goal updated timestamp"),
+        roundsStarted: projection.roundsStarted,
       };
     }
-    if (event.type === "todo/write") {
-      const data = record(event.data, "todo write");
-      const workState = validateAgentWorkState({ goal: state.workState.goal, todos: data.todos });
-      return { ...state, workState };
-    }
-    if (event.type === "turn/start") {
-      return { ...state, workState: { ...state.workState, todos: [] } };
-    }
-    return state;
+    return {
+      mode: values.plan?.active === true ? "plan" : null,
+      workState: validateAgentWorkState({ goal, todos: values.todos ?? [] }),
+    };
   } catch (error) {
-    throw protocolStateError(`DSH ${event.type} state is invalid`, error);
+    throw protocolStateError("DSH work-state projection is invalid", error);
   }
-}
-
-function foldDshProjectionState(events: readonly DshSessionEvent[]): DshNativeProjectionState {
-  let state: DshNativeProjectionState = { mode: null, workState: { goal: null, todos: [] } };
-  for (const event of events) state = reduceDshProjectionState(state, event);
-  return state;
-}
-
-export function dshProjectionState(events: readonly DshSessionEvent[]): DshNativeProjectionState {
-  return foldDshProjectionState(events);
 }
 
 function turnNumber(event: DshSessionEvent, label: string): number {
@@ -731,6 +704,7 @@ function outcomeForTurnEnd(event: DshSessionEvent): {
         outcome: "failed",
       };
     case "blocked":
+    case "forked":
     case "completed":
     case "max-tokens":
       return { outcome: "completed" };
@@ -820,7 +794,7 @@ export function readDshSessionProjection(
   const projector = new DshSessionEntryProjector();
   const snapshot = createAgentSessionProjection(ref, metadataForInspection(inspection));
   const run = runStateForInspection(inspection.events);
-  const state = foldDshProjectionState(inspection.events);
+  const state = dshProjectionState(inspection.projections);
   return {
     ...snapshot,
     ...(run.activeRun === undefined ? {} : { activeRun: run.activeRun }),

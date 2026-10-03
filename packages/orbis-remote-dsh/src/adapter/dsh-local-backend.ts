@@ -39,7 +39,6 @@ import {
   type AgentQuestionRequest,
   type AgentQuestionResponseInput,
   type AgentQuestionResponseResult,
-  type AgentWorkState,
   type AgentJsonValue,
   type AgentWorkspaceDescriptor,
   type AgentWorkspaceBrowseInput,
@@ -81,7 +80,7 @@ import {
   dshRunId,
   dshTimestamp,
   dshProjectionState,
-  reduceDshProjectionState,
+  modelSelectionFromTarget,
   metadataPatchForDshEvent,
   nextDshRunId,
   readDshSessionProjection,
@@ -99,7 +98,6 @@ import type {
   DshImageAttachmentReference,
   DshContext,
   DshInteractionAvailability,
-  DshModelTarget,
   DshQuestionAnswer,
   DshQuestionRequest,
   DshSession,
@@ -471,6 +469,7 @@ interface DshLocalControllerHost {
   createUserMessage(content: readonly DshUserMessageContent[]): DshUserMessage;
   detachController(controller: DshLocalSessionController): void;
   inspect(ref: AgentSessionRef): Promise<DshSessionInspection>;
+  projectionState(session: DshSession): ReturnType<typeof dshProjectionState>;
   readAttachment(
     ref: AgentSessionRef,
     attachmentId: string,
@@ -496,8 +495,6 @@ interface DshLocalControllerHost {
     active: boolean,
   ): Promise<"committed" | "queued" | "cancelled" | "noop">;
 }
-
-type DshInboxTarget = "next-step" | "next-turn";
 
 function encodeBase64(value: Uint8Array): string {
   let binary = "";
@@ -600,20 +597,6 @@ function optionalModel(value: AgentModelSelection | undefined): AgentModelSelect
   return value;
 }
 
-function modelSelectionFromTarget(target: DshModelTarget): AgentModelSelection {
-  const provider = target.provider.trim();
-  const modelId = target.model.trim();
-  if (!provider || !modelId) {
-    throw new AgentBackendError("protocol", "DSH returned an invalid model selection");
-  }
-  const thinkingLevel = target.reasoningEffort?.trim();
-  return {
-    modelId,
-    provider,
-    ...(thinkingLevel ? { thinkingLevel } : {}),
-  };
-}
-
 function sameModelSelection(
   left: AgentModelSelection | undefined,
   right: AgentModelSelection | undefined,
@@ -670,10 +653,6 @@ function dshWorkspaceId(value: string): DshWorkspaceId {
 
 function sameNativeSession(session: DshSession, nativeSessionId: string): boolean {
   return String(session.id) === nativeSessionId && String(session.header.id) === nativeSessionId;
-}
-
-function inspectionFromLiveSession(session: DshSession): DshSessionInspection {
-  return { events: session.snapshotEvents(), meta: session.header };
 }
 
 function summaryFromCatalogEntry(
@@ -978,7 +957,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       const workspace = this.requireWorkspace(workspaceRef);
       const agent = await this.openDshSession(nativeSessionId, { workspaceId: workspace.id });
       this.sessionWorkspaceRefs.set(nativeSessionId, workspaceRef);
-      const controller = this.installController(ref, agent);
+      const controller = await this.installController(ref, agent);
       if (model === undefined) await controller.refreshModelSelection();
       else await controller.initializeModelSelection(model);
       const projection = await this.inspectProjection(ref);
@@ -1308,11 +1287,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
   async inspect(ref: AgentSessionRef): Promise<DshSessionInspection> {
     this.assertOpen();
     const nativeSessionId = ref.nativeSessionId;
-    const live = this.options.context.agents.get(this.options.toSessionId(nativeSessionId));
-    if (live !== undefined && sameNativeSession(live.session, nativeSessionId)) {
-      return inspectionFromLiveSession(live.session);
-    }
-    return await this.options.context.sessionPersistence.inspect(
+    return await this.options.context.sessionReader.inspect(
       this.options.toSessionId(nativeSessionId),
     );
   }
@@ -1384,12 +1359,15 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return await provider.set(agent, active);
   }
 
+  projectionState(session: DshSession): ReturnType<typeof dshProjectionState> {
+    return dshProjectionState(this.options.context.sessionProjections.snapshot(session).values);
+  }
+
   async readCurrentModel(ref: AgentSessionRef): Promise<AgentModelSelection | undefined> {
-    const agent = this.options.context.agents.get(this.options.toSessionId(ref.nativeSessionId));
-    if (agent === undefined || !sameNativeSession(agent.session, ref.nativeSessionId))
-      return undefined;
-    const current = this.options.context.sessionProjections.snapshot(agent.session).values
-      .modelSelection?.next;
+    const values = await this.options.context.sessionReader.projections(
+      this.options.toSessionId(ref.nativeSessionId),
+    );
+    const current = values.modelSelection?.next;
     return current === null || current === undefined
       ? undefined
       : modelSelectionFromTarget(current);
@@ -1428,8 +1406,9 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       typeof options.context?.sessionController?.create !== "function" ||
       typeof options.context?.sessionController?.modelCatalog !== "function" ||
       typeof options.context?.sessionController?.selectModel !== "function" ||
-      typeof options.context?.sessionPersistence?.inspect !== "function" ||
-      typeof options.context?.sessionPersistence?.list !== "function" ||
+      typeof options.context?.sessionReader?.inspect !== "function" ||
+      typeof options.context?.sessionReader?.projections !== "function" ||
+      typeof options.context?.sessionReader?.list !== "function" ||
       typeof options.context?.sessionProjections?.snapshot !== "function" ||
       typeof options.context?.workspace?.get !== "function"
     ) {
@@ -1551,7 +1530,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     ) {
       throw new AgentBackendError("conflict", "A DSH session with this id already exists");
     }
-    const headers = await this.options.context.sessionPersistence.list();
+    const headers = await this.options.context.sessionReader.list();
     if (headers.some((header) => String(header.id) === ref.nativeSessionId)) {
       throw new AgentBackendError("conflict", "A DSH session with this id already exists");
     }
@@ -1605,7 +1584,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       if (!sameNativeSession(existing.session, ref.nativeSessionId)) {
         throw new AgentBackendError("protocol", "DSH resolved another live session");
       }
-      const controller = this.installController(ref, existing);
+      const controller = await this.installController(ref, existing);
       await controller.refreshModelSelection();
       return controller;
     }
@@ -1613,7 +1592,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       ref.nativeSessionId,
       inspection.meta.cwd === undefined ? {} : { cwd: inspection.meta.cwd },
     );
-    const controller = this.installController(ref, agent);
+    const controller = await this.installController(ref, agent);
     await controller.refreshModelSelection();
     return controller;
   }
@@ -1642,7 +1621,10 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
     return agent;
   }
 
-  private installController(ref: AgentSessionRef, agent: DshAgent): DshLocalSessionController {
+  private async installController(
+    ref: AgentSessionRef,
+    agent: DshAgent,
+  ): Promise<DshLocalSessionController> {
     const key = agentSessionLocatorKey(ref);
     const existing = this.controllers.get(key);
     if (existing !== undefined) {
@@ -1663,6 +1645,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
       this,
       ref,
       agent,
+      await this.inspect(ref),
       permissionBridge,
       questionBridge,
     );
@@ -1742,6 +1725,7 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         throw new AgentBackendError("invalid_argument", "The requested DSH operation is invalid");
       }
       if (
+        code === "SESSION_QUERY_SESSION_NOT_FOUND" ||
         code === "session/not-found" ||
         code === "session/queue-item-not-found" ||
         code === "subagent/not-found" ||
@@ -1755,6 +1739,9 @@ export class DshLocalBackend implements AgentBackend, DshLocalControllerHost {
         code === "session/conflict"
       ) {
         throw new AgentBackendError("conflict", "The DSH session is busy or conflicted");
+      }
+      if (code === "SESSION_QUERY_CORRUPT_SESSION" || code === "SESSION_QUERY_SOURCE_CONFLICT") {
+        throw new AgentBackendError("protocol", "The DSH session cannot be projected");
       }
       throw publicUnavailable();
     }
@@ -2017,15 +2004,9 @@ class DshLocalSessionController {
   >();
   private stream: { attemptId: string; turn: number; step: number; index: number } | undefined;
   private readonly deltaCoalescer: DshDeltaCoalescer;
-  private readonly pendingInboxIds: Record<DshInboxTarget, string[]> = {
-    "next-step": [],
-    "next-turn": [],
-  };
   private readonly pendingInputTimes = new Map<string, AgentTimestamp>();
   private readonly permissionBridge: DshPermissionInteraction | undefined;
   private readonly questionBridge: DshQuestionBridge | undefined;
-  private mode: "plan" | null;
-  private workState: AgentWorkState;
   private readonly overlayTools = new Map<
     string,
     { readonly callId: string; readonly name: string }
@@ -2035,6 +2016,7 @@ class DshLocalSessionController {
     private readonly host: DshLocalControllerHost,
     ref: AgentSessionRef,
     private readonly agent: DshAgent,
+    inspection: DshSessionInspection,
     permissionBridge?: DshPermissionInteraction,
     questionBridge?: DshQuestionBridge,
   ) {
@@ -2044,17 +2026,12 @@ class DshLocalSessionController {
     this.deltaCoalescer = new DshDeltaCoalescer({
       emit: (delta) => this.publishDelta(delta),
     });
-    // Snapshot once and reuse: snapshotEvents() materializes the whole log,
-    // so calling it per-field here would allocate it four times over.
-    const events = agent.session.snapshotEvents();
-    const folded = dshProjectionState(events);
-    this.mode = folded.mode;
-    this.workState = folded.workState;
-    this.activeRunId = activeRunId({ events, meta: agent.session.header });
+    const events = inspection.events;
+    this.activeRunId = activeRunId(inspection);
     this.stateRevision = stateRevisionForEvents(events);
     // Seed stateful tool-call correlation without replaying historical events.
     for (const event of events) {
-      this.recordInboxSplice(event);
+      this.recordInputTimes(event);
       const entry = this.projector.project(event);
       if (event.type === "tool/call") this.emitToolCallState(event);
       if (entry?.kind === "tool") {
@@ -2197,25 +2174,29 @@ class DshLocalSessionController {
         ...projection,
         ...permissions,
         ...questions,
-        mode: this.mode,
-        workState: this.workState,
       };
     }
     return {
       ...projection,
       ...permissions,
       ...questions,
-      mode: this.mode,
       metadata: {
         ...projection.metadata,
         model: this.selectedModel,
         updatedAt: this.modelSelectedAt ?? projection.metadata.updatedAt,
       },
-      workState: this.workState,
     };
   }
 
   pendingInputs(): readonly AgentQueuedInput[] {
+    const ids = new Set(
+      [...this.agent.inbox.nextStep, ...this.agent.inbox.nextTurn].map((message) =>
+        String(message.id).trim(),
+      ),
+    );
+    for (const id of this.pendingInputTimes.keys()) {
+      if (!ids.has(id)) this.pendingInputTimes.delete(id);
+    }
     const queuedInputFor = (
       message: DshUserMessage,
       kind: AgentQueuedInput["kind"],
@@ -2336,19 +2317,15 @@ class DshLocalSessionController {
     if (this.disposed) return;
     try {
       this.deltaCoalescer.flush();
-      const folded = reduceDshProjectionState(
-        { mode: this.mode, workState: this.workState },
-        event,
-      );
-      this.recordInboxSplice(event);
+      const state = this.host.projectionState(this.agent.session);
+      this.recordInputTimes(event);
       const started = runStartForDshEvent(event);
       if (started !== undefined) {
         this.activeRunId = started.id;
         this.activeRunStartedAt = started.startedAt;
-        if (event.type === "turn/start") this.workState = folded.workState;
         this.emitState(event, "run-start", {
           activeRun: started,
-          ...(event.type === "turn/start" ? { workState: this.workState } : {}),
+          ...(event.type === "turn/start" ? { workState: state.workState } : {}),
           runState: "running",
         });
       }
@@ -2364,12 +2341,10 @@ class DshLocalSessionController {
       }
 
       if (event.type === "plan/mode") {
-        this.mode = folded.mode;
-        this.emitState(event, "plan-mode", { mode: this.mode });
+        this.emitState(event, "plan-mode", { mode: state.mode });
       }
       if (event.type === "goal/change" || event.type === "todo/write") {
-        this.workState = folded.workState;
-        this.emitState(event, "work-state", { workState: this.workState });
+        this.emitState(event, "work-state", { workState: state.workState });
       }
 
       if (isDshPermissionConfigEvent(event)) {
@@ -2495,56 +2470,12 @@ class DshLocalSessionController {
     if (this.disposed) throw new AgentBackendError("closed", "The DSH session runtime is closed");
   }
 
-  private recordInboxSplice(event: DshSessionEvent): void {
+  /** DSH owns inbox membership; Orbis supplies the protocol's enqueue timestamp. */
+  private recordInputTimes(event: DshSessionEvent): void {
     if (event.type !== "agent/inbox/spliced") return;
-    if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data)) {
-      throw new AgentBackendError("protocol", "DSH inbox splice is invalid");
-    }
-    const data = event.data as Record<string, unknown>;
-    const target = data.target;
-    if (target !== "next-step" && target !== "next-turn") {
-      throw new AgentBackendError("protocol", "DSH inbox target is invalid");
-    }
-    const rawStart = data.start;
-    const rawRemovedCount = data.removedCount ?? 0;
-    const inserted = data.inserted;
-    if (
-      typeof rawStart !== "number" ||
-      !Number.isSafeInteger(rawStart) ||
-      rawStart < 0 ||
-      typeof rawRemovedCount !== "number" ||
-      !Number.isSafeInteger(rawRemovedCount) ||
-      rawRemovedCount < 0 ||
-      !Array.isArray(inserted)
-    ) {
-      throw new AgentBackendError("protocol", "DSH inbox splice coordinates are invalid");
-    }
-    const start = rawStart;
-    const removedCount = rawRemovedCount;
-    const pendingIds = this.pendingInboxIds[target];
-    if (start > pendingIds.length || start + removedCount > pendingIds.length) {
-      throw new AgentBackendError("protocol", "DSH inbox splice exceeds its pending state");
-    }
-    const insertedIds = inserted.map((message) => {
-      if (typeof message !== "object" || message === null || Array.isArray(message)) {
-        throw new AgentBackendError("protocol", "DSH inbox message is invalid");
-      }
-      const id = String((message as Record<string, unknown>).id).trim();
-      if (!id) throw new AgentBackendError("protocol", "DSH inbox message id is invalid");
-      return id;
-    });
-    if (new Set(insertedIds).size !== insertedIds.length) {
-      throw new AgentBackendError("protocol", "DSH inbox splice contains duplicate messages");
-    }
-    const removedIds = new Set(pendingIds.slice(start, start + removedCount));
-    if (insertedIds.some((id) => this.pendingInputTimes.has(id) && !removedIds.has(id))) {
-      throw new AgentBackendError("protocol", "DSH inbox message identity is duplicated");
-    }
+    const inserted = (event.data as { readonly inserted: readonly DshUserMessage[] }).inserted;
     const queuedAt = dshTimestamp(event.time, "DSH inbox timestamp");
-    const removed = pendingIds.splice(start, removedCount);
-    for (const id of removed) this.pendingInputTimes.delete(id);
-    pendingIds.splice(start, 0, ...insertedIds);
-    for (const id of insertedIds) this.pendingInputTimes.set(id, queuedAt);
+    for (const message of inserted) this.pendingInputTimes.set(String(message.id).trim(), queuedAt);
   }
 
   private createUserMessage(content: readonly DshUserMessageContent[]): DshUserMessage {
