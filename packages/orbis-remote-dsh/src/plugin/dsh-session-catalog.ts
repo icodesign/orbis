@@ -1,14 +1,10 @@
-/** The stable metadata surface exposed by DSH's durable session listing. */
-export interface DshCatalogHeader {
-  readonly createdAt: number;
-  readonly id: unknown;
-  /** Whether the session has a fork-inherited event prefix. */
-  readonly isSeeded: boolean;
-  readonly origin?: "subagent";
-  readonly parentSession?: unknown;
-}
+import type { SessionHeader } from "@deepseek-ai/dsh-session";
+import type { SessionProjectionCache } from "@deepseek-ai/dsh-session-projection-cache";
 
-/** The V3 persistence observation returned by DSH's metadata-only list API. */
+/** The official header is the cache's lifecycle identity witness. */
+export type DshCatalogHeader = SessionHeader;
+
+/** The persistence observation returned by DSH's metadata-only list API. */
 export interface DshCatalogSnapshot {
   readonly eventCount?: number;
   readonly header: DshCatalogHeader;
@@ -34,18 +30,8 @@ export interface DshSessionCatalogEntry {
  * DSH Web's zero-I/O projection cache. Its title value may lag a newest event,
  * but it is bound to the listed header lifecycle and is never invented.
  */
-export interface DshSessionProjectionCache {
-  cachedSnapshot(
-    header: DshCatalogHeader,
-    inheritedEventCount: number,
-    keys?: readonly string[],
-  ): DshProjectionSnapshot | undefined;
-  /** Read a predecessor title when the current checkpoint uses an older schema. */
-  cachedPredecessorTitle?(
-    header: DshCatalogHeader,
-    inheritedEventCount: number,
-  ): DshProjectionSnapshot | undefined;
-}
+export type DshSessionProjectionCache = Pick<SessionProjectionCache, "cachedSnapshot"> &
+  Partial<Pick<SessionProjectionCache, "cachedPredecessorTitle">>;
 
 interface DshProjectionSnapshot {
   readonly values: Readonly<Record<string, unknown>>;
@@ -82,15 +68,9 @@ function projectionForListing(
   projectionCache: DshSessionProjectionCache,
   header: DshCatalogHeader,
 ): DshProjectionSnapshot | undefined {
-  // A cached record is bound to the session's exact inherited prefix length,
-  // which a header-only listing does not carry. DSH Web skips the cache for a
-  // seeded header rather than guessing a cut; Orbis makes the same call, so an
-  // unseeded row stays a hit and a forked row degrades to no title.
-  if (header.isSeeded) return undefined;
   try {
     return (
-      projectionCache.cachedSnapshot(header, 0) ??
-      projectionCache.cachedPredecessorTitle?.(header, 0)
+      projectionCache.cachedSnapshot(header) ?? projectionCache.cachedPredecessorTitle?.(header)
     );
   } catch {
     // The cache is an acceleration layer. A corrupted or unavailable cache

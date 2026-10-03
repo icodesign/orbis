@@ -8,6 +8,7 @@ import {
 } from "@orbisapp/orbis-agent-backend";
 import { describe, expect, test } from "vitest";
 
+import { nativeWorkStateValues } from "../testkit/native-projections";
 import { DshLocalBackend } from "./dsh-local-backend";
 import {
   lastDshSessionEvent,
@@ -331,11 +332,20 @@ class TestDsh {
         this.inboxListeners.set(event, listeners);
         return () => listeners.delete(inboxListener);
       }) as DshContext["on"],
-      sessionPersistence: {
+      sessionReader: {
+        projections: async (id) => {
+          const session = this.sessions.get(String(id));
+          if (session === undefined) throw new Error("missing session");
+          return this.context.sessionProjections.snapshot(session).values;
+        },
         inspect: async (id) => {
           const session = this.sessions.get(String(id));
           if (session === undefined) throw new Error("missing session");
-          return { events: session.events, meta: session.header };
+          return {
+            events: session.events,
+            meta: session.header,
+            projections: this.context.sessionProjections.snapshot(session).values,
+          };
         },
         list: async () =>
           [...this.materialized]
@@ -345,15 +355,34 @@ class TestDsh {
       sessionProjections: {
         snapshot: (session) => {
           const agent = this.liveAgents.get(String(session.id));
+          const header = (session as TestSession).events.findLast(
+            (event) => event.type === "request/header",
+          );
+          const lastUsed =
+            header === undefined
+              ? null
+              : (
+                  header.data as {
+                    header: {
+                      config: { model: string; provider: string; reasoningEffort?: string };
+                    };
+                  }
+                ).header.config;
           const next =
             this.selectedModels.get(String(session.id)) ??
+            lastUsed ??
             (agent === undefined
               ? null
               : {
                   model: agent.options.model ?? "test-model",
                   provider: agent.options.provider ?? "test-provider",
                 });
-          return { values: { modelSelection: { lastUsed: next, next } } };
+          return {
+            values: {
+              ...nativeWorkStateValues((session as TestSession).events),
+              modelSelection: { lastUsed: next, next },
+            },
+          };
         },
       },
       workspace: {
@@ -529,7 +558,7 @@ function createBackend(
     listSessionCatalog:
       listSessionCatalog ??
       (async () =>
-        (await testDsh.context.sessionPersistence.list()).map((header) => ({
+        (await testDsh.context.sessionReader.list()).map((header) => ({
           createdAt: header.createdAt,
           id: header.id,
           updatedAt: header.createdAt,
@@ -1247,13 +1276,8 @@ describe("DSH local backend", () => {
       }),
       event("tool/result", 5, {
         message: {
-          content: [
-            {
-              content: [{ text: "contents", type: "text" }],
-              toolCallId: "tool-1",
-              type: "tool-result",
-            },
-          ],
+          content: [{ text: "contents", type: "text" }],
+          toolCallId: "tool-1",
           role: "tool",
           source: { callId: "tool-1", kind: "tool" },
         },
@@ -1538,13 +1562,8 @@ describe("DSH local backend", () => {
       "created-session",
       event("tool/result", 3, {
         message: {
-          content: [
-            {
-              content: [{ text: "contents", type: "text" }],
-              toolCallId: "tool-1",
-              type: "tool-result",
-            },
-          ],
+          content: [{ text: "contents", type: "text" }],
+          toolCallId: "tool-1",
           role: "tool",
           source: { callId: "tool-1", kind: "tool" },
         },
@@ -2245,7 +2264,86 @@ describe("DSH local backend", () => {
     await backend.close();
   });
 
-  test("folds DSH mode, goal tombstones, and whole todo snapshots", async () => {
+  test("uses the same native read cut for cold and attached sessions without direct snapshots", async () => {
+    const testDsh = new TestDsh();
+    const native = testDsh.addPersistedSession("projection-cut", []);
+    const backend = createBackend(testDsh);
+    const ref = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "projection-cut",
+      sessionId: "projection-cut",
+    });
+    const goal = {
+      goal: {
+        id: "native-goal",
+        revision: 1,
+        objective: "Use native state",
+        phase: "active",
+        maxGoalRounds: 3,
+      },
+      createdAt: EPOCH,
+      updatedAt: EPOCH + 1000,
+      roundsStarted: 0,
+    };
+    testDsh.context.sessionProjections.snapshot = () => ({
+      values: {
+        plan: { active: true, pending: false },
+        goal,
+        todos: [{ content: "Native checklist", status: "in_progress" }],
+      },
+    });
+    native.snapshotEvents = () => {
+      throw new Error("backend must observe the native read cut");
+    };
+    const expected = {
+      mode: "plan",
+      workState: {
+        goal: {
+          ...goal.goal,
+          createdAt: FIXED_TIME,
+          updatedAt: agentTimestamp(new Date(EPOCH + 1000).toISOString()),
+          roundsStarted: 0,
+        },
+        todos: [{ content: "Native checklist", status: "in_progress" }],
+      },
+    };
+    await expect(backend.readSession(ref)).resolves.toMatchObject(expected);
+    const runtime = await backend.connectRuntime(ref);
+    await expect(backend.readSession(ref)).resolves.toMatchObject(expected);
+    testDsh.context.sessionProjections.snapshot = () => ({
+      values: { plan: { active: false, pending: false }, goal: null, todos: null },
+    });
+    await expect(backend.readSession(ref)).resolves.toMatchObject({
+      mode: null,
+      workState: { goal: null, todos: [] },
+    });
+    await runtime.close();
+    await backend.close();
+  });
+
+  test.each([
+    ["SESSION_QUERY_SESSION_NOT_FOUND", "not_found"],
+    ["SESSION_QUERY_CORRUPT_SESSION", "protocol"],
+    ["SESSION_QUERY_SOURCE_CONFLICT", "protocol"],
+    ["SESSION_QUERY_PERSISTENCE_FAILED", "unavailable"],
+  ] as const)("maps native observation failure %s to %s", async (code, expected) => {
+    const testDsh = new TestDsh();
+    const backend = createBackend(testDsh);
+    const ref = createAgentSessionRef({
+      backendId: "local",
+      driverId: "dsh",
+      nativeSessionId: "failed-observation",
+      sessionId: "failed-observation",
+    });
+    testDsh.context.sessionReader.inspect = async () => {
+      throw Object.assign(new Error("native observation failed"), { code });
+    };
+    await expect(backend.readSession(ref)).rejects.toMatchObject({ code: expected });
+    await backend.close();
+  });
+
+  test("reads native mode, goal tombstones, and whole todo snapshots", async () => {
     const testDsh = new TestDsh();
     testDsh.addPersistedSession("work-state", [
       event("plan/mode", 0, { active: true }),
@@ -2285,7 +2383,7 @@ describe("DSH local backend", () => {
         },
         kind: "goal/change",
         operation: "complete",
-        roundsStarted: 1,
+        roundsStarted: 0,
         updatedAt: EPOCH + 1_000,
         version: 1,
       }),
@@ -2432,7 +2530,7 @@ describe("DSH local backend", () => {
         content: [{ text: "Current runtime context.", type: "text" }],
         id: "context-2",
         role: "user",
-        source: { kind: "plugin", plugin: "@deepseek-ai/dsh-system-prompt" },
+        source: { kind: "@deepseek-ai/dsh-system-prompt" },
       }),
       // A producer this adapter has never seen still identifies itself by kind.
       event("user/message", 3, {

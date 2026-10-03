@@ -71,6 +71,7 @@ export function lastDshSessionEvent(session: DshSession): DshSessionEvent | unde
 export interface DshSessionInspection {
   readonly events: readonly DshSessionEvent[];
   readonly meta: DshSessionHeader;
+  readonly projections: DshSessionProjectionValues;
 }
 
 /** Optional host-owned bridge for DSH's session permission preset service. */
@@ -137,9 +138,10 @@ export interface DshSessionSubagentProvider {
   ): Promise<readonly DshSessionSubagentEntry[]>;
 }
 
-/** DSH's durable session catalog and append-only history seam. */
-export interface DshSessionPersistence {
+/** Read cuts come from DSH session-query; catalog identity comes from persistence. */
+export interface DshSessionReader {
   inspect(id: unknown, signal?: AbortSignal): Promise<DshSessionInspection>;
+  projections(id: unknown, signal?: AbortSignal): Promise<DshSessionProjectionValues>;
   list(signal?: AbortSignal): Promise<readonly DshSessionHeader[]>;
 }
 
@@ -293,15 +295,21 @@ export interface DshSessionController {
   }>;
 }
 
-/** Exact projection cut installed by DSH's alpha Session Controller. */
+/** Native domain values; optional keys mean the owning plugin is not installed. */
+export interface DshSessionProjectionValues {
+  readonly plan?: { readonly active: boolean; readonly pending: boolean };
+  readonly goal?: unknown;
+  readonly todos?: unknown;
+  readonly modelSelection?: {
+    readonly lastUsed: DshModelTarget | null;
+    readonly next: DshModelTarget | null;
+  };
+}
+
+/** Exact projection cut installed by DSH. */
 export interface DshSessionProjectionRegistry {
   snapshot(session: DshSession): {
-    readonly values: {
-      readonly modelSelection?: {
-        readonly lastUsed: DshModelTarget | null;
-        readonly next: DshModelTarget | null;
-      };
-    };
+    readonly values: DshSessionProjectionValues;
   };
 }
 
@@ -390,7 +398,7 @@ export interface DshContext {
   readonly agents: DshAgentRegistry;
   readonly planMode?: DshSessionModeProvider;
   readonly sessionController: DshSessionController;
-  readonly sessionPersistence: DshSessionPersistence;
+  readonly sessionReader: DshSessionReader;
   readonly sessionProjections: DshSessionProjectionRegistry;
   readonly workspace: DshWorkspaceRegistry;
   on(

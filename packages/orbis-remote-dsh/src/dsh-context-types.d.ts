@@ -1,4 +1,5 @@
 import type { DirectoryPicker } from "@deepseek-ai/dsh-host-directory-picker";
+import type { SessionProjectionCache } from "@deepseek-ai/dsh-session-projection-cache";
 import type { WorkspaceRegistry } from "@deepseek-ai/dsh-workspace";
 
 /**
@@ -17,7 +18,7 @@ declare module "@deepseek-ai/cordis" {
       host: string;
       register(route: OrbisHttpRoute): () => void;
     };
-    sessionProjectionCache: unknown;
+    sessionProjectionCache: SessionProjectionCache;
     workspaceRegistry: WorkspaceRegistry;
   }
 }

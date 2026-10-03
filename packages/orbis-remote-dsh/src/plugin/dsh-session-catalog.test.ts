@@ -1,3 +1,4 @@
+import { SessionId } from "@deepseek-ai/dsh-session";
 import { describe, expect, test } from "vitest";
 
 import {
@@ -12,7 +13,7 @@ function header(
   createdAt: number,
   extra: Partial<DshCatalogHeader> = {},
 ): DshCatalogHeader {
-  return { createdAt, id, isSeeded: false, ...extra };
+  return { version: 4, createdAt, id: SessionId(id), isSeeded: false, ...extra };
 }
 
 function snapshot(headerValue: DshCatalogHeader) {
@@ -21,7 +22,7 @@ function snapshot(headerValue: DshCatalogHeader) {
 
 describe("DSH session catalog", () => {
   test("reads title and list metadata from the zero-I/O projection cache", async () => {
-    const cacheCalls: Array<{ id: unknown; inheritedEventCount: number }> = [];
+    const cacheCalls: Array<{ id: unknown; keys?: readonly string[] }> = [];
     const inspectCalls: unknown[] = [];
     const persistence: DshCatalogPersistence & { inspect(): Promise<never> } = {
       inspect: async () => {
@@ -31,16 +32,18 @@ describe("DSH session catalog", () => {
       list: async () => [snapshot(header("named", 10)), snapshot(header("untitled", 20))],
     };
     const projectionCache: DshSessionProjectionCache = {
-      cachedSnapshot: (listedHeader, inheritedEventCount) => {
-        cacheCalls.push({ id: listedHeader.id, inheritedEventCount });
+      cachedSnapshot: (listedHeader, keys) => {
+        if (keys !== undefined) new Set(keys);
+        cacheCalls.push({ id: listedHeader.id, keys });
         return listedHeader.id === "named"
           ? {
+              asOfSeq: -1,
               values: {
                 sessionListMetadata: { blank: false, lastPromptAt: 100 },
                 title: "  Existing DSH title  ",
               },
             }
-          : { values: { sessionListMetadata: { blank: true, lastPromptAt: null } } };
+          : { asOfSeq: -1, values: { sessionListMetadata: { blank: true, lastPromptAt: null } } };
       },
     };
 
@@ -49,8 +52,8 @@ describe("DSH session catalog", () => {
       { createdAt: 20, id: "untitled", updatedAt: 20 },
     ]);
     expect(cacheCalls).toEqual([
-      { id: "named", inheritedEventCount: 0 },
-      { id: "untitled", inheritedEventCount: 0 },
+      { id: "named", keys: undefined },
+      { id: "untitled", keys: undefined },
     ]);
     expect(inspectCalls).toHaveLength(0);
   });
@@ -74,14 +77,14 @@ describe("DSH session catalog", () => {
     const cachedIds: unknown[] = [];
     const persistence: DshCatalogPersistence = {
       list: async () => [
-        snapshot(header("child", 10, { origin: "subagent", parentSession: "root" })),
-        snapshot(header("fork", 20, { parentSession: "root" })),
+        snapshot(header("child", 10, { origin: "subagent", parentSession: SessionId("root") })),
+        snapshot(header("fork", 20, { parentSession: SessionId("root") })),
       ],
     };
     const projectionCache: DshSessionProjectionCache = {
       cachedSnapshot: (listedHeader) => {
         cachedIds.push(listedHeader.id);
-        return { values: { title: "Fork title" } };
+        return { asOfSeq: -1, values: { title: "Fork title" } };
       },
     };
 
@@ -89,7 +92,7 @@ describe("DSH session catalog", () => {
       {
         createdAt: 20,
         id: "fork",
-        parentSession: "root",
+        parentSession: SessionId("root"),
         title: "Fork title",
         updatedAt: 20,
       },
@@ -97,9 +100,9 @@ describe("DSH session catalog", () => {
     expect(cachedIds).toEqual(["fork"]);
   });
 
-  test("skips the cache for seeded sessions whose inherited cut is absent from list metadata", async () => {
+  test("reads seeded session titles using the cache lifecycle identity", async () => {
     const cachedIds: unknown[] = [];
-    const seeded = header("seeded", 450, { isSeeded: true, parentSession: "root" });
+    const seeded = header("seeded", 450, { isSeeded: true, parentSession: SessionId("root") });
     const persistence: DshCatalogPersistence = {
       list: async () => [snapshot(seeded)],
     };
@@ -107,18 +110,25 @@ describe("DSH session catalog", () => {
       cachedSnapshot: (listedHeader) => {
         cachedIds.push(listedHeader.id);
         return {
+          asOfSeq: -1,
           values: {
             sessionListMetadata: { blank: false, lastPromptAt: 900 },
-            title: "wrong",
+            title: "Fork title",
           },
         };
       },
     };
 
     await expect(listDshSessionCatalog(persistence, projectionCache)).resolves.toEqual([
-      { createdAt: 450, id: "seeded", parentSession: "root", updatedAt: 450 },
+      {
+        createdAt: 450,
+        id: "seeded",
+        parentSession: SessionId("root"),
+        title: "Fork title",
+        updatedAt: 900,
+      },
     ]);
-    expect(cachedIds).toEqual([]);
+    expect(cachedIds).toEqual(["seeded"]);
   });
 
   test("uses the official predecessor title hint when the current cache row is unavailable", async () => {
@@ -127,7 +137,10 @@ describe("DSH session catalog", () => {
     };
     const projectionCache: DshSessionProjectionCache = {
       cachedSnapshot: () => undefined,
-      cachedPredecessorTitle: () => ({ values: { title: "Cached predecessor title" } }),
+      cachedPredecessorTitle: () => ({
+        asOfSeq: -1,
+        values: { title: "Cached predecessor title" },
+      }),
     };
 
     await expect(listDshSessionCatalog(persistence, projectionCache)).resolves.toEqual([

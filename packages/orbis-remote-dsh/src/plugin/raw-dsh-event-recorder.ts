@@ -37,7 +37,8 @@ type RecordingHeader = {
   readonly kind: "header";
   readonly recordingId: string;
   readonly startedAt: string;
-  readonly version: 1;
+  readonly version: 2;
+  readonly sessionFormatVersion: 4;
 };
 
 type RecordingFooter = {
@@ -156,7 +157,8 @@ export class OrbisDshRawEventRecorder {
         kind: "header",
         recordingId,
         startedAt,
-        version: 1,
+        version: 2,
+        sessionFormatVersion: 4,
       };
       const headerLine = lineFor(header);
       await writeAll(file, headerLine);

@@ -23,6 +23,10 @@ const hostExternals = [
   "@deepseek-ai/dsh-session",
   "@deepseek-ai/dsh-scope",
   "@deepseek-ai/dsh-session-persistence",
+  "@deepseek-ai/dsh-plan-mode",
+  "@deepseek-ai/dsh-system-prompt",
+  "@deepseek-ai/dsh-tool-todo",
+  "@deepseek-ai/dsh-tools",
   "@deepseek-ai/dsh-workspace",
 ];
 

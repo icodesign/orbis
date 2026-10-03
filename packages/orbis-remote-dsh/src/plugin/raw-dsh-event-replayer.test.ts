@@ -50,7 +50,8 @@ function recording(
       kind: "header",
       recordingId,
       startedAt: "2026-08-30T00:59:59.000Z",
-      version: 1,
+      version: 2,
+      sessionFormatVersion: 4,
     }),
     ...capturedAt.map((time, index) =>
       recordingLine({
@@ -106,7 +107,8 @@ function recordingFromEvents(
       kind: "header",
       recordingId,
       startedAt: "2026-08-30T00:59:59.000Z",
-      version: 1,
+      version: 2,
+      sessionFormatVersion: 4,
     }),
     ...events.map((event, index) =>
       recordingLine({
@@ -189,6 +191,55 @@ function replayInput(bytes: Buffer, filename = "capture.jsonl") {
 }
 
 describe("raw DSH event replay", () => {
+  it.each([{ version: 1 }, { version: 2, sessionFormatVersion: 3 }, { version: 2 }])(
+    "refuses unreviewed raw recording formats before session creation: %j",
+    async (format) => {
+      const createSession = vi.fn(async () => target().target);
+      const replayer = new OrbisDshRawEventReplayer({ createSession });
+      const header = recordingLine({
+        kind: "header",
+        format: "orbis-dsh-raw-events",
+        recordingId: "old-recording",
+        startedAt: "2026-08-30T00:59:59.000Z",
+        ...format,
+      });
+      await expect(replayer.start(replayInput(Buffer.from(header)))).rejects.toThrow(
+        "Replay requires an Orbis V4 DSH event recording",
+      );
+      expect(createSession).not.toHaveBeenCalled();
+    },
+  );
+  it("replays V4 developer changes and rebases their defining request header", async () => {
+    const destination = target({ appendSeqs: [10, 11], initialSeq: 2 });
+    const replayer = new OrbisDshRawEventReplayer(
+      { createSession: async () => destination.target },
+      { sleep: async () => undefined },
+    );
+    const events = [
+      { seq: 2, type: "request/header", data: { header: { tools: [{ name: "read" }] } } },
+      {
+        seq: 3,
+        type: "developer/message",
+        surfaceOp: "append",
+        data: {
+          headerSeq: 2,
+          turn: 1,
+          step: 1,
+          message: { role: "developer", content: [{ type: "tool-addition", toolName: "read" }] },
+        },
+      },
+    ] satisfies readonly OrbisDshRawEventReplayEvent[];
+    await replayer.start(replayInput(recordingFromEvents(events)));
+    await expect(replayer.settled()).resolves.toMatchObject({
+      state: "completed",
+      replayedEventCount: 2,
+    });
+    expect(destination.events[1]).toMatchObject({
+      type: "developer/message",
+      surfaceOp: "append",
+      data: { headerSeq: 10 },
+    });
+  });
   it("creates a session, waits for its live app subscriber, and replays in order", async () => {
     const destination = target({ subscribed: false });
     const replayer = new OrbisDshRawEventReplayer(
@@ -265,7 +316,7 @@ describe("raw DSH event replay", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  it("requires V3 surface replacement coordinates", async () => {
+  it("requires V4 surface replacement coordinates", async () => {
     const createSession = vi.fn(async () => target().target);
     const replayer = new OrbisDshRawEventReplayer({ createSession });
     const event = {
@@ -286,7 +337,7 @@ describe("raw DSH event replay", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  it("rejects assistant provenance because V3 embeds its source stream", async () => {
+  it("rejects assistant provenance because V4 embeds its source stream", async () => {
     const createSession = vi.fn(async () => target().target);
     const replayer = new OrbisDshRawEventReplayer({ createSession });
     const event = {
@@ -303,7 +354,7 @@ describe("raw DSH event replay", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  it("maps V3 source references and replacement coordinates into target sequences", async () => {
+  it("maps V4 source references and replacement coordinates into target sequences", async () => {
     const destination = target({ appendSeqs: [10, 11, 12], initialSeq: 2 });
     const replayer = new OrbisDshRawEventReplayer(
       { createSession: async () => destination.target },
@@ -355,7 +406,7 @@ describe("raw DSH event replay", () => {
   });
 
   it.skipIf(rawDevelopmentFixtureIsPointer())(
-    "rejects the pre-V3 fixture instead of silently converting assistant provenance",
+    "rejects older recordings before creating a V4 session",
     async () => {
       const createSession = vi.fn(async () => target().target);
       const replayer = new OrbisDshRawEventReplayer({ createSession });
@@ -363,7 +414,7 @@ describe("raw DSH event replay", () => {
 
       await expect(
         replayer.start({ data: fixture, filename: "dsh-run-stream-events.jsonl" }),
-      ).rejects.toThrow("assistant/message cannot carry sourceEventSeqs");
+      ).rejects.toThrow("Replay requires an Orbis V4 DSH event recording");
       expect(createSession).not.toHaveBeenCalled();
     },
     15_000,

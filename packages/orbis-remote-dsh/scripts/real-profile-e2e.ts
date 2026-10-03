@@ -89,19 +89,26 @@ function secureRandom(length) {
 
 function runCommand(command, args, options = {}) {
   return new Promise((resolveCommand, rejectCommand) => {
+    const label = `${command} ${args.join(" ")}`;
+    log(`running ${label}`);
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
+    const progress = setInterval(() => log(`still running ${label}`), 10_000);
     const capture = (chunk) => {
       output = `${output}${chunk.toString()}`.slice(-16_000);
     };
     child.stdout?.on("data", capture);
     child.stderr?.on("data", capture);
-    child.once("error", rejectCommand);
+    child.once("error", (error) => {
+      clearInterval(progress);
+      rejectCommand(error);
+    });
     child.once("close", (code, signal) => {
+      clearInterval(progress);
       if (code === 0) {
         resolveCommand({ code: 0, output });
         return;
@@ -737,7 +744,15 @@ async function main() {
             delivery.event.patch.model.modelId === modelSelection.modelId,
         ),
       "real DSH model selection event",
-    );
+    ).catch((error) => {
+      const states = deliveries
+        .filter(({ event }) => event.type === "session.state.changed")
+        .map(({ event }) => ({ revision: event.revision, model: event.patch.model }));
+      throw new Error(
+        `${error.message}; expected ${JSON.stringify({ revision: modelUpdate.revision, model: modelSelection })}; received ${JSON.stringify(states)}`,
+        { cause: error },
+      );
+    });
     const dshModelState = await readDshModelSelection(
       webSession,
       dshVersion,
@@ -749,13 +764,32 @@ async function main() {
     ) {
       throw new Error("Orbis and DSH Web did not observe the same selected model");
     }
+    if (providerMode === "replay") {
+      // Only this disposable Session runs a known printf command; exercise the
+      // native tool executor without requiring a human approval in the fixture.
+      await agentStep("fixture permission preset", () =>
+        activeAgent.update({
+          ref: session.ref,
+          patch: { configOptions: { permissions: "danger-full-access" } },
+          idempotencyKey: `orbis-real-e2e-permissions-${randomUUID()}`,
+        }),
+      );
+    }
     // An omitted delivery starts a new DSH run. `follow_up` and `steer` are
     // queued input modes for an already active run, so using either here would
     // correctly be rejected as a session-state conflict.
     const firstReceipt = await agentStep("initial new-run prompt", () =>
       activeAgent.prompt({
         ref: session.ref,
-        content: [{ text: "Reply with a short acknowledgement. Do not call tools.", type: "text" }],
+        content: [
+          {
+            text:
+              providerMode === "replay"
+                ? "Run the printf fixture, then acknowledge it."
+                : "Reply with a short acknowledgement. Do not call tools.",
+            type: "text",
+          },
+        ],
         idempotencyKey: `orbis-real-e2e-first-${randomUUID()}`,
       }),
     );
@@ -775,8 +809,21 @@ async function main() {
         ({ event }) => event.type === "entry.delta" && event.part === "text",
       );
       if (streamed.map(({ event }) => event.delta).join("") !== KEYLESS_REPLAY_TEXT) {
-        throw new Error("V3 live assistant frames did not reach Orbis exactly once");
+        throw new Error("V4 live assistant frames did not reach Orbis exactly once");
       }
+      const tool = deliveries.find(
+        ({ event }) => event.type === "entry.appended" && event.entry.kind === "tool",
+      )?.event.entry;
+      if (
+        tool?.name !== "bash" ||
+        tool.status !== "success" ||
+        !tool.content.some(
+          (block) => block.type === "text" && block.text.includes("ORBIS_V4_TOOL_OK"),
+        )
+      ) {
+        throw new Error("real V4 tool execution/result did not reach the Orbis transcript");
+      }
+      log("PASS: real bash execution and V4 tool result projection");
       const settlementIndex = deliveries.findIndex(
         ({ event }) =>
           event.type === "entry.appended" && event.settlesEntryId === streamed[0]?.event.entryId,
@@ -786,7 +833,7 @@ async function main() {
         streamed.some((delivery) => deliveries.indexOf(delivery) >= settlementIndex)
       ) {
         throw new Error(
-          `V3 assistant settlement did not follow and settle the streamed attempt: ${JSON.stringify(deliveries.map(({ event }) => ({ type: event.type, entryId: event.entryId ?? event.entry?.id, settlesEntryId: event.settlesEntryId, nativeType: event.source?.nativeType })))}`,
+          `V4 assistant settlement did not follow and settle the streamed attempt: ${JSON.stringify(deliveries.map(({ event }) => ({ type: event.type, entryId: event.entryId ?? event.entry?.id, settlesEntryId: event.settlesEntryId, nativeType: event.source?.nativeType })))}`,
         );
       }
     }
@@ -817,7 +864,13 @@ async function main() {
     if (replay.entries.length === 0) throw new Error("replay returned no durable entries");
     const assistantWithUsage = replay.entries.find(
       (entry) =>
-        entry.kind === "message" && entry.role === "assistant" && entry.usage !== undefined,
+        entry.kind === "message" &&
+        entry.role === "assistant" &&
+        entry.usage !== undefined &&
+        (providerMode !== "replay" ||
+          entry.content.some(
+            (block) => block.type === "text" && block.text === KEYLESS_REPLAY_TEXT,
+          )),
     );
     if (
       assistantWithUsage?.usage === undefined ||
@@ -843,6 +896,20 @@ async function main() {
       throw new Error("replay tail did not match its through cursor");
     }
     const committedEntryId = committedEntry.id;
+
+    const planCommand = await agentStep("native scoped plan command before restart", () =>
+      dshRpc(webSession, "commands/execute", {
+        args: { agentId: session.ref.nativeSessionId, line: "/plan", submittedAttachments: [] },
+      }),
+    );
+    if (planCommand?.result?.kind !== "success")
+      throw new Error("native plan command was not accepted");
+    const planSnapshot = await agentStep("live native plan projection", () =>
+      replayAgent.sync({ mode: "once", ref: session.ref }),
+    );
+    if (!planSnapshot.baseline || planSnapshot.state.mode !== "plan") {
+      throw new Error("live native plan projection did not reach the Orbis snapshot");
+    }
 
     // Restart the real DSH Web process. The native transcript and the small
     // cursor index are independent, so the durable suffix remains
@@ -883,6 +950,20 @@ async function main() {
     ) {
       throw new Error("session catalog did not survive the real DSH Web restart");
     }
+    // A history read before live sync must use the prepared native observation,
+    // without opening an Agent just to recover its domain projections.
+    const coldSnapshot = await agentStep("cold native projections after restart", () =>
+      restartedAgent.sync({ mode: "once", ref: session.ref }),
+    );
+    if (
+      !coldSnapshot.baseline ||
+      coldSnapshot.state.mode !== "plan" ||
+      coldSnapshot.state.model?.modelId !== modelSelection.modelId ||
+      coldSnapshot.state.model.provider !== modelSelection.provider
+    ) {
+      throw new Error("cold native projection state did not survive the DSH restart");
+    }
+
     // `sessions.list` only reads the catalog. A live `sessions.sync` installs
     // the delivery subscription atomically, so resume the last committed cursor
     // before starting the next run or its durable events would have no client
@@ -898,6 +979,13 @@ async function main() {
     if (restartSync.baseline || Number(restartSync.throughCursor) !== committedCursor) {
       throw new Error("post-restart sync did not establish the committed live baseline");
     }
+    const planOff = await agentStep("leave native scoped plan mode after restart", () =>
+      dshRpc(restartedBaseUrl, "commands/execute", {
+        args: { agentId: session.ref.nativeSessionId, line: "/plan off", submittedAttachments: [] },
+      }),
+    );
+    if (planOff?.result?.kind !== "success")
+      throw new Error("native plan exit command was not accepted");
     const secondReceipt = await agentStep("post-restart new-run prompt", () =>
       restartedAgent.prompt({
         ref: session.ref,

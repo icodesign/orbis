@@ -22,7 +22,7 @@ import { scopeTarget } from "@deepseek-ai/dsh-scope";
 import { SessionId } from "@deepseek-ai/dsh-session";
 import type { Session } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-persistence";
-import type {} from "@deepseek-ai/dsh-session-projection";
+import type { ProjectionSnapshot } from "@deepseek-ai/dsh-session-projection";
 import type {} from "@deepseek-ai/dsh-session-projection-cache";
 import type {} from "@deepseek-ai/dsh-session-query";
 import type {} from "@deepseek-ai/dsh-session-reference";
@@ -40,6 +40,7 @@ import type {
   DshEncodedImageAttachment,
   DshImageAttachmentReference,
   DshSession,
+  DshSessionProjectionValues,
   DshSessionAttachmentPort,
   DshSessionModeProvider,
   DshSessionPermissionProvider,
@@ -49,8 +50,9 @@ import { OrbisRemoteDshHost, type OrbisRemoteDshHostDshOptions } from "../host";
 import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
 import { OrbisDshDiagnosticsExporter } from "./diagnostics-export";
 import { createDshPromptReferenceProvider } from "./dsh-prompt-reference-provider";
-import { listDshSessionCatalog, type DshSessionProjectionCache } from "./dsh-session-catalog";
-import { createDshSessionPersistence } from "./dsh-session-persistence";
+import { registerDshReadProjections } from "./dsh-read-projections";
+import { listDshSessionCatalog } from "./dsh-session-catalog";
+import { createDshSessionReader } from "./dsh-session-reader";
 import { OrbisDshFileLogger, orbisDshErrorFields } from "./file-logger";
 import { OrbisDshHostService, type OrbisDshCredentials } from "./host-service";
 import { createOrbisHttpRoute } from "./http-api";
@@ -325,16 +327,14 @@ function dshPlanMode(context: Context): Context["planMode"] | undefined {
   return context.get("planMode");
 }
 
-/**
- * `createOrbisDshContext` casts DSH's Cordis services into the Orbis ports, so
- * nothing there stops compiling when DSH drops a member the adapter reads.
- * DSH 0.1.2-alpha.4 removed `Session.events` and only a runtime failure
- * reported it. This declaration re-arms the compiler on the one port whose
- * shape tracks a live DSH class, so the next such removal breaks the build.
- */
+/** Keep the native classes and projection values checked against the structural ports. */
 type SatisfiesPort<Port, Actual extends Port> = Actual;
 export type DshSessionPortConformance = SatisfiesPort<DshSession, Session>;
 export type DshAgentPortConformance = SatisfiesPort<DshAgent, Agent>;
+export type DshProjectionPortConformance = SatisfiesPort<
+  DshSessionProjectionValues,
+  ProjectionSnapshot["values"]
+>;
 export type DshStreamPortConformance = SatisfiesPort<DshAssistantStreamFrame, AssistantStreamFrame>;
 
 function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["context"] {
@@ -345,7 +345,7 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
     on: context.on.bind(context),
     sessionController: (context as unknown as { readonly sessionController: unknown })
       .sessionController,
-    sessionPersistence: createDshSessionPersistence(context.sessionPersistence),
+    sessionReader: createDshSessionReader(context.sessionQuery, context.sessionPersistence),
     sessionProjections: (context as unknown as { readonly sessionProjections: unknown })
       .sessionProjections,
     // The generic Orbis backend keeps its own narrow DSH port named
@@ -475,6 +475,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
     ...(config?.workspaceRoots?.length ? { roots: config.workspaceRoots } : {}),
     workspace: context.workspaceRegistry,
   });
+  await registerDshReadProjections(context);
   const dshContext = createOrbisDshContext(context);
   let activeRemoteHost: OrbisRemoteDshHost | undefined;
   const logger = new OrbisDshFileLogger(logPath);
@@ -489,10 +490,7 @@ export async function apply(context: Context, config?: Config): Promise<void> {
             createUserMessage: createDshUserMessage,
             driver: { version: ORBIS_DSH_DRIVER_VERSION },
             listSessionCatalog: () =>
-              listDshSessionCatalog(
-                context.sessionPersistence,
-                context.sessionProjectionCache as DshSessionProjectionCache,
-              ),
+              listDshSessionCatalog(context.sessionPersistence, context.sessionProjectionCache),
             permissionPresets: createDshPermissionProvider(context),
             planMode: createDshPlanModeProvider(context),
             attachments: createDshAttachmentPort(context),
