@@ -26,7 +26,7 @@ Plan, goal, todos, and inbox state use native DSH projections. The plugin keeps
 plan/todo read units registered on the host so a cold read works before a Web
 preset opens an Agent. Todo's native plugin runs with private tool and prompt
 services; preset tools and policies keep their own ownership. Orbis retains only
-its enqueue timestamps and protocol revisions. Observation
+its enqueue timestamps, `next_run` queue, and protocol revisions. Observation
 leases are released after each read, and projection-only reads never expand the
 transcript.
 

@@ -173,13 +173,20 @@ function contentBlocks(value: unknown, toolCalls: Map<string, DshToolCall>): Age
   const blocks: AgentContentBlock[] = [];
   for (const rawBlock of value) {
     const block = record(rawBlock, "message content block");
-    switch (requiredString(block, "type", "message content block type")) {
+    const type = requiredString(block, "type", "message content block type");
+    switch (type) {
       case "text":
-        blocks.push({ text: requiredString(block, "text", "text block"), type: "text" });
+      case "reasoning": {
+        // DSH keeps empty blocks so `replayState.blocks` stays index-aligned; a
+        // reasoning block can carry only a provider signature. Neither has a
+        // canonical presentation.
+        const text = block.text;
+        if (typeof text !== "string") {
+          throw new AgentBackendError("protocol", `DSH ${type} block is invalid`);
+        }
+        if (text.length > 0) blocks.push({ text, type: type === "text" ? "text" : "thinking" });
         break;
-      case "reasoning":
-        blocks.push({ text: requiredString(block, "text", "reasoning block"), type: "thinking" });
-        break;
+      }
       case "image":
         blocks.push(imageReference(block));
         break;

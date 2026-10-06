@@ -45,6 +45,7 @@ import {
 } from "./v2-constants";
 import {
   v2CancelInputSchema,
+  v2WithdrawQueuedInputInputSchema,
   v2ContentBlockSchema,
   v2PromptContentBlockSchema,
   v2CreateInputSchema,
@@ -76,6 +77,7 @@ import {
 import type {
   RemoteAgentV2Backend,
   RemoteAgentV2CancelInput,
+  RemoteAgentV2WithdrawQueuedInputInput,
   RemoteAgentV2ContentBlock,
   RemoteAgentV2DeviceDescriptor,
   RemoteAgentV2Entry,
@@ -622,6 +624,15 @@ function parseCancelInput(value: JsonValue): RemoteAgentV2CancelInput {
   };
 }
 
+function parseWithdrawQueuedInputInput(value: JsonValue): RemoteAgentV2WithdrawQueuedInputInput {
+  const input = parseSchema(v2WithdrawQueuedInputInputSchema, value, "Withdraw queued input input");
+  return {
+    idempotencyKey: input.idempotencyKey,
+    queuedInputId: input.queuedInputId,
+    ref: parseRef(input.ref),
+  };
+}
+
 function parseUpdateInput(value: JsonValue): RemoteAgentV2UpdateInput {
   const input = parseSchema(v2UpdateInputSchema, value, "Session update input");
   return {
@@ -1085,6 +1096,8 @@ export class OrbisRemoteAgentV2Host {
           return await this.prompt(parsePromptInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsCancel:
           return await this.cancel(parseCancelInput(params), context);
+        case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsWithdrawQueuedInput:
+          return await this.withdrawQueuedInput(parseWithdrawQueuedInputInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondPermission:
           return await this.respondPermission(parsePermissionResponseInput(params), context);
         case ORBIS_REMOTE_AGENT_V2_METHODS.sessionsRespondQuestion:
@@ -1886,6 +1899,26 @@ export class OrbisRemoteAgentV2Host {
     });
   }
 
+  /**
+   * Withdrawing is idempotent by nature — a second attempt reports
+   * `withdrawn: false` — so it needs no idempotency claim of its own.
+   */
+  private async withdrawQueuedInput(
+    input: RemoteAgentV2WithdrawQueuedInputInput,
+    context: RemoteAgentHostRequestContext,
+  ): Promise<JsonValue> {
+    const owner = await this.ownerFor(input.ref);
+    return this.enqueue(owner, async () => {
+      this.assertRequestActive(context);
+      await this.assertDriverCapability(owner.nativeRef.driverId, "prompt.queue.withdraw");
+      return toJsonResult(
+        await this.requiredRuntime(owner).withdrawQueuedInput({
+          queuedInputId: input.queuedInputId,
+        }),
+      );
+    });
+  }
+
   private async respondPermission(
     input: RemoteAgentV2PermissionResponseInput,
     context: RemoteAgentHostRequestContext,
@@ -2470,6 +2503,7 @@ export class OrbisRemoteAgentV2Host {
     capability:
       | "permission.respond"
       | "plan.select"
+      | "prompt.queue.withdraw"
       | "prompt.references.files"
       | "prompt.references.sessions"
       | "question.respond"
@@ -2489,13 +2523,15 @@ export class OrbisRemoteAgentV2Host {
             ? "The driver cannot respond to questions"
             : capability === "plan.select"
               ? "The driver cannot select plan mode"
-              : capability === "prompt.references.files"
-                ? "The driver cannot complete file references"
-                : capability === "prompt.references.sessions"
-                  ? "The driver cannot complete session references"
-                  : capability === "session.subagents.list"
-                    ? "The driver cannot list session subagents"
-                    : "The driver cannot open server workspaces",
+              : capability === "prompt.queue.withdraw"
+                ? "The driver cannot withdraw a queued input"
+                : capability === "prompt.references.files"
+                  ? "The driver cannot complete file references"
+                  : capability === "prompt.references.sessions"
+                    ? "The driver cannot complete session references"
+                    : capability === "session.subagents.list"
+                      ? "The driver cannot list session subagents"
+                      : "The driver cannot open server workspaces",
       );
     }
   }

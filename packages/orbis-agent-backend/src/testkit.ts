@@ -16,6 +16,8 @@ import type {
   AgentWorkspaceRegisterResult,
   AgentPromptInput,
   AgentPromptReceipt,
+  AgentQueuedInputWithdrawInput,
+  AgentQueuedInputWithdrawResult,
   AgentRuntimeStatusListener,
   AgentRuntimeStatus,
   AgentSessionCreateInput,
@@ -546,6 +548,14 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     return { accepted: false };
   }
 
+  /** The fake holds no inputs of its own, so there is never one to withdraw. */
+  async withdrawQueuedInput(
+    _input: AgentQueuedInputWithdrawInput,
+  ): Promise<AgentQueuedInputWithdrawResult> {
+    this.assertOpen();
+    return { withdrawn: false };
+  }
+
   async close(): Promise<void> {
     if (this.status === "closed") return;
     this.setStatus("closed");
@@ -637,7 +647,7 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
     const previousStatus = this.status;
     this.activeRunId = undefined;
     this.activeRunStartedAt = undefined;
-    this.setStatus(outcome === "failed" ? "error" : "ready");
+    this.setStatus("ready");
     try {
       this.host.commit(this, event);
     } catch (error) {
@@ -707,6 +717,24 @@ export class FakeAgentSessionRuntime implements AgentSessionRuntime {
   subscribe(listener: AgentSessionEventListener): () => void {
     this.assertOpen();
     this.listeners.add(listener);
+    // Seed from the producer's revisioned execution state, not from lease status.
+    listener({
+      type: "session.state.changed",
+      durability: "transient",
+      eventId: agentEventId(this.host.nextEventId()),
+      occurredAt: this.host.now(),
+      sessionId: this.ref.sessionId,
+      source: { backendId: this.ref.backendId, driverId: this.ref.driverId },
+      payload: {
+        revision: this.stateRevision,
+        patch: {
+          activeRun:
+            this.activeRunId && this.activeRunStartedAt
+              ? { id: this.activeRunId, startedAt: this.activeRunStartedAt }
+              : null,
+        },
+      },
+    });
     return () => this.listeners.delete(listener);
   }
 

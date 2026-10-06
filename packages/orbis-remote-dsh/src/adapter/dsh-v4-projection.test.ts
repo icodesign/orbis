@@ -113,6 +113,60 @@ describe("DSH V4 projection contract", () => {
     });
   });
 
+  test("drops empty text and signature-only reasoning blocks", () => {
+    // Recorded from deepseek-v4-flash at low reasoning effort.
+    const entry = new DshSessionEntryProjector().project({
+      seq: 21,
+      time: 10,
+      type: "assistant/message",
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "" },
+            { type: "text", text: "" },
+            { type: "text", text: "Hi! What can I help you with today?" },
+          ],
+          source: {
+            kind: "model",
+            provider: "deepseek-official",
+            model: "deepseek-v4-flash",
+            replayState: {
+              response: { kind: "deepseek-messages", version: 1, model: "deepseek-v4-flash" },
+              blocks: [
+                { type: "reasoning", signature: "signature-1" },
+                { type: "text" },
+                { type: "text" },
+              ],
+            },
+          },
+        },
+      },
+    });
+    expect(entry).toMatchObject({
+      content: [{ type: "text", text: "Hi! What can I help you with today?" }],
+    });
+    expect(entry && "content" in entry ? entry.content : undefined).toHaveLength(1);
+  });
+
+  test("rejects a reasoning block without text", () => {
+    expect(() =>
+      new DshSessionEntryProjector().project({
+        seq: 1,
+        time: 10,
+        type: "assistant/message",
+        data: {
+          turn: 1,
+          step: 1,
+          message: { id: "assistant-1", role: "assistant", content: [{ type: "reasoning" }] },
+        },
+      }),
+    ).toThrow("DSH reasoning block is invalid");
+  });
+
   test("reads a fork-closed turn without inventing a failed run", () => {
     expect(
       runFinishForDshEvent({

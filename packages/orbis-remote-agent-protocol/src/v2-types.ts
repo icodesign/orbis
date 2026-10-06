@@ -76,7 +76,7 @@ export interface RemoteAgentV2QueuedInput {
   readonly id: string;
   readonly kind: "steer" | "follow_up" | "next_run";
   readonly content: readonly RemoteAgentV2ContentBlock[];
-  readonly queuedAt: AgentTimestamp;
+  readonly queuedAt?: AgentTimestamp;
 }
 
 export interface RemoteAgentV2PermissionRequest {
@@ -290,8 +290,14 @@ export interface RemoteAgentV2WorkspaceCreateFolderInput {
 export interface RemoteAgentV2PromptInput {
   readonly ref: AgentSessionRef;
   readonly content: readonly RemoteAgentV2PromptContentBlock[];
-  readonly delivery?: "steer" | "follow_up";
+  readonly delivery?: "steer" | "follow_up" | "next_run";
   readonly expectedRevision?: number;
+  readonly idempotencyKey: string;
+}
+
+export interface RemoteAgentV2WithdrawQueuedInputInput {
+  readonly ref: AgentSessionRef;
+  readonly queuedInputId: string;
   readonly idempotencyKey: string;
 }
 
@@ -334,6 +340,11 @@ export interface RemoteAgentV2Runtime {
       readonly idempotencyKey?: string;
     },
   ): Promise<RemoteAgentV2PromptReceipt>;
+  withdrawQueuedInput(
+    input: Omit<RemoteAgentV2WithdrawQueuedInputInput, "ref" | "idempotencyKey"> & {
+      readonly idempotencyKey?: string;
+    },
+  ): Promise<{ readonly withdrawn: boolean }>;
   respondPermission(
     input: Omit<RemoteAgentV2PermissionResponseInput, "ref" | "idempotencyKey"> & {
       readonly idempotencyKey?: string;
@@ -402,6 +413,11 @@ export interface RemoteAgentV2Backend {
    */
   observeCatalog?(listener: () => void): () => void;
   readSession(ref: AgentSessionRef): Promise<RemoteAgentV2SessionSnapshot>;
+  /**
+   * Reads attachment bytes for one page request. Implementations must observe
+   * the signal so a disconnected or cancelled client does not keep the read
+   * resource alive.
+   */
   readAttachment(
     ref: AgentSessionRef,
     attachmentId: string,

@@ -1125,7 +1125,19 @@ describe("DSH local backend", () => {
       model: "test-model-2",
       provider: "test-provider",
     });
-    expect(events).toMatchObject([
+    expect(events[0]).toMatchObject({
+      payload: {
+        patch: {
+          pendingInputs: [],
+          pendingPermissions: [],
+          pendingQuestions: [],
+          runState: "idle",
+        },
+        revision: 0,
+      },
+      type: "session.state.changed",
+    });
+    expect(events.slice(1)).toMatchObject([
       {
         payload: {
           patch: { model: { modelId: "test-model-2", provider: "test-provider" } },
@@ -2605,7 +2617,19 @@ describe("DSH local backend", () => {
 
     expect(firstRuntime.getStatus()).toBe("closed");
     expect(testDsh.disposeCalls.get("created-session") ?? 0).toBe(0);
-    expect(firstEvents.map((native) => native.type)).toEqual(["session.state.changed"]);
+    expect(firstEvents[0]).toMatchObject({
+      payload: {
+        patch: {
+          pendingInputs: [],
+          pendingPermissions: [],
+          pendingQuestions: [],
+          runState: "idle",
+        },
+        revision: 0,
+      },
+      type: "session.state.changed",
+    });
+    expect(firstEvents.slice(1).map((native) => native.type)).toEqual(["session.state.changed"]);
 
     const reconnected = await backend.connectRuntime(record.ref);
     const reconnectedEvents: AgentSessionEvent[] = [];
@@ -2649,12 +2673,24 @@ describe("DSH local backend", () => {
     );
 
     expect(reconnected.getStatus()).toBe("ready");
-    expect(reconnectedEvents.map((native) => native.type)).toEqual([
+    expect(reconnectedEvents[0]).toMatchObject({
+      payload: {
+        patch: {
+          pendingInputs: [],
+          pendingPermissions: [],
+          pendingQuestions: [],
+          runState: "running",
+        },
+        revision: 1,
+      },
+      type: "session.state.changed",
+    });
+    expect(reconnectedEvents.slice(1).map((native) => native.type)).toEqual([
       "entry.delta",
       "entry.appended",
       "session.state.changed",
     ]);
-    expect(reconnectedEvents[0]).toMatchObject({ payload: { blockIndex: 2 } });
+    expect(reconnectedEvents[1]).toMatchObject({ payload: { blockIndex: 2 } });
     expect(await backend.listSessions()).toHaveLength(1);
   });
 
@@ -2697,7 +2733,19 @@ describe("DSH local backend", () => {
         queuedAt: FIXED_TIME,
       },
     ]);
-    expect(events).toMatchObject([
+    expect(events[0]).toMatchObject({
+      payload: {
+        patch: {
+          pendingInputs: [],
+          pendingPermissions: [],
+          pendingQuestions: [],
+          runState: "idle",
+        },
+        revision: 0,
+      },
+      type: "session.state.changed",
+    });
+    expect(events.slice(1)).toMatchObject([
       { payload: { patch: { pendingInputs: [{ id: "steer-1" }] } }, type: "session.state.changed" },
       {
         payload: { patch: { pendingInputs: [{ id: "steer-1" }, { id: "follow-up-1" }] } },

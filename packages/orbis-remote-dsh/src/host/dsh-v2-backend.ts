@@ -340,6 +340,15 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
     return this.native.cancel({ keepInbox: input.keepInbox });
   }
 
+  async withdrawQueuedInput(input: {
+    readonly queuedInputId: string;
+    readonly idempotencyKey?: string;
+  }): Promise<{ readonly withdrawn: boolean }> {
+    this.assertOpen();
+    void input.idempotencyKey;
+    return this.native.withdrawQueuedInput({ id: input.queuedInputId });
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -355,7 +364,7 @@ class DshV2Runtime implements RemoteAgentV2Runtime {
 
   async prompt(input: {
     readonly content: readonly AgentPromptContentBlock[];
-    readonly delivery?: "steer" | "follow_up";
+    readonly delivery?: "steer" | "follow_up" | "next_run";
     readonly idempotencyKey?: string;
   }): Promise<{
     readonly runId: ReturnType<typeof agentRunId>;

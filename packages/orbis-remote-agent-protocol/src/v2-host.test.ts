@@ -172,6 +172,7 @@ function presenceBackend(
 ): RemoteAgentV2Backend {
   const runtime: RemoteAgentV2Runtime = {
     cancel: async () => ({ cancelled: false }),
+    withdrawQueuedInput: async () => ({ withdrawn: false }),
     close: async () => undefined,
     prompt: async (input) => {
       options.onPrompt?.(input.content);
@@ -295,6 +296,7 @@ test("v2 host replays native entries from its cursor index without ACK state", a
   let updates = 0;
   const runtime: RemoteAgentV2Runtime = {
     cancel: async () => ({ cancelled: false }),
+    withdrawQueuedInput: async () => ({ withdrawn: false }),
     close: async () => undefined,
     prompt: async () => {
       prompts += 1;
@@ -1245,11 +1247,7 @@ test("v2 host does not replay transient backlog to a peer joining live sync", as
       },
     },
   });
-  const emit = (
-    chunkSeq: number,
-    sessionId = nativeRef.sessionId,
-    blockComplete = false,
-  ): void => {
+  const emit = (chunkSeq: number, sessionId = nativeRef.sessionId, blockComplete = false): void => {
     const event: RemoteAgentV2SessionEvent = {
       blockIndex: 0,
       channel: "transient",
@@ -2015,6 +2013,7 @@ test("v2 host validates staged uploads, consumes successful prompts, and bounds 
   const prompted: AgentPromptContentBlock[][] = [];
   let failPrompt = false;
   let readData = "AQIDBAUG";
+  let readSignal: AbortSignal | undefined;
   const peerB: RemoteAgentHostPeer = {
     deviceId: "device-b",
     deviceName: "Test Device B",
@@ -2030,8 +2029,9 @@ test("v2 host validates staged uploads, consumes successful prompts, and bounds 
       }
       prompted.push([...content]);
     },
-    readAttachment: async (native, attachmentId) => {
+    readAttachment: async (native, attachmentId, signal) => {
       expect(native.sessionId).toBe("session-a");
+      readSignal = signal;
       if (attachmentId !== "att-1" && attachmentId !== "att-too-large") {
         throw new AgentBackendError("not_found", "attachment not found");
       }
@@ -2068,10 +2068,13 @@ test("v2 host validates staged uploads, consumes successful prompts, and bounds 
       send: async () => undefined,
     },
   });
-  const requestContext = (target: RemoteAgentHostPeer = peer) => ({
+  const requestContext = (
+    target: RemoteAgentHostPeer = peer,
+    signal: AbortSignal = new AbortController().signal,
+  ) => ({
     maxResponseBytes: 1024 * 1024,
     peer: target,
-    signal: new AbortController().signal,
+    signal,
   });
   const begin = (target: RemoteAgentHostPeer, uploadId: string, totalBytes: number) =>
     host.handleRequest(
@@ -2204,11 +2207,13 @@ test("v2 host validates staged uploads, consumes successful prompts, and bounds 
       serverCode: "not_found",
     });
 
+    const readController = new AbortController();
     const firstRead = await host.handleRequest(
       ORBIS_REMOTE_AGENT_V2_METHODS.attachmentsRead,
       params({ attachmentId: "att-1", offset: 0, ref: publicRef }),
-      requestContext(),
+      requestContext(peer, readController.signal),
     );
+    expect(readSignal).toBe(readController.signal);
     expect(firstRead).toMatchObject({
       attachmentId: "att-1",
       bytes: 6,

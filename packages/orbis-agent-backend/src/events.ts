@@ -190,7 +190,7 @@ export interface AgentQueuedInput {
   readonly content: readonly AgentContentBlock[];
   readonly id: string;
   readonly kind: "follow_up" | "next_run" | "steer";
-  readonly queuedAt: AgentTimestamp;
+  readonly queuedAt?: AgentTimestamp;
 }
 
 export type AgentGoalPhase = "active" | "blocked" | "complete" | "paused";
@@ -394,10 +394,43 @@ export interface AgentEntryDeltaEvent extends AgentTransientEventBase {
     readonly blockIndex: number;
     readonly chunkSeq: number;
     readonly delta: string;
+    /** Opaque transient identity. Tool state/baseline supplies its callId association. */
     readonly entryId: AgentEntryId;
     readonly part: "text" | "thinking" | "tool_input" | "tool_output";
   };
   readonly type: "entry.delta";
+}
+
+/** An atomic replacement baseline for a new connection or transport resynchronization.
+ * Each delivery has a fresh eventId. revision orders durable state; per-entry
+ * chunkSeq establishes the next incremental chunk. Equal revisions can advance chunks
+ * or repair a gap; consumers keep a baseline watermark separate from run transitions.
+ * Empty arrays clear old stream membership, but replay cannot undo durable settlement
+ * or reopen a terminal tool identity within the same run.
+ */
+export interface AgentSessionSnapshotEvent extends AgentTransientEventBase {
+  readonly type: "session.snapshot";
+  readonly payload: {
+    readonly revision: number;
+    readonly patch: AgentSessionStatePatch;
+    readonly stream: {
+      readonly runId?: AgentRunId;
+      readonly messages: readonly {
+        readonly entryId: AgentEntryId;
+        readonly chunkSeq: number;
+        readonly blocks: readonly {
+          readonly blockIndex: number;
+          readonly blockComplete?: true;
+          readonly content: Extract<AgentContentBlock, { type: "text" | "thinking" }>;
+        }[];
+      }[];
+      readonly tools: readonly (AgentToolStateChangedEvent["payload"]["tool"] & {
+        readonly chunkSeq: number;
+        readonly inputText: string;
+        readonly outputText: string;
+      })[];
+    };
+  };
 }
 
 export interface AgentToolStateChangedEvent extends AgentTransientEventBase {
@@ -439,6 +472,7 @@ export type AgentDurableSessionEvent = AgentEntryAppendedEvent;
 
 export type AgentTransientSessionEvent =
   | AgentEntryDeltaEvent
+  | AgentSessionSnapshotEvent
   | AgentPresenceChangedEvent
   | AgentRunActivityEvent
   | AgentSessionStateChangedEvent
