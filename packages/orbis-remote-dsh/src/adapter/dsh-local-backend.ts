@@ -50,6 +50,9 @@ import {
   type AgentPromptInput,
   type AgentPromptContentBlock,
   type AgentPromptReceipt,
+  type AgentQueuedInputWithdrawInput,
+  type AgentQueuedInputWithdrawResult,
+  type AgentRunOutcome,
   type AgentPromptReferenceCompletionInput,
   type AgentPromptReferenceCompletionResult,
   type AgentRuntimeStatusListener,
@@ -129,6 +132,8 @@ export const DSH_LOCAL_DRIVER_ID = "dsh";
 
 const DSH_LOCAL_CAPABILITIES = [
   "prompt.follow_up",
+  "prompt.next_run",
+  "prompt.queue.withdraw",
   "prompt.steer",
   "run.cancel",
   "session.create",
@@ -563,6 +568,18 @@ function defaultSessionId(): string {
 
 function publicUnavailable(message = "The local DSH backend is unavailable"): AgentBackendError {
   return new AgentBackendError("unavailable", message, { retryable: true });
+}
+
+/**
+ * One input this driver holds for a future run. DSH's inbox admits messages to
+ * the *active* run and exposes no per-message removal, so an input that must
+ * stay withdrawable waits here instead of being handed over. It is already a
+ * `DshUserMessage`, so the queue entry and the eventually delivered message
+ * share one identity.
+ */
+interface DshHeldInput {
+  readonly message: DshUserMessage;
+  readonly queuedAt: AgentTimestamp;
 }
 
 function queuedInput(
@@ -1854,6 +1871,9 @@ export class DshLocalHarnessDriver implements AgentHarnessDriver {
   }
 }
 
+// Delivery identity outlives one controller, just like a consumer's deduplication window.
+let executionSeedSequence = 0;
+
 /** A detachable observer façade; closing it never cancels the DSH agent. */
 export class DshLocalSessionRuntime implements AgentSessionRuntime {
   readonly ref: AgentSessionRef;
@@ -1925,9 +1945,21 @@ export class DshLocalSessionRuntime implements AgentSessionRuntime {
     return this.controller.respondQuestion(this, input);
   }
 
+  async withdrawQueuedInput(
+    input: AgentQueuedInputWithdrawInput,
+  ): Promise<AgentQueuedInputWithdrawResult> {
+    this.assertOpen();
+    return this.controller.withdrawQueuedInput(this, input);
+  }
+
   subscribe(listener: AgentSessionEventListener): () => void {
     this.assertOpen();
     this.listeners.add(listener);
+    try {
+      listener(this.controller.executionStateEvent());
+    } catch {
+      // Passive observers cannot reject an already established subscription.
+    }
     const pending = this.controller.permissionSnapshot();
     if (pending.length > 0) this.controller.publishPermissionState(pending);
     const questions = this.controller.questionSnapshot();
@@ -2005,6 +2037,8 @@ class DshLocalSessionController {
   private stream: { attemptId: string; turn: number; step: number; index: number } | undefined;
   private readonly deltaCoalescer: DshDeltaCoalescer;
   private readonly pendingInputTimes = new Map<string, AgentTimestamp>();
+  /** Inputs this driver holds for a future run; see {@link DshHeldInput}. */
+  private heldInputs: readonly DshHeldInput[] = [];
   private readonly permissionBridge: DshPermissionInteraction | undefined;
   private readonly questionBridge: DshQuestionBridge | undefined;
   private readonly overlayTools = new Map<
@@ -2125,6 +2159,12 @@ class DshLocalSessionController {
     input: AgentCancelInput,
   ): Promise<AgentCancelResult> {
     this.assertAttached(runtime);
+    // Only this driver's held inputs can be kept deliberately; the agent's own
+    // inbox is governed by the same flag inside DSH.
+    if (input.keepInbox !== true && this.heldInputs.length > 0) {
+      this.heldInputs = [];
+      this.publishPendingInputs();
+    }
     if (this.agent.status !== "running") return { cancelled: false };
     try {
       this.agent.cancel(
@@ -2211,6 +2251,8 @@ class DshLocalSessionController {
     return [
       ...this.agent.inbox.nextStep.map((message) => queuedInputFor(message, "steer")),
       ...this.agent.inbox.nextTurn.map((message) => queuedInputFor(message, "follow_up")),
+      // Held inputs run after everything the active run will consume.
+      ...this.heldInputs.map((held) => queuedInput(held.message, "next_run", held.queuedAt)),
     ];
   }
 
@@ -2222,7 +2264,7 @@ class DshLocalSessionController {
     const canonical = validateAgentPromptInput(input);
     const inspection = await this.host.inspect(this.ref);
     const running = this.agent.status === "running";
-    if (input.delivery !== undefined && !running) {
+    if (input.delivery !== undefined && input.delivery !== "next_run" && !running) {
       throw new AgentBackendError(
         "conflict",
         "DSH steering and follow-up require an active run for this session",
@@ -2261,6 +2303,14 @@ class DshLocalSessionController {
     const runId = running
       ? (activeRunId(inspection) ?? nextDshRunId(inspection.events))
       : nextDshRunId(inspection.events);
+    // `next_run` never conflicts with an active run: it means "send this, and
+    // hold it if the session is busy". Deciding that here, against this
+    // controller's own status, spares every caller a run-state guess.
+    if (input.delivery === "next_run" && running) {
+      this.heldInputs = [...this.heldInputs, { message, queuedAt: this.host.now() }];
+      this.publishPendingInputs();
+      return { acceptedAt: this.host.now(), runId };
+    }
     try {
       if (input.delivery === "steer") this.agent.steer(message);
       else this.agent.followup(message);
@@ -2269,6 +2319,22 @@ class DshLocalSessionController {
       throw publicUnavailable("The DSH run could not accept the prompt");
     }
     return { acceptedAt: this.host.now(), runId };
+  }
+
+  /**
+   * Held inputs are this driver's own state, so they are withdrawable. An input
+   * already handed to DSH's inbox is not: that inbox has no removal API.
+   */
+  async withdrawQueuedInput(
+    runtime: DshLocalSessionRuntime,
+    input: AgentQueuedInputWithdrawInput,
+  ): Promise<AgentQueuedInputWithdrawResult> {
+    this.assertAttached(runtime);
+    const remaining = this.heldInputs.filter((held) => String(held.message.id).trim() !== input.id);
+    if (remaining.length === this.heldInputs.length) return { withdrawn: false };
+    this.heldInputs = remaining;
+    this.publishPendingInputs();
+    return { withdrawn: true };
   }
 
   async respondPermission(
@@ -2406,6 +2472,8 @@ class DshLocalSessionController {
           },
           runState: finished.outcome === "failed" ? "error" : "idle",
         });
+        // The settled run is fully published before its successor starts.
+        this.drainHeldInputs(finished.outcome);
       }
     } catch (error) {
       this.host.report(
@@ -2417,6 +2485,11 @@ class DshLocalSessionController {
   }
 
   receiveInboxChanged(): void {
+    this.publishPendingInputs();
+  }
+
+  /** Publishes the whole queued-input set, inbox-owned and driver-held alike. */
+  private publishPendingInputs(): void {
     if (this.disposed) return;
     const native =
       lastDshSessionEvent(this.agent.session) ??
@@ -2432,6 +2505,55 @@ class DshLocalSessionController {
           : new AgentBackendError("protocol", "DSH emitted an invalid inbox state"),
       );
     }
+  }
+
+  /**
+   * Starts the oldest held input as its own run. Only a completed run drains:
+   * after a failure or a cancellation the inputs stay visible in
+   * `pendingInputs` for the user to edit, withdraw or send, because starting
+   * the next run automatically would compound whatever just went wrong.
+   */
+  private drainHeldInputs(outcome: AgentRunOutcome): void {
+    if (outcome !== "completed" || this.agent.status === "running") return;
+    const [next, ...rest] = this.heldInputs;
+    if (next === undefined) return;
+
+    this.heldInputs = rest;
+    this.publishPendingInputs();
+    try {
+      this.agent.followup(next.message);
+    } catch (error) {
+      // The run never started, and this input was the oldest with nothing
+      // consumed in between, so its original slot is still the head: put it
+      // back rather than losing what the user wrote.
+      this.heldInputs = [next, ...this.heldInputs];
+      this.publishPendingInputs();
+      this.host.reportUpstreamError(error);
+      this.host.report(publicUnavailable("The DSH run could not accept the queued input"));
+    }
+  }
+
+  /** Deliver current execution state at its existing revision; subscribing is not a mutation. */
+  executionStateEvent(): AgentSessionEvent {
+    return {
+      type: "session.state.changed",
+      durability: "transient",
+      eventId: agentEventId(
+        `orbis:${this.ref.sessionId}:execution-seed:${++executionSeedSequence}`,
+      ),
+      occurredAt: this.host.now(),
+      sessionId: this.ref.sessionId,
+      source: { backendId: this.ref.backendId, driverId: this.ref.driverId },
+      payload: {
+        revision: this.stateRevision,
+        patch: {
+          runState: this.agent.status === "running" ? "running" : "idle",
+          pendingInputs: this.pendingInputs(),
+          pendingPermissions: this.permissionSnapshot(),
+          pendingQuestions: this.questionSnapshot(),
+        },
+      },
+    };
   }
 
   runtimeStatus(): AgentRuntimeStatus {

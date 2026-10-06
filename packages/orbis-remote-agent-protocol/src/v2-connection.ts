@@ -66,6 +66,7 @@ import {
 } from "./v2-schemas";
 import type {
   RemoteAgentV2CancelInput,
+  RemoteAgentV2WithdrawQueuedInputInput,
   RemoteAgentV2ContentBlock,
   RemoteAgentV2CreateInput,
   RemoteAgentV2Delivery,
@@ -117,6 +118,9 @@ export interface RemoteAgentV2Connection {
     input: RemoteAgentV2WorkspaceCreateFolderInput,
   ): Promise<AgentWorkspaceFolderDescriptor>;
   cancel(input: RemoteAgentV2CancelInput): Promise<{ readonly cancelled: boolean }>;
+  withdrawQueuedInput(
+    input: RemoteAgentV2WithdrawQueuedInputInput,
+  ): Promise<{ readonly withdrawn: boolean }>;
   close(): void;
   createSession(input: RemoteAgentV2CreateInput): Promise<RemoteAgentV2SessionRecord>;
   completePromptReferences(
@@ -169,9 +173,14 @@ export interface RemoteAgentV2Connection {
   abortAttachment(
     uploadId: string,
   ): Promise<{ readonly aborted: boolean; readonly uploadId: string }>;
+  /**
+   * Reads a complete attachment through paged RPCs. The signal is passed to
+   * every page request so aborting a Query cancels the active transport call.
+   */
   readAttachment(
     ref: AgentSessionRef,
     attachmentId: string,
+    signal?: AbortSignal,
   ): Promise<import("@orbisapp/orbis-agent-backend").AgentAttachmentReadResult>;
   respondPermission(input: {
     readonly ref: AgentSessionRef;
@@ -449,7 +458,9 @@ function parseQueuedInput(value: unknown): RemoteAgentV2SessionState["pendingInp
     id: string(input, "id", "Queued input id"),
     kind,
     content: array(input, "content", "Queued input content").map(parseContent),
-    queuedAt: agentTimestamp(string(input, "queuedAt", "Queued input time")),
+    ...(input.queuedAt === undefined
+      ? {}
+      : { queuedAt: agentTimestamp(string(input, "queuedAt", "Queued input time")) }),
   };
 }
 
@@ -1312,6 +1323,7 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
   async readAttachment(
     ref: AgentSessionRef,
     attachmentId: string,
+    signal?: AbortSignal,
   ): Promise<import("@orbisapp/orbis-agent-backend").AgentAttachmentReadResult> {
     if (this.helloResult?.capabilities.attachments === false || this.helloResult === undefined) {
       throw new AgentBackendError("unsupported", "The remote host does not support attachments");
@@ -1355,6 +1367,8 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
               : { height: integer(output, "height", "Attachment height", 1) }),
           };
         },
+        false,
+        signal,
       );
       if (result.attachmentId !== attachmentId) protocolError("Attachment id changed during read");
       const chunk = decodeBase64(result.data);
@@ -1425,6 +1439,17 @@ export class OrbisRemoteAgentV2Connection implements RemoteAgentV2Connection {
       (value) => {
         const output = record(value, "Cancel result");
         return { cancelled: boolean(output, "cancelled", "Cancelled flag") };
+      },
+    );
+  }
+
+  withdrawQueuedInput(input: RemoteAgentV2WithdrawQueuedInputInput) {
+    return this.request(
+      ORBIS_REMOTE_AGENT_V2_METHODS.sessionsWithdrawQueuedInput,
+      { ...input, ref: refPayload(input.ref) },
+      (value) => {
+        const output = record(value, "Withdraw queued input result");
+        return { withdrawn: boolean(output, "withdrawn", "Withdrawn flag") };
       },
     );
   }

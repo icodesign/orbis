@@ -105,19 +105,22 @@ test("validates subagent child/diagnostic rows and preserves pre-order", () => {
   const root = subagentRef("root");
   const child = subagentRef("child");
   const diagnostic = subagentRef("broken");
-  const entries = validateAgentSessionSubagentList([
-    {
-      activity: "running",
-      depth: 1,
-      hasChildren: true,
-      kind: "child",
-      mode: "continuable",
-      parentRef: root,
-      ref: child,
-      label: "Build helper",
-    },
-    { depth: 2, kind: "diagnostic", parentRef: child, reason: "corrupt", ref: diagnostic },
-  ], root);
+  const entries = validateAgentSessionSubagentList(
+    [
+      {
+        activity: "running",
+        depth: 1,
+        hasChildren: true,
+        kind: "child",
+        mode: "continuable",
+        parentRef: root,
+        ref: child,
+        label: "Build helper",
+      },
+      { depth: 2, kind: "diagnostic", parentRef: child, reason: "corrupt", ref: diagnostic },
+    ],
+    root,
+  );
 
   expect(entries.map((entry) => entry.ref.sessionId)).toEqual(["child", "broken"]);
   expect(Object.isFrozen(entries)).toBe(true);
@@ -149,22 +152,25 @@ test("rejects malformed subagent identities, duplicate rows, and invalid enums",
     }),
   ).toThrow(/depth/i);
   expect(() =>
-    validateAgentSessionSubagentList([
-      {
-        depth: 1,
-        kind: "diagnostic",
-        parentRef: root,
-        reason: "corrupt",
-        ref: child,
-      },
-      {
-        depth: 1,
-        kind: "diagnostic",
-        parentRef: root,
-        reason: "corrupt",
-        ref: child,
-      },
-    ], root),
+    validateAgentSessionSubagentList(
+      [
+        {
+          depth: 1,
+          kind: "diagnostic",
+          parentRef: root,
+          reason: "corrupt",
+          ref: child,
+        },
+        {
+          depth: 1,
+          kind: "diagnostic",
+          parentRef: root,
+          reason: "corrupt",
+          ref: child,
+        },
+      ],
+      root,
+    ),
   ).toThrow(/duplicate/i);
   expect(() =>
     validateAgentSessionSubagentEntry({
@@ -246,9 +252,9 @@ test("root-aware subagent validation rejects foreign, orphaned, and misnested ro
       root,
     ),
   ).toHaveLength(2);
-  expect(() =>
-    validateAgentSessionSubagentList([{ ...childRow, ref: foreign }], root),
-  ).toThrow(/foreign/i);
+  expect(() => validateAgentSessionSubagentList([{ ...childRow, ref: foreign }], root)).toThrow(
+    /foreign/i,
+  );
   expect(() =>
     validateAgentSessionSubagentList(
       [{ ...childRow, depth: 2, parentRef: orphan, ref: grandchild }],
@@ -392,7 +398,11 @@ describe("agent backend contract", () => {
 
     expect(piRuntime.getStatus()).toBe("running");
     expect(dshRuntime.getStatus()).toBe("running");
-    expect(piEvents.map((event) => event.type)).toEqual(["session.state.changed"]);
+    expect(piEvents[0]).toMatchObject({
+      payload: { patch: { activeRun: null }, revision: 0 },
+      type: "session.state.changed",
+    });
+    expect(piEvents.slice(1).map((event) => event.type)).toEqual(["session.state.changed"]);
     expect((await backend.readSession(piRecord.ref)).entries).toMatchObject([
       { content: [{ text: "Pi completed a durable response after the switch", type: "text" }] },
     ]);

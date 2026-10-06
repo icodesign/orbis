@@ -107,7 +107,9 @@ export function validateAgentPromptInput(value: unknown): AgentPromptInput {
     content,
     ...(input.delivery === undefined
       ? {}
-      : input.delivery === "steer" || input.delivery === "follow_up"
+      : input.delivery === "steer" ||
+          input.delivery === "follow_up" ||
+          input.delivery === "next_run"
         ? { delivery: input.delivery }
         : invalid("Prompt delivery is invalid")),
     ...(input.idempotencyKey === undefined

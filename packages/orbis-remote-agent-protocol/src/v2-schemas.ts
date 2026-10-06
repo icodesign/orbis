@@ -316,7 +316,7 @@ export const v2QueuedInputSchema = z
     content: z.array(v2ContentBlockSchema),
     id: nonEmptyString,
     kind: z.enum(["steer", "follow_up", "next_run"]),
-    queuedAt: timestamp,
+    queuedAt: timestamp.optional(),
   })
   .passthrough();
 
@@ -806,7 +806,7 @@ export const v2CreateInputSchema = z
 export const v2PromptInputSchema = z
   .object({
     content: z.array(v2PromptContentBlockSchema).min(1),
-    delivery: z.enum(["steer", "follow_up"]).optional(),
+    delivery: z.enum(["steer", "follow_up", "next_run"]).optional(),
     expectedRevision: nonNegativeInteger.optional(),
     idempotencyKey: nonEmptyString,
     ref: v2RefSchema,
@@ -895,6 +895,14 @@ export const v2CancelInputSchema = z
     keepInbox: z.boolean().optional(),
     ref: v2RefSchema,
     runId: nonEmptyString.optional(),
+  })
+  .passthrough();
+
+export const v2WithdrawQueuedInputInputSchema = z
+  .object({
+    idempotencyKey: nonEmptyString,
+    queuedInputId: nonEmptyString,
+    ref: v2RefSchema,
   })
   .passthrough();
 

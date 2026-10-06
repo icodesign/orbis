@@ -7,6 +7,8 @@ export const AGENT_DRIVER_CAPABILITIES = [
   "permission.respond",
   "plan.select",
   "prompt.follow_up",
+  "prompt.next_run",
+  "prompt.queue.withdraw",
   "prompt.references.files",
   "prompt.references.sessions",
   "prompt.steer",

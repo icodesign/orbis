@@ -12,6 +12,7 @@ import {
   ORBIS_REMOTE_AGENT_V2_METHODS,
   ORBIS_REMOTE_AGENT_V2_METHOD_LIST,
 } from "./v2-constants";
+import { v2QueuedInputSchema } from "./v2-schemas";
 
 const ref = createAgentSessionRef({
   backendId: "remote:host-a",
@@ -637,7 +638,8 @@ test("v2 connection reconstructs bounded attachment reads and rejects unstable m
   });
   const connection = new OrbisRemoteAgentV2Connection(transport);
   await connection.hello({ device: { name: "Test phone" }, supportedVersions: [2] });
-  await expect(connection.readAttachment(ref, "attachment-1")).resolves.toEqual({
+  const controller = new AbortController();
+  await expect(connection.readAttachment(ref, "attachment-1", controller.signal)).resolves.toEqual({
     attachmentId: "attachment-1",
     bytes: 6,
     data: "AQIDBAUG",
@@ -646,6 +648,7 @@ test("v2 connection reconstructs bounded attachment reads and rejects unstable m
     name: "image.png",
     width: 3,
   });
+  expect(transport.requestSignals.slice(1)).toEqual([controller.signal, controller.signal]);
 
   const oversized = new FakeV2Transport();
   oversized.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, attachmentHelloResult());
@@ -931,7 +934,7 @@ test("v2 sync validates the cursor and entry identity pair", async () => {
   expect(transport.requests).toHaveLength(1);
 });
 
-test("v2 sync returns the host revision used for cache reconciliation", async () => {
+test("v2 sync returns the host revision and native queue inputs without admission timestamps", async () => {
   const transport = new FakeV2Transport();
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.hello, helloResult());
   transport.respond(ORBIS_REMOTE_AGENT_V2_METHODS.sessionsSync, {
@@ -961,7 +964,15 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
       leafEntryId: null,
       mode: null,
       model: null,
-      pendingInputs: [],
+      pendingInputs: [
+        { id: "42", kind: "next_run", content: [{ type: "text", text: "later" }] },
+        {
+          id: "43",
+          kind: "steer",
+          content: [{ type: "text", text: "adjust" }],
+          queuedAt: "2026-08-11T00:00:00.000Z",
+        },
+      ],
       pendingPermissions: [],
       pendingQuestions: [],
       ref: {
@@ -983,6 +994,12 @@ test("v2 sync returns the host revision used for cache reconciliation", async ()
 
   const result = await connection.sync({ mode: "once", ref });
 
+  expect(result.state?.pendingInputs).toHaveLength(2);
+  expect(result.state?.pendingInputs[0]).not.toHaveProperty("queuedAt");
+  expect(result.state?.pendingInputs[1]?.queuedAt).toBe("2026-08-11T00:00:00.000Z");
+  for (const input of result.state!.pendingInputs) {
+    expect(v2QueuedInputSchema.parse(input)).toEqual(input);
+  }
   expect(result).toMatchObject({
     baseline: true,
     hostRevision: "revision-b",

@@ -177,12 +177,20 @@ export interface AgentSessionUpdateResult {
 }
 
 /**
- * A queued input is admitted to the current run rather than starting another
- * run. Drivers report which queue semantics they implement via capabilities.
+ * How a queued input reaches the agent. `follow_up` and `steer` are admitted to
+ * the current run; `next_run` is held by the driver and replayed as a new run.
+ * Drivers report which queue semantics they implement via capabilities.
  */
 export type AgentPromptDelivery =
   /** Deliver at the driver's next follow-up/continuation point. */
   | "follow_up"
+  /**
+   * Hold the input in the driver and start a new run with it once the active
+   * run completes. Unlike the other deliveries this one never conflicts with an
+   * active run: it means "send this, and hold it if the session is busy", so a
+   * client never has to guess the run state before submitting.
+   */
+  | "next_run"
   /** Deliver at the driver's next steering point within the active run. */
   | "steer";
 
@@ -194,11 +202,24 @@ export interface AgentPromptInput {
 
 export interface AgentPromptReceipt {
   readonly acceptedAt: AgentTimestamp;
+  /**
+   * The run this input belongs to: the run it started, or — for a queued
+   * delivery — the run it was admitted to or is waiting behind. An input held
+   * for `next_run` is identified by its `pendingInputs` entry, not by this.
+   */
   readonly runId: AgentRunId;
 }
 
 export interface AgentCancelInput {
   readonly keepInbox?: boolean;
+}
+
+export interface AgentQueuedInputWithdrawInput {
+  readonly id: string;
+}
+
+export interface AgentQueuedInputWithdrawResult {
+  readonly withdrawn: boolean;
 }
 
 export interface AgentCancelResult {
@@ -209,12 +230,27 @@ export interface AgentSessionRuntime {
   readonly ref: AgentSessionRef;
 
   cancel(input?: AgentCancelInput): Promise<AgentCancelResult>;
+  /** Detach this connection lease. Does not cancel the backend-owned execution. */
   close(): Promise<void>;
+  /** Availability of this lease. error means a failed connection/runtime, not a failed run.
+   * ready/running are convenience summaries; revisioned events own execution state. */
   getStatus(): AgentRuntimeStatus;
   observeStatus(listener: AgentRuntimeStatusListener): () => void;
   prompt(input: AgentPromptInput): Promise<AgentPromptReceipt>;
   respondPermission(input: AgentPermissionResponseInput): Promise<AgentPermissionResponseResult>;
+  /**
+   * Removes one input the driver is holding. Only driver-held entries can be
+   * withdrawn — an agent-owned steering or follow-up queue has no removal API —
+   * so anything else reports `withdrawn: false` rather than failing.
+   */
+  withdrawQueuedInput(
+    input: AgentQueuedInputWithdrawInput,
+  ): Promise<AgentQueuedInputWithdrawResult>;
   respondQuestion(input: AgentQuestionResponseInput): Promise<AgentQuestionResponseResult>;
+  /**
+   * Establish revisioned execution state on subscription (state seed or snapshot),
+   * then deliver live events. Until that seed arrives execution state is unknown.
+   */
   subscribe(listener: AgentSessionEventListener): () => void;
 }
 
