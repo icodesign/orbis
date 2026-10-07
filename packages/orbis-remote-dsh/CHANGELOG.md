@@ -1,5 +1,11 @@
 # @orbisapp/remote-dsh
 
+## 0.5.1
+
+### Patch Changes
+
+- 1afacd9: Keep phone-owned timed Ask User questions waiting through DSH's native wait claim, recover continued questions after reconnect or restart, and submit late answers through the native question service without duplicate replies.
+
 ## 0.5.0
 
 ### Minor Changes
