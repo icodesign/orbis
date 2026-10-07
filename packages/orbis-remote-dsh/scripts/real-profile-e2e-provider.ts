@@ -23,10 +23,8 @@ export function createRealProfileOverlay(options: RealProfileOverlayOptions): st
     options.providerMode === "replay"
       ? [
           "- id: llm-deepseek",
-          '  name: "@deepseek-ai/dsh-llm-deepseek"',
           "  disabled: true",
           "- id: session-title-llm",
-          '  name: "@deepseek-ai/dsh-session-title-first-prompt-llm"',
           "  disabled: true",
           "- insert:",
           "    - id: orbis-e2e-llm-replay",
