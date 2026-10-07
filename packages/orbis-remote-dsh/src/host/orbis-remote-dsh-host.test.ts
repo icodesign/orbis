@@ -123,6 +123,14 @@ test("composes a remote DSH catalog behind the v2 request handler", async () => 
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        userQuestions: {
+          attachWait: () => {
+            throw new Error("Unexpected timed question");
+          },
+          answer: () => {
+            throw new Error("Unexpected continued question");
+          },
+        },
         sessionController: {
           create: async (payload) => {
             const id = String(payload.sessionId);
@@ -693,6 +701,7 @@ test("delivers DSH v2 live entries through the attached host transport", async (
   const sessions = new Map<string, DshSession>();
   const sessionEvents = new Map<string, DshSessionEvent[]>();
   const agents = new Map<string, DshAgent>();
+  const lateAnswers: { callId: string; answer: DshQuestionAnswer }[] = [];
   const nativeListeners = new Set<(session: DshSession, event: DshSessionEvent) => void>();
   let questionListener:
     | ((
@@ -703,6 +712,19 @@ test("delivers DSH v2 live entries through the attached host transport", async (
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        userQuestions: {
+          attachWait: () => {
+            throw new Error("Unexpected timed question");
+          },
+          answer: (agent, callId, answer) => {
+            lateAnswers.push({ callId, answer });
+            (agent.inbox.nextStep as DshUserMessage[]).push({
+              id: "late-reply",
+              source: { kind: "user-question-reply", callId },
+            });
+            return true;
+          },
+        },
         sessionController: {
           create: async (payload) => {
             const id = String(payload.sessionId);
@@ -1006,6 +1028,68 @@ test("delivers DSH v2 live entries through the attached host transport", async (
     await expect(questionResult).resolves.toEqual({
       answers: [{ id: "host-question", selected: ["Yes"] }],
     });
+    // A timed call that continued before the phone opened must survive the
+    // normal wire snapshot and route its answer through the native service.
+    const callId = "host-continued-call";
+    const questions = [{ id: "late-question", question: "Continue?", options: [{ label: "Yes" }] }];
+    emitNative({
+      type: "request/header",
+      seq: 5,
+      time: Date.parse("2026-08-10T00:00:08.000Z"),
+      data: {
+        header: {
+          config: { model: "test-model", provider: "test-provider" },
+          tools: [
+            {
+              name: "ask_user_question",
+              parameters: { properties: { timeout: { type: "integer" } } },
+            },
+          ],
+        },
+      },
+    });
+    emitNative({
+      type: "tool/call",
+      seq: 6,
+      time: Date.parse("2026-08-10T00:00:09.000Z"),
+      data: { name: "ask_user_question", callId, arguments: JSON.stringify({ questions }) },
+    });
+    emitNative({
+      type: "tool/result",
+      seq: 7,
+      time: Date.parse("2026-08-10T00:00:10.000Z"),
+      data: {
+        message: {
+          role: "tool",
+          toolCallId: callId,
+          source: { kind: "tool", callId },
+          content: [{ type: "text", text: JSON.stringify({ pending: true, callId }) }],
+        },
+      },
+    });
+    const continued = await client.sync({ mode: "live", ref: created.ref });
+    expect(continued.state.pendingQuestions).toHaveLength(1);
+    const continuedId = continued.state.pendingQuestions![0]!.requestId;
+    const lateResponse = {
+      ref: created.ref,
+      requestId: continuedId,
+      response: {
+        kind: "answered" as const,
+        answers: [{ questionId: "late-question", optionIds: ["dsh-option-0-0"] }],
+      },
+    };
+    expect(
+      await client.respondQuestion({ ...lateResponse, idempotencyKey: "host-late-answer" }),
+    ).toEqual({ accepted: true });
+    expect(lateAnswers).toEqual([
+      { callId, answer: { answers: [{ id: "late-question", selected: ["Yes"] }] } },
+    ]);
+    expect((await client.sync({ mode: "live", ref: created.ref })).state.pendingQuestions).toEqual(
+      [],
+    );
+    expect(
+      await client.respondQuestion({ ...lateResponse, idempotencyKey: "host-late-duplicate" }),
+    ).toEqual({ accepted: false });
     expect(deliveries.some((delivery) => delivery.event.type === "host.session.added")).toBe(true);
   } finally {
     removeDeliveries();
@@ -1034,6 +1118,14 @@ test("pushes a catalog row created outside the host to a listening client", asyn
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        userQuestions: {
+          attachWait: () => {
+            throw new Error("Unexpected timed question");
+          },
+          answer: () => {
+            throw new Error("Unexpected continued question");
+          },
+        },
         sessionController: {
           create: async () => {
             throw new Error("unused");
@@ -1201,6 +1293,14 @@ test("reads the full transcript on the first cold sync of a session DSH web crea
   const host = new OrbisRemoteDshHost({
     dsh: {
       context: {
+        userQuestions: {
+          attachWait: () => {
+            throw new Error("Unexpected timed question");
+          },
+          answer: () => {
+            throw new Error("Unexpected continued question");
+          },
+        },
         sessionController: {
           create: async (payload) => {
             const id = String(payload.sessionId);

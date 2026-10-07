@@ -48,6 +48,7 @@ export type {
   DshSessionProjectionRegistry,
   DshSessionProjectionValues,
   DshUserMessage,
+  DshUserQuestions,
   DshUserMessageContent,
   DshWorkspace,
   DshWorkspaceId,

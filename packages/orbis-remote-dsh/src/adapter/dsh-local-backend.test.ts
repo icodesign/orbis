@@ -1,3 +1,7 @@
+import { Context } from "@deepseek-ai/cordis";
+import type { Agent } from "@deepseek-ai/dsh-agent";
+import { ToolCallId } from "@deepseek-ai/dsh-llm";
+import { UserQuestionService } from "@deepseek-ai/dsh-user-questions";
 import {
   agentDriverId,
   agentRunId,
@@ -33,6 +37,7 @@ import {
   type DshPromptReferenceProvider,
   type DshSessionSubagentProvider,
   type DshUserMessage,
+  type DshUserQuestions,
 } from "./dsh-types";
 
 const FIXED_TIME = agentTimestamp("2026-08-10T00:00:00.000Z");
@@ -143,6 +148,7 @@ class TestAgent implements DshAgent {
 
   steer(message: DshUserMessage): void {
     this.steers.push(message);
+    if (message.source?.kind === "user-question-reply") this.inbox.nextStep.push(message);
   }
 }
 
@@ -196,9 +202,20 @@ class TestDsh {
   private interactionAvailable: boolean;
   private readonly materialized = new Set<string>();
 
-  constructor(readonly approvals = false) {
+  constructor(
+    readonly approvals = false,
+    userQuestions: DshUserQuestions = {
+      attachWait: () => {
+        throw new Error("Unexpected timed question");
+      },
+      answer: () => {
+        throw new Error("Unexpected continued question");
+      },
+    },
+  ) {
     this.interactionAvailable = approvals;
     this.context = {
+      userQuestions,
       sessionController: {
         create: async (payload) => {
           this.sessionCreateCalls.push(payload);
@@ -499,6 +516,14 @@ class TestDsh {
         return { answers: [] };
       },
     );
+  }
+
+  receiveQuestion(
+    request: DshQuestionRequest,
+    next: () => Promise<DshQuestionAnswer>,
+  ): Promise<DshQuestionAnswer> {
+    if (this.questionListener === undefined) throw new Error("No DSH question listener");
+    return this.questionListener(request, next);
   }
 
   setInteractionAvailable(available: boolean, sessionId?: string): void {
@@ -2888,5 +2913,313 @@ describe("DSH local backend", () => {
     unobserve();
     testDsh.emit("web-session", event("turn/start", 1, { turn: 2 }));
     expect(changes).toEqual(["web-session"]);
+  });
+});
+
+/** Real upstream wait/answer operations, with only the Agent and Session fixtures substituted. */
+async function nativeQuestionFixture(available = true, ptc = false) {
+  const ctx = new Context();
+  let service: UserQuestionService;
+  const dsh = new TestDsh(true, {
+    attachWait: (agent, callId, signal) =>
+      service.attachWait(agent as Agent, ToolCallId(callId), signal),
+    answer: (agent, callId, answer) =>
+      service.answer(agent as Agent, ToolCallId(callId), {
+        answers: answer.answers.map((item) => ({ ...item, selected: [...item.selected] })),
+      }),
+  });
+  ctx.provide("agents", {
+    get: (id: unknown) => dsh.context.agents.get(id),
+    roots: () => [...dsh.liveAgents.values()],
+  } as unknown as Context["agents"]);
+  ctx.provide("sessionProjections", {
+    register: () => {},
+    stateOf: (session: DshSession) => ({
+      questions: dsh.context.sessionProjections.snapshot(session).values.userQuestions,
+    }),
+  } as unknown as Context["sessionProjections"]);
+  service = new UserQuestionService(ctx);
+  ctx.on(
+    "user-questions/request",
+    async (request, next) => {
+      const answer = await dsh.receiveQuestion(request, next);
+      return { answers: answer.answers.map((item) => ({ ...item, selected: [...item.selected] })) };
+    },
+    { global: true, prepend: true },
+  );
+  dsh.setInteractionAvailable(available);
+  const backend = createBackend(dsh);
+  const record = await backend.createSession({
+    driverId: agentDriverId("dsh"),
+    workspaceRef: "workspace-1",
+  });
+  const runtime = await backend.connectRuntime(record.ref);
+  const events: AgentSessionEvent[] = [];
+  runtime.subscribe((event) => events.push(event));
+  const agent = dsh.agent("created-session");
+  const questions = [
+    { id: "color", question: "Choose a color", options: [{ label: "Blue" }, { label: "Green" }] },
+  ];
+  const callId = ToolCallId("timed-color-call");
+  dsh.emit(
+    "created-session",
+    event("request/header", 0, {
+      header: {
+        config: { model: "test-model", provider: "test-provider" },
+        tools: [
+          {
+            name: "ask_user_question",
+            parameters: { properties: { timeout: { type: "integer" } } },
+          },
+        ],
+      },
+    }),
+  );
+  if (!ptc)
+    dsh.emit(
+      "created-session",
+      event("tool/call", 1, {
+        name: "ask_user_question",
+        callId,
+        arguments: JSON.stringify({ questions }),
+      }),
+    );
+  return {
+    agent,
+    backend,
+    callId,
+    ctx,
+    dsh,
+    events,
+    questions,
+    record,
+    runtime,
+    service,
+    continueQuestion: () =>
+      dsh.emit(
+        "created-session",
+        event("tool/result", 2, {
+          message: {
+            role: "tool",
+            source: { kind: "tool", callId },
+            toolCallId: callId,
+            content: [{ type: "text", text: JSON.stringify({ pending: true, callId }) }],
+          },
+        }),
+      ),
+    close: async () => {
+      await backend.close();
+      await ctx.fiber.dispose();
+    },
+  };
+}
+
+describe("native DSH timed questions", () => {
+  test("recovers a continued PTC sub-call using its native dispatch identity", async () => {
+    const f = await nativeQuestionFixture(false, true);
+    try {
+      f.dsh.emit(
+        "created-session",
+        event("tool/ptc-dispatch", 1, {
+          name: "ask_user_question",
+          subCallId: f.callId,
+          arguments: { questions: f.questions },
+          content: [{ type: "text", text: JSON.stringify({ pending: true, callId: f.callId }) }],
+        }),
+      );
+      const request = (await f.backend.readSession(f.record.ref)).pendingQuestions![0]!;
+      expect(pendingQuestions(f.events)).toEqual([request]);
+      expect(
+        await f.runtime.respondQuestion({
+          requestId: request.requestId,
+          response: {
+            kind: "answered",
+            answers: [{ questionId: "color", customText: "Red", optionIds: [] }],
+          },
+        }),
+      ).toEqual({ accepted: true });
+      expect(JSON.parse((f.agent.steers[0]!.content![0] as { text: string }).text)).toMatchObject({
+        callId: f.callId,
+        answers: [{ id: "color", custom: "Red", selected: [] }],
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("keeps native reply admission exclusive and restores a discarded answer until durable settlement", async () => {
+    const f = await nativeQuestionFixture(false);
+    try {
+      await f.service.askTimed(
+        { agent: f.agent as unknown as Agent, questions: f.questions },
+        f.callId,
+        5,
+      );
+      f.continueQuestion();
+      const requestId = (await f.backend.readSession(f.record.ref)).pendingQuestions![0]!.requestId;
+      const response = {
+        requestId,
+        response: {
+          kind: "answered" as const,
+          answers: [{ questionId: "color", optionIds: ["dsh-option-0-0"] }],
+        },
+      };
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: true });
+      const message = f.agent.inbox.nextStep.shift()!;
+      // Native claims remove the reply from the visible inbox before admission.
+      f.ctx.emit("agent/inbox/claimed", {
+        agent: f.agent as unknown as Agent,
+        message: message as Agent["inbox"]["nextStep"][number],
+        turn: 1,
+      });
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: false });
+      expect(f.agent.steers).toHaveLength(1);
+      f.ctx.emit("agent/inbox/discarded", {
+        agent: f.agent as unknown as Agent,
+        message: message as Agent["inbox"]["nextStep"][number],
+      });
+      expect((await f.backend.readSession(f.record.ref)).pendingQuestions).toHaveLength(1);
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: true });
+      const admitted = f.agent.inbox.nextStep.shift()!;
+      f.dsh.emit("created-session", event("user/message", 3, admitted));
+      expect(pendingQuestions(f.events)).toEqual([]);
+      expect((await f.backend.readSession(f.record.ref)).pendingQuestions).toEqual([]);
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: false });
+      await f.backend.close();
+      const restarted = createBackend(f.dsh);
+      try {
+        expect((await restarted.readSession(f.record.ref)).pendingQuestions).toEqual([]);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("holds a mobile question beyond the unattended deadline and releases the claim after answering", async () => {
+    const f = await nativeQuestionFixture();
+    try {
+      let settled = false;
+      const ask = f.service
+        .askTimed({ agent: f.agent as unknown as Agent, questions: f.questions }, f.callId, 60)
+        .finally(() => {
+          settled = true;
+        });
+      await waitFor(() => pendingQuestions(f.events).length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(settled).toBe(false);
+      const request = pendingQuestions(f.events)[0]!;
+      expect(
+        await f.runtime.respondQuestion({
+          requestId: request.requestId,
+          response: {
+            kind: "answered",
+            answers: [{ questionId: "color", optionIds: ["dsh-option-0-0"] }],
+          },
+        }),
+      ).toEqual({ accepted: true });
+      expect(await ask).toEqual({ answers: [{ id: "color", selected: ["Blue"] }] });
+      expect(pendingQuestions(f.events)).toEqual([]);
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("recovers a desktop timed question after timeout, then submits a native late reply once", async () => {
+    const f = await nativeQuestionFixture(false);
+    try {
+      expect(
+        await f.service.askTimed(
+          { agent: f.agent as unknown as Agent, questions: f.questions },
+          f.callId,
+          10,
+        ),
+      ).toEqual({ pending: true, callId: f.callId });
+      f.continueQuestion();
+      f.dsh.setInteractionAvailable(true);
+      const projection = await f.backend.readSession(f.record.ref);
+      expect(projection.pendingQuestions).toHaveLength(1);
+      const request = projection.pendingQuestions[0]!;
+      const response = {
+        requestId: request.requestId,
+        response: {
+          kind: "answered" as const,
+          answers: [{ questionId: "color", optionIds: ["dsh-option-0-1"] }],
+        },
+      };
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: true });
+      expect(f.agent.steers).toHaveLength(1);
+      expect(f.agent.steers[0]?.source).toMatchObject({
+        kind: "user-question-reply",
+        callId: f.callId,
+      });
+      const text = (f.agent.steers[0]!.content![0] as { text: string }).text;
+      expect(JSON.parse(text)).toMatchObject({ answers: [{ id: "color", selected: ["Green"] }] });
+      expect((await f.backend.readSession(f.record.ref)).pendingQuestions).toEqual([]);
+      expect(pendingQuestions(f.events)).toEqual([]);
+      expect(await f.runtime.respondQuestion(response)).toEqual({ accepted: false });
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("releases the mobile wait on disconnect and restores the same request identity after timeout and backend recreation", async () => {
+    const f = await nativeQuestionFixture();
+    try {
+      const ask = f.service.askTimed(
+        { agent: f.agent as unknown as Agent, questions: f.questions },
+        f.callId,
+        40,
+      );
+      await waitFor(() => pendingQuestions(f.events).length === 1);
+      const requestId = pendingQuestions(f.events)[0]!.requestId;
+      f.dsh.setInteractionAvailable(false);
+      expect(await ask).toEqual({ pending: true, callId: f.callId });
+      f.continueQuestion();
+      await f.backend.close();
+      const restarted = createBackend(f.dsh);
+      try {
+        // No controller exists yet: this exercises the native cold read cut.
+        const snapshot = await restarted.readSession(f.record.ref);
+        expect(snapshot.pendingQuestions?.[0]?.requestId).toBe(requestId);
+        f.dsh.setInteractionAvailable(true);
+        const runtime = await restarted.connectRuntime(f.record.ref);
+        expect(
+          await runtime.respondQuestion({
+            requestId,
+            response: {
+              kind: "answered",
+              answers: [{ questionId: "color", optionIds: [] }],
+            },
+          }),
+        ).toEqual({ accepted: true });
+        expect(f.agent.steers).toHaveLength(1);
+      } finally {
+        await restarted.close();
+      }
+    } finally {
+      await f.close();
+    }
+  });
+
+  test("does not translate cancellation of a continued question into a skipped answer", async () => {
+    const f = await nativeQuestionFixture(false);
+    try {
+      await f.service.askTimed(
+        { agent: f.agent as unknown as Agent, questions: f.questions },
+        f.callId,
+        5,
+      );
+      f.continueQuestion();
+      const requestId = (await f.backend.readSession(f.record.ref)).pendingQuestions![0]!.requestId;
+      await expect(
+        f.runtime.respondQuestion({ requestId, response: { kind: "cancelled" } }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      expect(f.agent.steers).toEqual([]);
+      expect((await f.backend.readSession(f.record.ref)).pendingQuestions).toHaveLength(1);
+    } finally {
+      await f.close();
+    }
   });
 });
