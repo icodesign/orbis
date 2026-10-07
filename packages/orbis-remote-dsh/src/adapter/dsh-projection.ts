@@ -32,6 +32,7 @@ import {
   type AgentUsage,
 } from "@orbisapp/orbis-agent-backend";
 
+import { isDshQuestionCall, projectDshContinuedQuestions } from "./dsh-question-projection";
 import type {
   DshSessionEvent,
   DshSessionInspection,
@@ -811,6 +812,9 @@ export function readDshSessionProjection(
     }),
     ...(run.lastRun === undefined ? {} : { lastRun: run.lastRun }),
     mode: state.mode,
+    pendingQuestions: projectDshContinuedQuestions(inspection.projections, (callId) =>
+      inspection.events.findLast((event) => isDshQuestionCall(event, callId)),
+    ),
     revision: inspection.events.length,
     state: run.state,
     workState: state.workState,

@@ -202,10 +202,11 @@ Every candidate must complete the pinned host handshake before it can connect.
    DSH Web for mobile because `orbis.sessions.create` requires an opaque
    registered `workspaceRef`.
 
-On open, Orbis renders its encrypted per-host cache first and makes exactly one
-`once` snapshot/replay refresh. It retains `live` delivery only for the session
-where this phone submitted an unfinished run; navigating to another session or
-away from the chat removes only the UI observer, never cancels that DSH run.
+On open, Orbis renders its encrypted per-host cache first and keeps a `live`
+subscription while the chat is mounted, including desktop-started sessions.
+A phone-submitted unfinished run also retains live delivery after navigating
+away. Detaching the last subscriber releases remote interaction ownership;
+it never cancels the DSH run.
 
 The present mobile configuration intentionally does not enable broad Android
 cleartext traffic. Therefore validate this plain-LAN `ws://` path on iOS; an
@@ -266,6 +267,25 @@ catalog never opens a historical transcript just to list it.
 Closing a mobile page or an encrypted socket only detaches the remote observer;
 it never cancels/disposes a DSH run. Only plugin/host shutdown closes the
 owned DSH controllers.
+
+## Ask User questions
+
+The plugin claims new questions while their session has a live subscriber.
+For DSH's opt-in timed questions, it attaches to the native wait so the
+unattended deadline pauses while the phone owns the question. Detaching the
+last subscriber releases that wait and delegates to the next native answerer.
+
+Timed questions that have already continued after a timeout or session repair
+are recovered from DSH's durable `userQuestions` projection, including after
+reconnect or plugin restart. Replies use the native question service and agent
+inbox. A queued reply hides the question until admission; discarding the reply
+makes it answerable again. Continued questions support answering or skipping;
+DSH does not provide cancellation for them.
+
+A still-open question already held by the desktop cannot be transferred through
+DSH's current API. Ordinary indefinite questions have no durable continued
+state, so opening the phone later cannot recover them. This requires an upstream
+shared ownership/answer contract.
 
 ## Real DSH profile E2E (explicit opt-in)
 

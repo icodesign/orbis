@@ -148,6 +148,7 @@ export interface DshSessionReader {
 export interface DshUserMessage {
   readonly content?: readonly unknown[];
   readonly id: unknown;
+  readonly source?: { readonly kind: string; readonly callId?: string };
 }
 
 /** DSH's provider-neutral durable image reference. */
@@ -262,10 +263,27 @@ export interface DshQuestionRequest {
   readonly agent?: DshAgent;
   readonly questions: readonly DshQuestionItem[];
   readonly signal?: AbortSignal;
+  readonly wait?: { readonly callId: string; readonly timed?: boolean };
 }
 
 export interface DshQuestionAnswer {
   readonly answers: readonly DshQuestionAnswerItem[];
+}
+
+/** Native business operations; DSH owns foreground waits and admitted late replies. */
+export interface DshUserQuestions {
+  attachWait(
+    agent: DshAgent,
+    callId: string,
+    signal: AbortSignal,
+  ): AsyncIterable<{ readonly remainingMs: number }>;
+  answer(agent: DshAgent, callId: string, answer: DshQuestionAnswer): boolean;
+}
+
+export interface DshProjectedQuestion {
+  readonly callId: string;
+  readonly questions: readonly DshQuestionItem[];
+  readonly state: "open" | "continued";
 }
 
 /** Host-owned presence seam used to claim DSH interactions only while Orbis can answer. */
@@ -297,6 +315,10 @@ export interface DshSessionController {
 
 /** Native domain values; optional keys mean the owning plugin is not installed. */
 export interface DshSessionProjectionValues {
+  readonly userQuestions?: {
+    readonly active: readonly DshProjectedQuestion[];
+    readonly settled: readonly unknown[];
+  };
   readonly plan?: { readonly active: boolean; readonly pending: boolean };
   readonly goal?: unknown;
   readonly todos?: unknown;
@@ -396,6 +418,7 @@ export type DshAssistantStreamFrame =
 
 export interface DshContext {
   readonly agents: DshAgentRegistry;
+  readonly userQuestions: DshUserQuestions;
   readonly planMode?: DshSessionModeProvider;
   readonly sessionController: DshSessionController;
   readonly sessionReader: DshSessionReader;

@@ -15,7 +15,7 @@ import type {} from "@deepseek-ai/dsh-file-reference";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import type { DirectoryPickerBrowseCapability } from "@deepseek-ai/dsh-host-directory-picker";
 import type {} from "@deepseek-ai/dsh-host-webserver";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, ToolCallId } from "@deepseek-ai/dsh-llm";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm/types";
 import type {} from "@deepseek-ai/dsh-plan-mode";
 import { scopeTarget } from "@deepseek-ai/dsh-scope";
@@ -45,6 +45,7 @@ import type {
   DshSessionModeProvider,
   DshSessionPermissionProvider,
   DshSessionSubagentProvider,
+  DshUserQuestions,
 } from "../adapter";
 import { OrbisRemoteDshHost, type OrbisRemoteDshHostDshOptions } from "../host";
 import { ORBIS_DSH_DRIVER_VERSION } from "./constants";
@@ -341,6 +342,14 @@ function createOrbisDshContext(context: Context): OrbisRemoteDshHostDshOptions["
   const planMode = dshPlanMode(context);
   return {
     agents: context.agents,
+    userQuestions: {
+      attachWait: (agent, callId, signal) =>
+        context.userQuestions.attachWait(agent as Agent, ToolCallId(callId), signal),
+      answer: (agent, callId, answer) =>
+        context.userQuestions.answer(agent as Agent, ToolCallId(callId), {
+          answers: answer.answers.map((item) => ({ ...item, selected: [...item.selected] })),
+        }),
+    } satisfies DshUserQuestions,
     ...(planMode === undefined ? {} : { planMode }),
     on: context.on.bind(context),
     sessionController: (context as unknown as { readonly sessionController: unknown })
